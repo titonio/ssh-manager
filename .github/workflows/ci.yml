@@ -1,0 +1,156 @@
+name: Rust CI/CD
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        components: rustfmt, clippy
+        override: true
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    - name: Check formatting
+      run: cargo fmt -- --check
+
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features
+
+  test:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    - name: Run tests
+      run: cargo test --all-features
+
+  coverage:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+
+    - name: Install cargo-llvm-cov
+      uses: taiki-e/install-action@cargo-llvm-cov
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+
+    - name: Generate coverage with 80% threshold
+      run: |
+        cargo llvm-cov --all-features \
+          --fail-under-lines 80 \
+          --fail-under-functions 80 \
+          --lcov --output-path lcov.info
+
+    - name: Upload coverage artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: lcov.info
+
+  security:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Security audit
+      uses: actions-rs/audit-check@v1
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, coverage, security]
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            binary_name: sshm
+            use_strip: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: sshm
+            use_strip: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: sshm.exe
+            use_strip: false
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        target: ${{ matrix.target }}
+        override: true
+
+    - name: Install musl tools (Linux)
+      if: matrix.target == 'x86_64-unknown-linux-musl'
+      run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: sshm
+
+    - name: Build release
+      run: cargo build --release --target ${{ matrix.target }} --manifest-path sshm/Cargo.toml
+
+    - name: Strip binary
+      if: matrix.use_strip == 'true'
+      run: |
+        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+          strip sshm/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+        else
+          strip -S sshm/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+        fi
+
+    - name: Upload release asset
+      uses: softprops/action-gh-release@v1
+      with:
+        files: sshm/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
