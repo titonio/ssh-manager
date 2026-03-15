@@ -1,0 +1,28 @@
+---
+source: tests/integration_test.rs
+expression: backend
+---
+"                                                                                "
+"                                                                                "
+"               ╭ Help ──────────────────────────────────────────╮               "
+"               │                                                │               "
+"               │  SSH Connection Manager - Keyboard Shortcuts   │               "
+"               │                                                │               "
+"               │  Navigation                                    │               "
+"               │    ↑↓ or j/k   Move up/down in list            │               "
+"               │    g            Go to first item               │               "
+"               │    G            Go to last item                │               "
+"               │    Enter        Connect to selected server     │               "
+"               │                                                │               "
+"               │  Actions                                       │               "
+"               │    a            Add new connection             │               "
+"               │    e            Edit selected connection       │               "
+"               │    d            Delete selected connection     │               "
+"               │    i            Import from ~/.ssh/config      │               "
+"               │    /            Search/filter connections      │               "
+"               │    ?            Show this help menu            │               "
+"               │                                                │               "
+"               │  General                                       │               "
+"               ╰────────────────────────────────────────────────╯               "
+"                                                                                "
+"                                                                                "

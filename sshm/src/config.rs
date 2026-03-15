@@ -28,27 +28,6 @@ impl Connection {
             folder: None,
         }
     }
-
-    #[cfg(test)]
-    pub fn new_with_id(
-        id: String,
-        alias: String,
-        host: String,
-        user: String,
-        port: u16,
-        key_path: Option<String>,
-        folder: Option<String>,
-    ) -> Self {
-        Self {
-            id,
-            alias,
-            host,
-            user,
-            port,
-            key_path,
-            folder,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -85,16 +64,6 @@ impl Config {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub fn save_to_path(&self, path: &PathBuf) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-        }
-        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        fs::write(path, json).map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
     fn config_path() -> PathBuf {
         let home = dirs::home_dir().expect("Could not find home directory");
         home.join(".ssh").join("connections.json")
@@ -112,11 +81,6 @@ impl Config {
         if let Some(idx) = self.connections.iter().position(|c| c.id == connection.id) {
             self.connections[idx] = connection;
         }
-    }
-
-    #[cfg(test)]
-    pub fn from_connections(connections: Vec<Connection>) -> Self {
-        Self { connections }
     }
 }
 
@@ -218,8 +182,6 @@ pub fn import_from_ssh_config(config: &mut Config) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::TempDir;
 
     #[test]
     fn test_connection_new() {
@@ -238,15 +200,15 @@ mod tests {
 
     #[test]
     fn test_connection_with_all_fields() {
-        let conn = Connection::new_with_id(
-            "id1".to_string(),
-            "prod".to_string(),
-            "server.example.com".to_string(),
-            "admin".to_string(),
-            2222,
-            Some("/path/to/key".to_string()),
-            Some("production".to_string()),
-        );
+        let conn = Connection {
+            id: "id1".to_string(),
+            alias: "prod".to_string(),
+            host: "server.example.com".to_string(),
+            user: "admin".to_string(),
+            port: 2222,
+            key_path: Some("/path/to/key".to_string()),
+            folder: Some("production".to_string()),
+        };
         assert_eq!(conn.id, "id1");
         assert_eq!(conn.alias, "prod");
         assert_eq!(conn.host, "server.example.com");
@@ -264,25 +226,25 @@ mod tests {
 
     #[test]
     fn test_config_from_connections() {
-        let conn1 = Connection::new_with_id(
-            "1".to_string(),
-            "a".to_string(),
-            "h1".to_string(),
-            "u1".to_string(),
-            22,
-            None,
-            None,
-        );
-        let conn2 = Connection::new_with_id(
-            "2".to_string(),
-            "b".to_string(),
-            "h2".to_string(),
-            "u2".to_string(),
-            22,
-            None,
-            None,
-        );
-        let config = Config::from_connections(vec![conn1, conn2]);
+        let mut config = Config::new();
+        config.add_connection(Connection {
+            id: "1".to_string(),
+            alias: "a".to_string(),
+            host: "h1".to_string(),
+            user: "u1".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
+        config.add_connection(Connection {
+            id: "2".to_string(),
+            alias: "b".to_string(),
+            host: "h2".to_string(),
+            user: "u2".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
         assert_eq!(config.connections.len(), 2);
     }
 
@@ -301,16 +263,15 @@ mod tests {
     #[test]
     fn test_remove_connection() {
         let mut config = Config::new();
-        let conn = Connection::new_with_id(
-            "test-id".to_string(),
-            "test".to_string(),
-            "192.168.1.1".to_string(),
-            "user".to_string(),
-            22,
-            None,
-            None,
-        );
-        config.add_connection(conn);
+        config.add_connection(Connection {
+            id: "test-id".to_string(),
+            alias: "test".to_string(),
+            host: "192.168.1.1".to_string(),
+            user: "user".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
         assert_eq!(config.connections.len(), 1);
 
         config.remove_connection("test-id");
@@ -320,16 +281,15 @@ mod tests {
     #[test]
     fn test_remove_connection_not_found() {
         let mut config = Config::new();
-        let conn = Connection::new_with_id(
-            "test-id".to_string(),
-            "test".to_string(),
-            "192.168.1.1".to_string(),
-            "user".to_string(),
-            22,
-            None,
-            None,
-        );
-        config.add_connection(conn);
+        config.add_connection(Connection {
+            id: "test-id".to_string(),
+            alias: "test".to_string(),
+            host: "192.168.1.1".to_string(),
+            user: "user".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
 
         config.remove_connection("non-existent-id");
         assert_eq!(config.connections.len(), 1);
@@ -338,27 +298,25 @@ mod tests {
     #[test]
     fn test_update_connection() {
         let mut config = Config::new();
-        let conn = Connection::new_with_id(
-            "test-id".to_string(),
-            "test".to_string(),
-            "192.168.1.1".to_string(),
-            "user".to_string(),
-            22,
-            None,
-            None,
-        );
-        config.add_connection(conn);
+        config.add_connection(Connection {
+            id: "test-id".to_string(),
+            alias: "test".to_string(),
+            host: "192.168.1.1".to_string(),
+            user: "user".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
 
-        let updated = Connection::new_with_id(
-            "test-id".to_string(),
-            "updated".to_string(),
-            "192.168.1.2".to_string(),
-            "admin".to_string(),
-            2222,
-            None,
-            None,
-        );
-        config.update_connection(updated);
+        config.update_connection(Connection {
+            id: "test-id".to_string(),
+            alias: "updated".to_string(),
+            host: "192.168.1.2".to_string(),
+            user: "admin".to_string(),
+            port: 2222,
+            key_path: None,
+            folder: None,
+        });
 
         assert_eq!(config.connections.len(), 1);
         assert_eq!(config.connections[0].alias, "updated");
@@ -368,27 +326,25 @@ mod tests {
     #[test]
     fn test_update_connection_not_found() {
         let mut config = Config::new();
-        let conn = Connection::new_with_id(
-            "test-id".to_string(),
-            "test".to_string(),
-            "192.168.1.1".to_string(),
-            "user".to_string(),
-            22,
-            None,
-            None,
-        );
-        config.add_connection(conn);
+        config.add_connection(Connection {
+            id: "test-id".to_string(),
+            alias: "test".to_string(),
+            host: "192.168.1.1".to_string(),
+            user: "user".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
 
-        let updated = Connection::new_with_id(
-            "other-id".to_string(),
-            "updated".to_string(),
-            "192.168.1.2".to_string(),
-            "admin".to_string(),
-            2222,
-            None,
-            None,
-        );
-        config.update_connection(updated);
+        config.update_connection(Connection {
+            id: "other-id".to_string(),
+            alias: "updated".to_string(),
+            host: "192.168.1.2".to_string(),
+            user: "admin".to_string(),
+            port: 2222,
+            key_path: None,
+            folder: None,
+        });
 
         assert_eq!(config.connections.len(), 1);
         assert_eq!(config.connections[0].alias, "test");
@@ -414,35 +370,34 @@ mod tests {
 
     #[test]
     fn test_folder_sorted() {
-        let conn1 = Connection::new_with_id(
-            "1".to_string(),
-            "a".to_string(),
-            "h1".to_string(),
-            "u1".to_string(),
-            22,
-            None,
-            Some("zebra".to_string()),
-        );
-        let conn2 = Connection::new_with_id(
-            "2".to_string(),
-            "b".to_string(),
-            "h2".to_string(),
-            "u2".to_string(),
-            22,
-            None,
-            Some("apple".to_string()),
-        );
-        let conn3 = Connection::new_with_id(
-            "3".to_string(),
-            "c".to_string(),
-            "h3".to_string(),
-            "u3".to_string(),
-            22,
-            None,
-            Some("banana".to_string()),
-        );
-
-        let config = Config::from_connections(vec![conn1, conn2, conn3]);
+        let mut config = Config::new();
+        config.add_connection(Connection {
+            id: "1".to_string(),
+            alias: "a".to_string(),
+            host: "h1".to_string(),
+            user: "u1".to_string(),
+            port: 22,
+            key_path: None,
+            folder: Some("zebra".to_string()),
+        });
+        config.add_connection(Connection {
+            id: "2".to_string(),
+            alias: "b".to_string(),
+            host: "h2".to_string(),
+            user: "u2".to_string(),
+            port: 22,
+            key_path: None,
+            folder: Some("apple".to_string()),
+        });
+        config.add_connection(Connection {
+            id: "3".to_string(),
+            alias: "c".to_string(),
+            host: "h3".to_string(),
+            user: "u3".to_string(),
+            port: 22,
+            key_path: None,
+            folder: Some("banana".to_string()),
+        });
 
         // Test that we can access folder information directly from connections
         let folders: Vec<String> = config
@@ -490,26 +445,26 @@ mod tests {
 
     #[test]
     fn test_config_with_multiple_connections_serialize() {
-        let conn1 = Connection::new_with_id(
-            "1".to_string(),
-            "a".to_string(),
-            "h1".to_string(),
-            "u1".to_string(),
-            22,
-            None,
-            None,
-        );
-        let conn2 = Connection::new_with_id(
-            "2".to_string(),
-            "b".to_string(),
-            "h2".to_string(),
-            "u2".to_string(),
-            22,
-            None,
-            None,
-        );
+        let mut config = Config::new();
+        config.add_connection(Connection {
+            id: "1".to_string(),
+            alias: "a".to_string(),
+            host: "h1".to_string(),
+            user: "u1".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
+        config.add_connection(Connection {
+            id: "2".to_string(),
+            alias: "b".to_string(),
+            host: "h2".to_string(),
+            user: "u2".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
 
-        let config = Config::from_connections(vec![conn1, conn2]);
         let json = serde_json::to_string(&config).unwrap();
 
         assert!(json.contains("connections"));
@@ -557,15 +512,15 @@ mod tests {
 
     #[test]
     fn test_connection_with_key_path_serialize() {
-        let conn = Connection::new_with_id(
-            "1".to_string(),
-            "test".to_string(),
-            "host".to_string(),
-            "user".to_string(),
-            22,
-            Some("/key".to_string()),
-            None,
-        );
+        let conn = Connection {
+            id: "1".to_string(),
+            alias: "test".to_string(),
+            host: "host".to_string(),
+            user: "user".to_string(),
+            port: 22,
+            key_path: Some("/key".to_string()),
+            folder: None,
+        };
 
         let json = serde_json::to_string(&conn).unwrap();
 

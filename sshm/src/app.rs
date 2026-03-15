@@ -37,17 +37,17 @@ pub enum AppMode {
 }
 
 pub struct App {
-    config: Config,
-    selected_index: usize,
-    search_query: String,
-    mode: AppMode,
-    matcher: SkimMatcherV2,
-    filtered_indices: Vec<usize>,
-    message: Option<String>,
-    input_buffer: InputBuffer,
-    input_field: usize,
+    pub config: Config,
+    pub selected_index: usize,
+    pub search_query: String,
+    pub mode: AppMode,
+    pub matcher: SkimMatcherV2,
+    pub filtered_indices: Vec<usize>,
+    pub message: Option<String>,
+    pub input_buffer: InputBuffer,
+    pub input_field: usize,
     pub should_connect: Option<Connection>,
-    ctrl_c_count: usize,
+    pub ctrl_c_count: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -180,7 +180,7 @@ impl App {
             .split(layout[1])[1]
     }
 
-    fn render_popup(&self, f: &mut Frame, message: &str) {
+    pub fn render_popup(&self, f: &mut Frame, message: &str) {
         let area = self.centered_rect(40, 5, f.area());
         let block = Block::default()
             .title(" Message ")
@@ -573,7 +573,7 @@ impl App {
         }
     }
 
-    fn update_filter(&mut self) {
+    pub fn update_filter(&mut self) {
         if self.search_query.is_empty() {
             self.filtered_indices = (0..self.config.connections.len()).collect();
         } else {
@@ -601,7 +601,7 @@ impl App {
         }
     }
 
-    fn render(&self, f: &mut Frame) {
+    pub fn render(&self, f: &mut Frame) {
         match self.mode {
             AppMode::Help => {
                 self.render_help(f);
@@ -747,7 +747,7 @@ impl App {
         f.render_widget(paragraph, area);
     }
 
-    fn render_input(&self, f: &mut Frame) {
+    pub fn render_input(&self, f: &mut Frame) {
         let area = self.centered_rect(60, 12, f.area());
 
         let bg = Color::Rgb(46, 52, 64);
@@ -827,7 +827,7 @@ impl App {
         f.render_widget(hint, hint_area);
     }
 
-    fn render_search(&self, f: &mut Frame, area: Rect) {
+    pub fn render_search(&self, f: &mut Frame, area: Rect) {
         let area = self.centered_rect(40, 3, area);
 
         let block = Block::default()
@@ -846,7 +846,7 @@ impl App {
         f.render_widget(paragraph, area);
     }
 
-    fn render_search_bar(&self, f: &mut Frame, area: Rect) {
+    pub fn render_search_bar(&self, f: &mut Frame, area: Rect) {
         let block = Block::default()
             .title(" Search ")
             .borders(Borders::ALL)
@@ -877,7 +877,7 @@ impl App {
         f.render_widget(paragraph, inner_area);
     }
 
-    fn render_help(&self, f: &mut Frame) {
+    pub fn render_help(&self, f: &mut Frame) {
         let area = f.area();
 
         let help_text = r#"
@@ -934,35 +934,34 @@ mod tests {
     use crate::config::Connection;
 
     fn create_test_app() -> App {
-        let config = Config::from_connections(vec![
-            Connection::new_with_id(
-                "1".to_string(),
-                "prod-server".to_string(),
-                "192.168.1.10".to_string(),
-                "admin".to_string(),
-                22,
-                None,
-                Some("production".to_string()),
-            ),
-            Connection::new_with_id(
-                "2".to_string(),
-                "dev-server".to_string(),
-                "192.168.1.20".to_string(),
-                "developer".to_string(),
-                2222,
-                None,
-                Some("development".to_string()),
-            ),
-            Connection::new_with_id(
-                "3".to_string(),
-                "web-server".to_string(),
-                "example.com".to_string(),
-                "www".to_string(),
-                22,
-                None,
-                None,
-            ),
-        ]);
+        let mut config = Config::new();
+        config.add_connection(Connection {
+            id: "1".to_string(),
+            alias: "prod-server".to_string(),
+            host: "192.168.1.10".to_string(),
+            user: "admin".to_string(),
+            port: 22,
+            key_path: None,
+            folder: Some("production".to_string()),
+        });
+        config.add_connection(Connection {
+            id: "2".to_string(),
+            alias: "dev-server".to_string(),
+            host: "192.168.1.20".to_string(),
+            user: "developer".to_string(),
+            port: 2222,
+            key_path: None,
+            folder: Some("development".to_string()),
+        });
+        config.add_connection(Connection {
+            id: "3".to_string(),
+            alias: "web-server".to_string(),
+            host: "example.com".to_string(),
+            user: "www".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
 
         App {
             config,
@@ -1011,15 +1010,15 @@ mod tests {
 
     #[test]
     fn test_input_buffer_from_connection() {
-        let conn = Connection::new_with_id(
-            "id1".to_string(),
-            "my-server".to_string(),
-            "192.168.1.100".to_string(),
-            "admin".to_string(),
-            2222,
-            Some("/path/to/key".to_string()),
-            Some("production".to_string()),
-        );
+        let conn = Connection {
+            id: "id1".to_string(),
+            alias: "my-server".to_string(),
+            host: "192.168.1.100".to_string(),
+            user: "admin".to_string(),
+            port: 2222,
+            key_path: Some("/path/to/key".to_string()),
+            folder: Some("production".to_string()),
+        };
 
         let buf = InputBuffer::from_connection(&conn);
 
@@ -1033,15 +1032,15 @@ mod tests {
 
     #[test]
     fn test_input_buffer_from_connection_defaults() {
-        let conn = Connection::new_with_id(
-            "id1".to_string(),
-            "server".to_string(),
-            "192.168.1.1".to_string(),
-            "user".to_string(),
-            22,
-            None,
-            None,
-        );
+        let conn = Connection {
+            id: "id1".to_string(),
+            alias: "server".to_string(),
+            host: "192.168.1.1".to_string(),
+            user: "user".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        };
 
         let buf = InputBuffer::from_connection(&conn);
 
