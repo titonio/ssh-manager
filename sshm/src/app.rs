@@ -47,6 +47,7 @@ pub struct App {
     input_buffer: InputBuffer,
     input_field: usize,
     pub should_connect: Option<Connection>,
+    ctrl_c_count: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -97,6 +98,7 @@ impl App {
             input_buffer: InputBuffer::default(),
             input_field: 0,
             should_connect: None,
+            ctrl_c_count: 0,
         }
     }
 
@@ -107,7 +109,9 @@ impl App {
             terminal.draw(|f| self.render(f))?;
 
             if let Some(msg) = self.message.take() {
-                self.show_message(&mut terminal, &msg)?;
+                if !self.show_message(&mut terminal, &msg)? {
+                    return Ok(false);
+                }
                 continue;
             }
 
@@ -124,7 +128,7 @@ impl App {
         }
     }
 
-    fn show_message(&mut self, terminal: &mut DefaultTerminal, message: &str) -> io::Result<()> {
+    fn show_message(&mut self, terminal: &mut DefaultTerminal, message: &str) -> io::Result<bool> {
         loop {
             terminal.draw(|f| {
                 self.render(f); // Render normal interface first
@@ -132,7 +136,19 @@ impl App {
             })?;
 
             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                if key.code == crossterm::event::KeyCode::Enter
+                // Handle special case: if we're waiting for second Ctrl+C to exit
+                if message == "Press Ctrl+C again to exit"
+                    && key.code == crossterm::event::KeyCode::Char('c')
+                {
+                    // We need to handle this like in handle_normal_mode
+                    self.ctrl_c_count += 1;
+                    if self.ctrl_c_count >= 2 {
+                        return Ok(false);
+                    } else {
+                        // This shouldn't happen in this context, but just in case
+                        self.message = Some("Press Ctrl+C again to exit".to_string());
+                    }
+                } else if key.code == crossterm::event::KeyCode::Enter
                     || key.code == crossterm::event::KeyCode::Esc
                     || key.code == crossterm::event::KeyCode::Char('q')
                 {
@@ -141,7 +157,7 @@ impl App {
                 }
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     fn centered_rect(&self, width: u16, height: u16, area: Rect) -> Rect {
@@ -185,26 +201,69 @@ impl App {
                     if self.selected_index > 0 {
                         self.selected_index -= 1;
                     }
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
                 crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
                     let len = self.filtered_indices.len();
                     if self.selected_index < len.saturating_sub(1) {
                         self.selected_index += 1;
                     }
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
                 crossterm::event::KeyCode::Enter => {
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                     self.connect();
                     return Ok(Some(true));
                 }
-                crossterm::event::KeyCode::Char('q') => {
-                    return Ok(Some(false));
+                crossterm::event::KeyCode::Char('c')
+                    if key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
+                {
+                    // Handle Ctrl+C for quit (need to press twice)
+                    self.ctrl_c_count += 1;
+                    if self.ctrl_c_count >= 2 {
+                        return Ok(Some(false));
+                    } else {
+                        // Show message that another Ctrl+C will exit
+                        self.message = Some("Press Ctrl+C again to exit".to_string());
+                    }
                 }
                 crossterm::event::KeyCode::Char('a') => {
+                    if !self.search_query.is_empty() {
+                        self.search_query.push('a');
+                        self.update_filter();
+                    }
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
+                }
+                crossterm::event::KeyCode::Char('e') => {
+                    if !self.search_query.is_empty() {
+                        self.search_query.push('e');
+                        self.update_filter();
+                    }
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
+                }
+                crossterm::event::KeyCode::Char('d') => {
+                    if !self.search_query.is_empty() {
+                        self.search_query.push('d');
+                        self.update_filter();
+                    }
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
+                }
+                crossterm::event::KeyCode::Char('i') => {
+                    if !self.search_query.is_empty() {
+                        self.search_query.push('i');
+                        self.update_filter();
+                    }
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
+                }
+                crossterm::event::KeyCode::Char('A') => {
                     self.mode = AppMode::Add;
                     self.input_buffer.clear();
                     self.input_field = 0;
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char('e') => {
+                crossterm::event::KeyCode::Char('E') => {
                     if let Some(&idx) = self.filtered_indices.get(self.selected_index) {
                         if let Some(conn) = self.config.connections.get(idx) {
                             self.input_buffer = InputBuffer::from_connection(conn);
@@ -212,32 +271,56 @@ impl App {
                             self.input_field = 0;
                         }
                     }
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char('d') => {
+                crossterm::event::KeyCode::Char('D') => {
                     self.delete_connection();
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char('i') => {
+                crossterm::event::KeyCode::Char('I') => {
                     self.import_connections();
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char('/') | crossterm::event::KeyCode::Char('f') => {
+                crossterm::event::KeyCode::Char('/') => {
                     self.mode = AppMode::Search;
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
                 crossterm::event::KeyCode::Char('?') => {
                     self.mode = AppMode::Help;
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
                 crossterm::event::KeyCode::Home => {
                     self.selected_index = 0;
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
                 crossterm::event::KeyCode::End => {
                     self.selected_index = self.filtered_indices.len().saturating_sub(1);
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
                 crossterm::event::KeyCode::Char('g') => {
                     self.selected_index = 0;
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
                 crossterm::event::KeyCode::Char('G') => {
                     self.selected_index = self.filtered_indices.len().saturating_sub(1);
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                _ => {}
+                crossterm::event::KeyCode::Backspace => {
+                    if !self.search_query.is_empty() {
+                        self.search_query.pop();
+                        self.update_filter();
+                    }
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
+                }
+                crossterm::event::KeyCode::Char(c) => {
+                    // Handle printable characters for search
+                    self.search_query.push(c);
+                    self.update_filter();
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
+                }
+                _ => {
+                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
+                }
             }
         }
         Ok(None)
@@ -531,14 +614,16 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3),
+                Constraint::Length(3),
                 Constraint::Min(0),
                 Constraint::Length(3),
             ])
             .split(f.area());
 
         self.render_header(f, chunks[0]);
-        self.render_list(f, chunks[1]);
-        self.render_footer(f, chunks[2]);
+        self.render_search_bar(f, chunks[1]);
+        self.render_list(f, chunks[2]);
+        self.render_footer(f, chunks[3]);
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect) {
@@ -643,7 +728,7 @@ impl App {
 
     fn render_footer(&self, f: &mut Frame, area: Rect) {
         let help_text = match self.mode {
-            AppMode::Normal => "↑↓/j k: Navigate | Enter: Connect | a: Add | e: Edit | d: Delete | i: Import | /: Search | ?: Help | q: Quit",
+            AppMode::Normal => "↑↓/j k: Navigate | Enter: Connect | A: Add | E: Edit | D: Delete | I: Import | /: Search | ?: Help | Ctrl+C x2: Quit",
             AppMode::Add | AppMode::Edit => "Type text | Tab: Next field | Enter: Save | Esc/q: Cancel | ←: Backspace",
             AppMode::Search => "Type to filter | Enter/Esc/q: Exit search",
             AppMode::Help => "Press Esc or q to return",
@@ -761,6 +846,37 @@ impl App {
         f.render_widget(paragraph, area);
     }
 
+    fn render_search_bar(&self, f: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .title(" Search ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Rgb(235, 203, 139)))
+            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
+
+        let text = if self.search_query.is_empty() {
+            "Type to search...".to_string()
+        } else {
+            self.search_query.clone()
+        };
+        let paragraph =
+            Paragraph::new(text).style(Style::default().fg(if self.search_query.is_empty() {
+                Color::Rgb(136, 192, 208) // Lighter gray for placeholder
+            } else {
+                Color::Rgb(216, 222, 233) // Normal text color
+            }));
+
+        // Render block first
+        f.render_widget(block, area);
+        // Then render text inside the block with padding
+        let inner_area = Rect::new(
+            area.x + 1,
+            area.y + 1,
+            area.width.saturating_sub(2),
+            area.height.saturating_sub(2),
+        );
+        f.render_widget(paragraph, inner_area);
+    }
+
     fn render_help(&self, f: &mut Frame) {
         let area = f.area();
 
@@ -778,7 +894,7 @@ impl App {
    e            Edit selected connection
    d            Delete selected connection
    i            Import from ~/.ssh/config
-   / or f       Search/filter connections
+   /            Search/filter connections
    ?            Show this help menu
 
  General
@@ -859,6 +975,7 @@ mod tests {
             input_buffer: InputBuffer::default(),
             input_field: 0,
             should_connect: None,
+            ctrl_c_count: 0,
         }
     }
 
