@@ -126,7 +126,10 @@ impl App {
 
     fn show_message(&mut self, terminal: &mut DefaultTerminal, message: &str) -> io::Result<()> {
         loop {
-            terminal.draw(|f| self.render_popup(f, message))?;
+            terminal.draw(|f| {
+                self.render(f); // Render normal interface first
+                self.render_popup(f, message); // Then render popup on top
+            })?;
 
             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
                 if key.code == crossterm::event::KeyCode::Enter
