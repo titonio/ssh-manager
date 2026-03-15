@@ -101,6 +101,13 @@ impl App {
             ctrl_c_count: 0,
         }
     }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
     pub fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<bool> {
         self.update_filter();
@@ -602,12 +609,9 @@ impl App {
     }
 
     pub fn render(&self, f: &mut Frame) {
-        match self.mode {
-            AppMode::Help => {
-                self.render_help(f);
-                return;
-            }
-            _ => {}
+        if self.mode == AppMode::Help {
+            self.render_help(f);
+            return;
         }
 
         let chunks = Layout::default()
@@ -1520,14 +1524,14 @@ mod tests {
 
     #[test]
     fn test_input_buffer_all_fields() {
-        let mut buf = InputBuffer::default();
-
-        buf.alias = "alias1".to_string();
-        buf.host = "host1".to_string();
-        buf.user = "user1".to_string();
-        buf.port = "2222".to_string();
-        buf.key_path = "/path/key".to_string();
-        buf.folder = "folder1".to_string();
+        let buf = InputBuffer {
+            alias: "alias1".to_string(),
+            host: "host1".to_string(),
+            user: "user1".to_string(),
+            port: "2222".to_string(),
+            key_path: "/path/key".to_string(),
+            folder: "folder1".to_string(),
+        };
 
         assert_eq!(buf.alias, "alias1");
         assert_eq!(buf.host, "host1");
@@ -1569,8 +1573,10 @@ mod tests {
 
     #[test]
     fn test_input_buffer_clone() {
-        let mut buf1 = InputBuffer::default();
-        buf1.alias = "test".to_string();
+        let buf1 = InputBuffer {
+            alias: "test".to_string(),
+            ..Default::default()
+        };
 
         let buf2 = buf1.clone();
 
