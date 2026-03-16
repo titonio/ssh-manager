@@ -204,25 +204,19 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Download Linux artifact
+    - name: Download all artifacts
       uses: actions/download-artifact@v4
       with:
-        name: sshm-linux
+        path: artifacts
 
-    - name: Download macOS artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: sshm-macos
-
-    - name: Download Windows artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: sshm-windows
+    - name: List artifacts
+      run: ls -la artifacts/
 
     - name: Rename binaries
       run: |
-        mv sshm sshm-linux-x86_64
-        mv sshm.exe sshm-windows-x86_64.exe
+        mv artifacts/sshm-linux/sshm sshm-linux-x86_64
+        mv artifacts/sshm-macos/sshm sshm-macos
+        mv artifacts/sshm-windows/sshm.exe sshm-windows-x86_64.exe
 
     - name: Create release
       uses: softprops/action-gh-release@v1
