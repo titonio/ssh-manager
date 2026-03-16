@@ -46,6 +46,7 @@ fn create_test_app() -> App {
         input_field: 0,
         should_connect: None,
         ctrl_c_count: 0,
+        update_info: None,
     }
 }
 
@@ -178,6 +179,7 @@ fn test_empty_connections_message() {
         input_field: 0,
         should_connect: None,
         ctrl_c_count: 0,
+        update_info: None,
     };
 
     let backend = TestBackend::new(80, 24);
@@ -310,6 +312,7 @@ fn test_connection_with_custom_port() {
         input_field: 0,
         should_connect: None,
         ctrl_c_count: 0,
+        update_info: None,
     };
 
     let backend = TestBackend::new(80, 24);
@@ -364,6 +367,7 @@ fn test_folder_grouping_display() {
         input_field: 0,
         should_connect: None,
         ctrl_c_count: 0,
+        update_info: None,
     };
 
     let backend = TestBackend::new(80, 24);

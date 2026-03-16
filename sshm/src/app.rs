@@ -34,6 +34,7 @@ pub enum AppMode {
     Edit,
     Search,
     Help,
+    Update,
 }
 
 pub struct App {
@@ -48,6 +49,7 @@ pub struct App {
     pub input_field: usize,
     pub should_connect: Option<Connection>,
     pub ctrl_c_count: usize,
+    pub update_info: Option<crate::update::UpdateInfo>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -99,6 +101,7 @@ impl Default for App {
             input_field: 0,
             should_connect: None,
             ctrl_c_count: 0,
+            update_info: None,
         }
     }
 }
@@ -110,6 +113,7 @@ impl App {
 
     pub fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<bool> {
         self.update_filter();
+        self.check_for_update();
 
         loop {
             terminal.draw(|f| self.render(f))?;
@@ -130,6 +134,7 @@ impl App {
                 AppMode::Add | AppMode::Edit => self.handle_input_mode(&mut terminal)?,
                 AppMode::Search => self.handle_search_mode(&mut terminal)?,
                 AppMode::Help => self.handle_help_mode(&mut terminal)?,
+                AppMode::Update => self.handle_update_mode(&mut terminal)?,
             }
         }
     }
@@ -579,6 +584,26 @@ impl App {
         }
     }
 
+    fn check_for_update(&mut self) {
+        if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
+            return;
+        }
+
+        match crate::update::check_for_update() {
+            crate::update::UpdateResult::UpdateAvailable { version } => {
+                self.update_info = Some(crate::update::UpdateInfo {
+                    current_version: env!("CARGO_PKG_VERSION").to_string(),
+                    new_version: version,
+                });
+                self.mode = AppMode::Update;
+            }
+            crate::update::UpdateResult::NoUpdate => {}
+            crate::update::UpdateResult::Error(e) => {
+                self.message = Some(format!("Update check failed: {}", e));
+            }
+        }
+    }
+
     pub fn update_filter(&mut self) {
         if self.search_query.is_empty() {
             self.filtered_indices = (0..self.config.connections.len()).collect();
@@ -613,6 +638,11 @@ impl App {
             return;
         }
 
+        if self.mode == AppMode::Update {
+            self.render_update_popup(f);
+            return;
+        }
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -636,6 +666,7 @@ impl App {
             AppMode::Edit => " Edit Connection ",
             AppMode::Search => " Search Connections ",
             AppMode::Help => " Help ",
+            AppMode::Update => " Update Available ",
         };
 
         let block = Block::default()
@@ -735,6 +766,7 @@ impl App {
             AppMode::Add | AppMode::Edit => "Type text | Tab: Next field | Enter: Save | Esc/q: Cancel | ←: Backspace",
             AppMode::Search => "Type to filter | Enter/Esc/q: Exit search",
             AppMode::Help => "Press Esc or q to return",
+            AppMode::Update => "U: Update now | L: Ignore | Esc: Dismiss",
         };
 
         let block = Block::default()
@@ -880,11 +912,72 @@ impl App {
         f.render_widget(paragraph, inner_area);
     }
 
+    pub fn render_update_popup(&self, f: &mut Frame) {
+        let area = self.centered_rect(55, 10, f.area());
+
+        let block = Block::default()
+            .title(" Update Available ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Green))
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
+
+        let update_info = "A new version is available!";
+        let current_ver = format!(
+            "Current: v{}",
+            self.update_info
+                .as_ref()
+                .map(|i| &i.current_version)
+                .unwrap_or(&"0.1.0".to_string())
+        );
+        let new_ver = format!(
+            "New: v{}",
+            self.update_info
+                .as_ref()
+                .map(|i| &i.new_version)
+                .unwrap_or(&"0.2.0".to_string())
+        );
+        let hint = "Press U to update, L to ignore";
+
+        let text = format!("{}\n{}\n{}\n\n{}", update_info, current_ver, new_ver, hint);
+
+        let paragraph = Paragraph::new(text)
+            .block(block)
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Rgb(216, 222, 233)));
+
+        f.render_widget(paragraph, area);
+    }
+
+    fn handle_update_mode(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        loop {
+            terminal.draw(|f| self.render_update_popup(f))?;
+
+            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                match key.code {
+                    crossterm::event::KeyCode::Char('u') | crossterm::event::KeyCode::Char('U') => {
+                        self.mode = AppMode::Normal;
+                        self.message = Some("Update functionality not yet implemented".to_string());
+                        break;
+                    }
+                    crossterm::event::KeyCode::Char('l')
+                    | crossterm::event::KeyCode::Char('L')
+                    | crossterm::event::KeyCode::Esc => {
+                        self.mode = AppMode::Normal;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn render_help(&self, f: &mut Frame) {
         let area = f.area();
 
         let help_text = r#"
- SSH Connection Manager - Keyboard Shortcuts
+  SSH Connection Manager - Keyboard Shortcuts
 
  Navigation
    ↑↓ or j/k   Move up/down in list
@@ -978,6 +1071,7 @@ mod tests {
             input_field: 0,
             should_connect: None,
             ctrl_c_count: 0,
+            update_info: None,
         }
     }
 

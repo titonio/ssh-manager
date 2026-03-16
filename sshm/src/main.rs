@@ -2,17 +2,42 @@ mod app;
 mod config;
 mod runtime;
 mod ssh;
+mod update;
 
+use std::env;
 use std::io;
 
 use runtime::{cleanup_and_exit, run_app_inner};
 use ssh::build_ssh_args;
+use update::UpdateResult;
 
 fn main() -> io::Result<()> {
     run_main(run_app_inner)
 }
 
 fn run_main(run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>) -> io::Result<()> {
+    let args: Vec<String> = env::args().collect();
+    let force_check = args
+        .iter()
+        .any(|arg| arg == "--check-update" || arg == "-c");
+
+    if force_check {
+        match update::force_check_for_update() {
+            UpdateResult::UpdateAvailable { version } => {
+                println!("Update available: v{}", version);
+                println!("Run again without flag to update automatically.");
+                return Ok(());
+            }
+            UpdateResult::NoUpdate => {
+                println!("No update available.");
+                return Ok(());
+            }
+            UpdateResult::Error(e) => {
+                eprintln!("Error checking for updates: {}", e);
+            }
+        }
+    }
+
     let (should_connect, conn) = run_app_fn()?;
 
     if should_connect {

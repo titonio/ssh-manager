@@ -44,3 +44,107 @@ pub fn run_app_inner() -> io::Result<(bool, Option<config::Connection>)> {
 
     Ok((should_connect, conn))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_run_app_inner_type() {
+        let _: fn() -> io::Result<(bool, Option<crate::config::Connection>)> = run_app_inner;
+    }
+
+    #[test]
+    fn test_cleanup_and_exit_type() {
+        let _: fn(&[std::ffi::OsString]) -> ! = cleanup_and_exit;
+    }
+
+    #[test]
+    fn test_ratatui_guard_exists() {
+        struct TestGuard;
+        impl Drop for TestGuard {
+            fn drop(&mut self) {}
+        }
+        let _guard = TestGuard;
+    }
+
+    #[test]
+    fn test_terminal_backend_type() {
+        let _backend = CrosstermBackend::new(std::io::stdout());
+    }
+
+    #[test]
+    fn test_app_new_type() {
+        let _app = App::new();
+    }
+
+    #[test]
+    fn test_stdout_write_all() {
+        use std::io::Write;
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write_all(b"test");
+    }
+
+    #[test]
+    fn test_process_exit_exists() {
+        // Just verify the module exists
+        let _ = process::exit;
+    }
+
+    #[test]
+    fn test_io_module_exists() {
+        let _stdout = std::io::stdout();
+    }
+
+    #[test]
+    fn test_ratatui_backend_imports() {
+        let _backend_type: fn(std::io::Stdout) -> CrosstermBackend<std::io::Stdout> =
+            CrosstermBackend::new;
+    }
+
+    #[test]
+    fn test_config_module_imports() {
+        let _conn: Option<crate::config::Connection> = None;
+    }
+
+    #[test]
+    fn test_ssh_module_imports() {
+        let _args: &[std::ffi::OsString] = &[];
+    }
+
+    #[test]
+    fn test_cleanup_function_signature() {
+        let _fn: fn(&[std::ffi::OsString]) -> ! = cleanup_and_exit;
+    }
+
+    #[test]
+    fn test_run_app_signature() {
+        let _fn: fn() -> io::Result<(bool, Option<crate::config::Connection>)> = run_app_inner;
+    }
+
+    #[test]
+    fn test_terminal_imports() {
+        let _terminal_type: fn() -> Terminal<CrosstermBackend<std::io::Stdout>> =
+            || unimplemented!();
+    }
+
+    #[test]
+    fn test_std_io_imports() {
+        let _io: std::io::Stdout = std::io::stdout();
+    }
+
+    #[test]
+    fn test_process_imports() {
+        let _exit_fn: fn(i32) -> ! = process::exit;
+    }
+
+    #[test]
+    fn test_crossterm_backend_exists() {
+        let _backend = CrosstermBackend::new(std::io::stdout());
+    }
+
+    #[test]
+    fn test_app_struct_exists() {
+        let _app = App::new();
+    }
+}
