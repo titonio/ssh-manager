@@ -133,16 +133,28 @@ jobs:
     - name: Strip binary
       run: strip sshm/target/x86_64-unknown-linux-musl/release/sshm
 
+    - name: Get version from Cargo.toml
+      id: cargo_version
+      run: echo "version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' sshm/Cargo.toml)" >> $GITHUB_OUTPUT
+
+    - name: Create tarball
+      run: |
+        cd sshm/target/x86_64-unknown-linux-musl/release
+        tar czvf ../../../../sshm-v${{ steps.cargo_version.outputs.version }}-x86_64-unknown-linux-musl.tar.gz sshm
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: sshm-linux
-        path: sshm/target/x86_64-unknown-linux-musl/release/sshm
+        path: sshm-v${{ steps.cargo_version.outputs.version }}-x86_64-unknown-linux-musl.tar.gz
 
   build-macos:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, coverage, security]
     runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
     steps:
     - uses: actions/checkout@v4
 
@@ -151,7 +163,7 @@ jobs:
       with:
         profile: minimal
         toolchain: stable
-        target: x86_64-apple-darwin
+        target: ${{ matrix.target }}
         override: true
 
     - name: Cache cargo
@@ -160,13 +172,22 @@ jobs:
         workspaces: sshm
 
     - name: Build release
-      run: cargo build --release --target x86_64-apple-darwin --manifest-path sshm/Cargo.toml
+      run: cargo build --release --target ${{ matrix.target }} --manifest-path sshm/Cargo.toml
+
+    - name: Get version from Cargo.toml
+      id: cargo_version
+      run: echo "version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' sshm/Cargo.toml)" >> $GITHUB_OUTPUT
+
+    - name: Create tarball
+      run: |
+        cd sshm/target/${{ matrix.target }}/release
+        tar czvf ../../../../sshm-v${{ steps.cargo_version.outputs.version }}-${{ matrix.target }}.tar.gz sshm
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: sshm-macos
-        path: sshm/target/x86_64-apple-darwin/release/sshm
+        name: sshm-macos-${{ matrix.target }}
+        path: sshm-v${{ steps.cargo_version.outputs.version }}-${{ matrix.target }}.tar.gz
 
   build-windows:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -191,11 +212,24 @@ jobs:
     - name: Build release
       run: cargo build --release --target x86_64-pc-windows-msvc --manifest-path sshm/Cargo.toml
 
+    - name: Get version from Cargo.toml
+      id: cargo_version
+      run: |
+        $version = (Get-Content sshm/Cargo.toml -Raw) -replace '.*version = "([^"]+)".*', '$1'
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+      shell: pwsh
+
+    - name: Create zip archive
+      run: |
+        cd sshm/target/x86_64-pc-windows-msvc/release
+        Compress-Archive -Path sshm.exe -DestinationPath ../../../../sshm-v${{ steps.cargo_version.outputs.version }}-x86_64-pc-windows-msvc.zip
+      shell: pwsh
+
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
         name: sshm-windows
-        path: sshm/target/x86_64-pc-windows-msvc/release/sshm.exe
+        path: sshm-v${{ steps.cargo_version.outputs.version }}-x86_64-pc-windows-msvc.zip
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -212,19 +246,13 @@ jobs:
     - name: List artifacts
       run: ls -la artifacts/
 
-    - name: Rename binaries
-      run: |
-        mv artifacts/sshm-linux/sshm sshm-linux-x86_64
-        mv artifacts/sshm-macos/sshm sshm-macos
-        mv artifacts/sshm-windows/sshm.exe sshm-windows-x86_64.exe
-
     - name: Create release
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          sshm-linux-x86_64
-          sshm-macos
-          sshm-windows-x86_64.exe
+          artifacts/sshm-linux/*.tar.gz
+          artifacts/sshm-macos-*/*.tar.gz
+          artifacts/sshm-windows/*.zip
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
