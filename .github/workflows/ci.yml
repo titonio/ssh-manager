@@ -155,10 +155,15 @@ jobs:
           strip -S sshm/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
         fi
 
+    - name: Rename binary for release
+      run: |
+        mkdir -p release
+        cp sshm/target/${{ matrix.target }}/release/${{ matrix.binary_name }} release/${{ matrix.binary_name }}-${{ matrix.os }}
+      
     - name: Upload release asset
       uses: softprops/action-gh-release@v1
       with:
-        files: sshm/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+        files: release/${{ matrix.binary_name }}-${{ matrix.os }}
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
