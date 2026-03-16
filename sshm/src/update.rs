@@ -696,10 +696,7 @@ mod tests {
         let result = read_cache();
         // Either Ok(None) if no cache, or Ok(Some(data)) if cache exists
         // Or an error if config directory can't be created
-        match result {
-            Ok(_) => {}  // Expected: no cache or cache exists
-            Err(_) => {} // Also acceptable: can't create config dir
-        }
+        if let Ok(_) = result {}
     }
 
     #[test]
