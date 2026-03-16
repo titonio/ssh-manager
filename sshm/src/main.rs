@@ -17,6 +17,12 @@ fn main() -> io::Result<()> {
 
 fn run_main(run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>) -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
+
+    if args.len() > 1 && args[1] == "version" {
+        println!("sshm {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let force_check = args
         .iter()
         .any(|arg| arg == "--check-update" || arg == "-c");
