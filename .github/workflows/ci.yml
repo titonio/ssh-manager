@@ -215,7 +215,7 @@ jobs:
     - name: Get version from Cargo.toml
       id: cargo_version
       run: |
-        $version = (Get-Content sshm/Cargo.toml -Raw) -replace '.*version = "([^"]+)".*', '$1'
+        $version = (Get-Content sshm/Cargo.toml) | Select-String 'version = "([^"]+)"' | ForEach-Object { $_.Matches.Groups[1].Value }
         echo "version=$version" >> $env:GITHUB_OUTPUT
       shell: pwsh
 
