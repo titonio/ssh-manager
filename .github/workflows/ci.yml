@@ -104,25 +104,9 @@ jobs:
       working-directory: sshm
       run: cargo audit
 
-  release:
+  build-linux:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, coverage, security]
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            binary_name: sshm
-            use_strip: true
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            binary_name: sshm
-            use_strip: true
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary_name: sshm.exe
-            use_strip: false
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
 
@@ -131,11 +115,10 @@ jobs:
       with:
         profile: minimal
         toolchain: stable
-        target: ${{ matrix.target }}
+        target: x86_64-unknown-linux-musl
         override: true
 
-    - name: Install musl tools (Linux)
-      if: matrix.target == 'x86_64-unknown-linux-musl'
+    - name: Install musl tools
       run: sudo apt-get update && sudo apt-get install -y musl-tools
 
     - name: Cache cargo
@@ -144,26 +127,107 @@ jobs:
         workspaces: sshm
 
     - name: Build release
-      run: cargo build --release --target ${{ matrix.target }} --manifest-path sshm/Cargo.toml
+      run: cargo build --release --target x86_64-unknown-linux-musl --manifest-path sshm/Cargo.toml
 
     - name: Strip binary
-      if: matrix.use_strip == 'true'
-      run: |
-        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
-          strip sshm/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
-        else
-          strip -S sshm/target/${{ matrix.target }}/release/${{ matrix.binary_name }}
-        fi
+      run: strip sshm/target/x86_64-unknown-linux-musl/release/sshm
 
-    - name: Rename binary for release
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: sshm-linux
+        path: sshm/target/x86_64-unknown-linux-musl/release/sshm
+
+  build-macos:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: macos-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        target: x86_64-apple-darwin
+        override: true
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: sshm
+
+    - name: Build release
+      run: cargo build --release --target x86_64-apple-darwin --manifest-path sshm/Cargo.toml
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: sshm-macos
+        path: sshm/target/x86_64-apple-darwin/release/sshm
+
+  build-windows:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        target: x86_64-pc-windows-msvc
+        override: true
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: sshm
+
+    - name: Build release
+      run: cargo build --release --target x86_64-pc-windows-msvc --manifest-path sshm/Cargo.toml
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: sshm-windows
+        path: sshm/target/x86_64-pc-windows-msvc/release/sshm.exe
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download Linux artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: sshm-linux
+
+    - name: Download macOS artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: sshm-macos
+
+    - name: Download Windows artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: sshm-windows
+
+    - name: Rename binaries
       run: |
-        mkdir -p release
-        cp sshm/target/${{ matrix.target }}/release/${{ matrix.binary_name }} release/${{ matrix.binary_name }}-${{ matrix.os }}
-      
-    - name: Upload release asset
+        mv sshm sshm-linux-x86_64
+        mv sshm.exe sshm-windows-x86_64.exe
+
+    - name: Create release
       uses: softprops/action-gh-release@v1
       with:
-        files: release/${{ matrix.binary_name }}-${{ matrix.os }}
+        files: |
+          sshm-linux-x86_64
+          sshm-macos
+          sshm-windows-x86_64.exe
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
