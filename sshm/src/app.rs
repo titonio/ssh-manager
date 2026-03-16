@@ -82,8 +82,8 @@ impl InputBuffer {
     }
 }
 
-impl App {
-    pub fn new() -> Self {
+impl Default for App {
+    fn default() -> Self {
         let config = Config::load();
         let filtered_indices: Vec<usize> = (0..config.connections.len()).collect();
 
@@ -103,11 +103,10 @@ impl App {
     }
 }
 
-impl Default for App {
-    fn default() -> Self {
-        Self::new()
+impl App {
+    pub fn new() -> Self {
+        Self::default()
     }
-}
 
     pub fn run(&mut self, mut terminal: DefaultTerminal) -> io::Result<bool> {
         self.update_filter();

@@ -152,7 +152,7 @@ fn test_edit_connection_popup() {
     let mut app = create_test_app();
     app.mode = AppMode::Edit;
     app.selected_index = 0;
-    app.input_buffer = InputBuffer::from_connection(app.config.connections.get(0).unwrap());
+    app.input_buffer = InputBuffer::from_connection(app.config.connections.first().unwrap());
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
