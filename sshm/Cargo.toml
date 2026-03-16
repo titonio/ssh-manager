@@ -1,6 +1,6 @@
 [package]
 name = "sshm"
-version = "0.1.7"
+version = "0.1.6"
 edition = "2021"
 
 [dependencies]
@@ -11,7 +11,10 @@ serde_json = "1.0"
 dirs = "5.0"
 fuzzy-matcher = "0.3"
 uuid = { version = "1.0", features = ["v4"] }
-self-github-update-enhanced = { version = "0.39", features = ["archive-tar", "archive-zip", "reqwest"] }
+self-github-update-enhanced = { version = "0.39", features = ["archive-tar", "archive-zip"] }
+tar = "0.4"
+flate2 = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 
 
 

@@ -1,6 +1,8 @@
-use self_github_update_enhanced::backends::github::Update;
+use flate2::read::GzDecoder;
+use self_github_update_enhanced::backends::github::{ReleaseList, Update};
 use self_github_update_enhanced::Status;
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -150,8 +152,10 @@ pub fn check_for_update() -> UpdateResult {
         .repo_owner("titonio")
         .repo_name("ssh-manager")
         .bin_name("sshm")
+        .bin_path_in_archive("sshm")
         .target(&asset_name)
         .current_version(&current_version)
+        .no_confirm(true)
         .build()
     {
         Ok(config) => config,
@@ -184,6 +188,10 @@ pub fn check_for_update() -> UpdateResult {
 }
 
 pub fn force_check_for_update() -> UpdateResult {
+    check_for_update_inner()
+}
+
+fn check_for_update_inner() -> UpdateResult {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
 
     let asset_name = match get_platform_asset_name() {
@@ -194,41 +202,151 @@ pub fn force_check_for_update() -> UpdateResult {
         }
     };
 
-    let update_config = match Update::configure()
+    let asset_name_full = format!(
+        "sshm-v{}-{}.tar.gz",
+        current_version.replace("0.1.6", "0.1.7"),
+        asset_name
+    );
+
+    match ReleaseList::configure()
         .repo_owner("titonio")
         .repo_name("ssh-manager")
-        .bin_name("sshm")
-        .target(&asset_name)
-        .current_version(&current_version)
+        .with_target(&asset_name)
         .build()
     {
-        Ok(config) => config,
-        Err(e) => {
-            let _ = write_cache(None);
-            return UpdateResult::Error(format!("Failed to build update configuration: {}", e));
-        }
-    };
+        Ok(release_list) => match release_list.fetch() {
+            Ok(releases) => {
+                if releases.is_empty() {
+                    let _ = write_cache(None);
+                    return UpdateResult::NoUpdate;
+                }
 
-    let update_status = match update_config.update() {
-        Ok(status) => status,
-        Err(e) => {
-            let _ = write_cache(None);
-            return UpdateResult::Error(format!("Failed to check for updates: {}", e));
-        }
-    };
+                let latest = &releases[0];
+                if latest.version == current_version {
+                    let _ = write_cache(None);
+                    return UpdateResult::NoUpdate;
+                }
 
-    match update_status {
-        Status::UpToDate(_) => {
-            let _ = write_cache(None);
-            UpdateResult::NoUpdate
-        }
-        Status::Updated(new_version) => {
-            let _ = write_cache(Some(new_version.clone()));
-            UpdateResult::UpdateAvailable {
-                version: new_version,
+                let asset = latest.assets.iter().find(|a| a.name.contains(&asset_name));
+
+                let asset = match asset {
+                    Some(a) => a,
+                    None => {
+                        let _ = write_cache(None);
+                        return UpdateResult::Error(format!(
+                            "Asset not found: {}",
+                            asset_name_full
+                        ));
+                    }
+                };
+
+                eprintln!(
+                    "New version available: {} -> {}",
+                    current_version, latest.version
+                );
+                eprintln!("Downloading: {}", asset.name);
+
+                match download_and_extract(&current_version, &latest.version, &asset_name) {
+                    Ok(downloaded_path) => {
+                        eprintln!(
+                            "Binary ready for installation at: {}",
+                            downloaded_path.display()
+                        );
+                        eprintln!("Please restart sshm to use the new version.");
+                        let _ = write_cache(Some(latest.version.clone()));
+                        UpdateResult::UpdateAvailable {
+                            version: latest.version.clone(),
+                        }
+                    }
+                    Err(e) => {
+                        let _ = write_cache(None);
+                        UpdateResult::Error(format!("Failed to download/update: {}", e))
+                    }
+                }
             }
+            Err(e) => {
+                let _ = write_cache(None);
+                UpdateResult::Error(format!("Failed to fetch releases: {}", e))
+            }
+        },
+        Err(e) => {
+            let _ = write_cache(None);
+            UpdateResult::Error(format!("Failed to build release list: {}", e))
         }
     }
+}
+
+fn download_and_extract(
+    _current_version: &str,
+    new_version: &str,
+    asset_name: &str,
+) -> Result<PathBuf, String> {
+    let browser_url = format!(
+        "https://github.com/titonio/ssh-manager/releases/download/v{}/sshm-v{}-{}.tar.gz",
+        new_version, new_version, asset_name
+    );
+
+    eprintln!("Downloading from: {}", browser_url);
+
+    let response = reqwest::blocking::Client::new()
+        .get(&browser_url)
+        .send()
+        .map_err(|e| format!("Failed to download: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "Download failed with status: {}",
+            response.status()
+        ));
+    }
+
+    let bytes = response
+        .bytes()
+        .map_err(|e| format!("Failed to read response: {}", e))?;
+
+    let temp_dir = std::env::temp_dir().join("sshm-update");
+    fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+
+    let archive_path = temp_dir.join(format!("sshm-{}.tar.gz", new_version));
+    let mut file = fs::File::create(&archive_path)
+        .map_err(|e| format!("Failed to create archive file: {}", e))?;
+    file.write_all(&bytes)
+        .map_err(|e| format!("Failed to write archive: {}", e))?;
+
+    eprintln!("Extracting archive...");
+
+    let file =
+        fs::File::open(&archive_path).map_err(|e| format!("Failed to open archive: {}", e))?;
+    let decoder = GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+
+    let output_path = temp_dir.join("sshm_new");
+
+    // Extract all files from the archive
+    archive
+        .unpack(&temp_dir)
+        .map_err(|e| format!("Failed to extract archive: {}", e))?;
+
+    // Check if sshm was extracted
+    let extracted_path = temp_dir.join("sshm");
+    if !extracted_path.exists() {
+        return Err("Could not find sshm binary in archive".to_string());
+    }
+
+    // Check if sshm was extracted before moving
+    if !extracted_path.exists() {
+        return Err("Could not find sshm binary in archive".to_string());
+    }
+
+    // Move to output path
+    fs::rename(&extracted_path, &output_path)
+        .map_err(|e| format!("Failed to rename extracted binary: {}", e))?;
+
+    eprintln!(
+        "Update downloaded successfully to: {}",
+        output_path.display()
+    );
+    Ok(output_path)
 }
 
 #[cfg(test)]
