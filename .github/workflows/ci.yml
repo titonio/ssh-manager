@@ -222,7 +222,9 @@ jobs:
     - name: Create zip archive
       run: |
         cd sshm/target/x86_64-pc-windows-msvc/release
-        Compress-Archive -Path sshm.exe -DestinationPath ../../../../sshm-v${{ steps.cargo_version.outputs.version }}-x86_64-pc-windows-msvc.zip
+        $version = "${{ steps.cargo_version.outputs.version }}"
+        $dest = "../../../../sshm-v${version}-x86_64-pc-windows-msvc.zip"
+        Compress-Archive -Path sshm.exe -DestinationPath $dest
       shell: pwsh
 
     - name: Upload artifact
