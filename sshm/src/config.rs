@@ -967,9 +967,9 @@ Host new
         assert_eq!(imported, 0);
         assert!(config.connections.is_empty());
     }
-}
 
-fn import_from_ssh_config_with_path(config: &mut Config, path: &str) -> usize {
+    #[cfg(test)]
+    fn import_from_ssh_config_with_path(config: &mut Config, path: &str) -> usize {
     let entries = parse_ssh_config(path);
     let mut imported = 0;
 

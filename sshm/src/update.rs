@@ -82,6 +82,7 @@ fn write_cache_to_path(new_version: Option<String>, cache_path: &PathBuf) -> Res
     Ok(())
 }
 
+#[cfg(test)]
 fn read_cache_from_path(cache_path: &PathBuf) -> Result<Option<CacheData>, String> {
     if !cache_path.exists() {
         return Ok(None);
