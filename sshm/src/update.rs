@@ -1251,18 +1251,19 @@ mod tests {
     #[serial]
     fn test_cache_file_is_json() {
         let cache_path = get_cache_file_path().unwrap();
-        fs::remove_file(&cache_path).ok();
+        let test_cache_path = cache_path.with_file_name("update_cache_test_json.json");
+        fs::remove_file(&test_cache_path).ok();
 
-        write_cache(Some("1.0.0".to_string())).unwrap();
+        write_cache_to_path(Some("1.0.0".to_string()), &test_cache_path).unwrap();
 
-        let content = fs::read_to_string(&cache_path).unwrap();
+        let content = fs::read_to_string(&test_cache_path).unwrap();
 
         let json_value: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(json_value.is_object());
         assert!(json_value.get("last_check").is_some());
         assert!(json_value.get("new_version").is_some());
 
-        fs::remove_file(&cache_path).ok();
+        fs::remove_file(&test_cache_path).ok();
     }
 
     #[test]
@@ -1528,17 +1529,18 @@ mod tests {
     #[serial]
     fn test_cache_persistence_across_read_write() {
         let cache_path = get_cache_file_path().unwrap();
-        fs::remove_file(&cache_path).ok();
+        let test_cache_path = cache_path.with_file_name("update_cache_test_persistence.json");
+        fs::remove_file(&test_cache_path).ok();
 
         let versions = vec!["1.0.0", "2.0.0", "3.0.0"];
 
         for version in versions {
-            write_cache(Some(version.to_string())).unwrap();
-            let cache = read_cache().unwrap().unwrap();
+            write_cache_to_path(Some(version.to_string()), &test_cache_path).unwrap();
+            let cache = read_cache_from_path(&test_cache_path).unwrap().unwrap();
             assert_eq!(cache.new_version, Some(version.to_string()));
         }
 
-        fs::remove_file(&cache_path).ok();
+        fs::remove_file(&test_cache_path).ok();
     }
 
     #[test]

@@ -2084,7 +2084,7 @@ mod tests {
 
     #[test]
     fn test_render_with_test_backend() {
-        let mut app = create_test_app();
+        let app = create_test_app();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 
@@ -2111,7 +2111,7 @@ mod tests {
 
     #[test]
     fn test_render_list_with_test_backend() {
-        let mut app = create_test_app();
+        let app = create_test_app();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 
@@ -2540,7 +2540,7 @@ mod tests {
 
     #[test]
     fn test_app_with_test_backend_full_render() {
-        let mut app = create_test_app();
+        let app = create_test_app();
         let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 

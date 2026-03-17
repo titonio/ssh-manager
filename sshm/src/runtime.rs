@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_and_exit_with_ssh_args() {
-        let args = vec![
+        let args = [
             std::ffi::OsString::from("-i"),
             std::ffi::OsString::from("/path/to/key"),
             std::ffi::OsString::from("user@host"),
@@ -139,7 +139,7 @@ mod tests {
     #[test]
     fn test_run_app_inner_returns_result() {
         let result: io::Result<(bool, Option<crate::config::Connection>)> =
-            Err(io::Error::new(io::ErrorKind::Other, "test"));
+            Err(io::Error::other("test"));
         assert!(result.is_err());
     }
 
