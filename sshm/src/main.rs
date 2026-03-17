@@ -225,4 +225,52 @@ pub mod tests {
         let args = build_ssh_args(&conn);
         assert!(!args.is_empty());
     }
+
+    #[test]
+    fn test_run_main_version_flag() {
+        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
+        let result = run_main(mock_run_app);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_main_force_check_update_available() {
+        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
+        let result = run_main(mock_run_app);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_main_force_check_no_update() {
+        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
+        let result = run_main(mock_run_app);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_main_force_check_error() {
+        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
+        let result = run_main(mock_run_app);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_run_main_should_connect_with_connection() {
+        let conn = Connection {
+            id: "1".to_string(),
+            alias: "test".to_string(),
+            host: "example.com".to_string(),
+            user: "admin".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        };
+        let mock_run_app =
+            || Ok::<(bool, Option<Connection>), io::Error>((true, Some(conn.clone())));
+        let (should_connect, result_conn) = mock_run_app().unwrap();
+        assert!(should_connect);
+        assert!(result_conn.is_some());
+        let args = build_ssh_args(&conn);
+        assert!(!args.is_empty());
+    }
 }

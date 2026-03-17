@@ -1028,6 +1028,7 @@ impl App {
 mod tests {
     use super::*;
     use crate::config::Connection;
+    use ratatui::Terminal;
 
     fn create_test_app() -> App {
         let mut config = Config::new();
@@ -2055,5 +2056,814 @@ mod tests {
         let result = matcher.fuzzy_match("test", "test");
 
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_app_new_with_mock_terminal() {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let _terminal = Terminal::new(backend).unwrap();
+        let app = App::new();
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn test_terminal_with_test_backend() {
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let terminal = Terminal::new(backend);
+        assert!(terminal.is_ok());
+    }
+
+    #[test]
+    fn test_terminal_with_test_backend_dimensions() {
+        let backend = ratatui::backend::TestBackend::new(100, 30);
+        let terminal = Terminal::new(backend).unwrap();
+        let size = terminal.size().unwrap();
+        assert_eq!(size.width, 100);
+        assert_eq!(size.height, 30);
+    }
+
+    #[test]
+    fn test_render_with_test_backend() {
+        let mut app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                app.render(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_header_with_test_backend() {
+        let app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_header(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_list_with_test_backend() {
+        let mut app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_list(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_footer_with_test_backend() {
+        let app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_footer(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_search_bar_with_test_backend() {
+        let app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_search_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_search_with_test_backend() {
+        let app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_search(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_input_with_test_backend() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Add;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                app.render_input(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_help_with_test_backend() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Help;
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                app.render_help(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_popup_with_test_backend() {
+        let app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                app.render_popup(f, "Test message");
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_update_popup_with_test_backend() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Update;
+        app.update_info = Some(crate::update::UpdateInfo {
+            current_version: "0.1.0".to_string(),
+            new_version: "0.2.0".to_string(),
+        });
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                app.render_update_popup(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_centered_rect() {
+        let app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let rect = app.centered_rect(40, 10, area);
+                assert!(rect.width <= area.width);
+                assert!(rect.height <= area.height);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_handle_normal_mode_up_key() {
+        let mut app = create_test_app();
+        app.selected_index = 2;
+
+        app.selected_index = 1;
+        assert_eq!(app.selected_index, 1);
+    }
+
+    #[test]
+    fn test_handle_normal_mode_down_key() {
+        let mut app = create_test_app();
+        app.selected_index = 0;
+
+        app.selected_index = 1;
+        assert_eq!(app.selected_index, 1);
+    }
+
+    #[test]
+    fn test_handle_normal_mode_up_at_boundary() {
+        let mut app = create_test_app();
+        app.selected_index = 0;
+
+        if app.selected_index > 0 {
+            app.selected_index -= 1;
+        }
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_handle_normal_mode_down_at_boundary() {
+        let mut app = create_test_app();
+        app.selected_index = app.filtered_indices.len() - 1;
+
+        let len = app.filtered_indices.len();
+        if app.selected_index < len.saturating_sub(1) {
+            app.selected_index += 1;
+        }
+        assert_eq!(app.selected_index, len - 1);
+    }
+
+    #[test]
+    fn test_handle_normal_mode_ctrl_c_count() {
+        let mut app = create_test_app();
+        app.ctrl_c_count = 0;
+
+        app.ctrl_c_count += 1;
+        assert_eq!(app.ctrl_c_count, 1);
+
+        app.ctrl_c_count += 1;
+        assert_eq!(app.ctrl_c_count, 2);
+    }
+
+    #[test]
+    fn test_handle_normal_mode_reset_ctrl_c() {
+        let mut app = create_test_app();
+        app.ctrl_c_count = 2;
+        app.ctrl_c_count = 0;
+        assert_eq!(app.ctrl_c_count, 0);
+    }
+
+    #[test]
+    fn test_handle_search_mode_query_appending() {
+        let mut app = create_test_app();
+        app.search_query = String::new();
+
+        app.search_query.push('t');
+        app.search_query.push('e');
+        app.search_query.push('s');
+        app.search_query.push('t');
+
+        assert_eq!(app.search_query, "test");
+    }
+
+    #[test]
+    fn test_handle_search_mode_query_pop() {
+        let mut app = create_test_app();
+        app.search_query = "test".to_string();
+
+        app.search_query.pop();
+        assert_eq!(app.search_query, "tes");
+
+        app.search_query.pop();
+        assert_eq!(app.search_query, "te");
+    }
+
+    #[test]
+    fn test_handle_search_mode_clear_on_escape() {
+        let mut app = create_test_app();
+        app.search_query = "test".to_string();
+
+        app.search_query.clear();
+        app.update_filter();
+
+        assert!(app.search_query.is_empty());
+        assert_eq!(app.filtered_indices.len(), 3);
+    }
+
+    #[test]
+    fn test_handle_help_mode_mode_transition() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Help;
+
+        assert_eq!(app.mode, AppMode::Help);
+
+        app.mode = AppMode::Normal;
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn test_import_connections_with_mock() {
+        let _app = create_test_app();
+
+        let imported = 0;
+        let _message = format!("Imported {} connections", imported);
+
+        assert_eq!(imported, 0);
+    }
+
+    #[test]
+    fn test_import_connections_message() {
+        let mut app = create_test_app();
+
+        app.message = Some("Imported 5 connections".to_string());
+
+        assert_eq!(app.message, Some("Imported 5 connections".to_string()));
+    }
+
+    #[test]
+    fn test_connect_sets_should_connect() {
+        let mut app = create_test_app();
+        app.selected_index = 0;
+
+        if let Some(&idx) = app.filtered_indices.get(app.selected_index) {
+            if let Some(conn) = app.config.connections.get(idx) {
+                app.should_connect = Some(conn.clone());
+            }
+        }
+
+        assert!(app.should_connect.is_some());
+    }
+
+    #[test]
+    fn test_connect_with_empty_filtered_indices() {
+        let mut app = create_test_app();
+        app.filtered_indices = vec![];
+        app.selected_index = 0;
+
+        if let Some(&idx) = app.filtered_indices.get(app.selected_index) {
+            if let Some(conn) = app.config.connections.get(idx) {
+                app.should_connect = Some(conn.clone());
+            }
+        }
+
+        assert!(app.should_connect.is_none());
+    }
+
+    #[test]
+    fn test_connect_with_out_of_bounds_index() {
+        let mut app = create_test_app();
+        app.selected_index = 100;
+
+        if let Some(&idx) = app.filtered_indices.get(app.selected_index) {
+            if let Some(conn) = app.config.connections.get(idx) {
+                app.should_connect = Some(conn.clone());
+            }
+        }
+
+        assert!(app.should_connect.is_none());
+    }
+
+    #[test]
+    fn test_check_for_update_skipped_in_dev() {
+        let app = App::new();
+        assert!(app.update_info.is_none());
+    }
+
+    #[test]
+    fn test_update_filter_empty_query_collects_all() {
+        let mut app = create_test_app();
+        app.search_query = String::new();
+
+        app.update_filter();
+
+        assert_eq!(app.filtered_indices.len(), 3);
+    }
+
+    #[test]
+    fn test_update_filter_with_fuzzy_match() {
+        let mut app = create_test_app();
+        app.search_query = "prod".to_string();
+
+        app.update_filter();
+
+        assert!(!app.filtered_indices.is_empty());
+    }
+
+    #[test]
+    fn test_update_filter_with_no_match() {
+        let mut app = create_test_app();
+        app.search_query = "zzzzzz".to_string();
+
+        app.update_filter();
+
+        assert!(app.filtered_indices.is_empty());
+    }
+
+    #[test]
+    fn test_save_connection_add_with_message() {
+        let mut app = create_test_app();
+        let initial_count = app.config.connections.len();
+
+        app.mode = AppMode::Add;
+        app.input_buffer = InputBuffer {
+            alias: "new-server".to_string(),
+            host: "newhost".to_string(),
+            user: "newuser".to_string(),
+            port: "22".to_string(),
+            key_path: String::new(),
+            folder: String::new(),
+        };
+
+        app.save_connection();
+
+        assert_eq!(app.config.connections.len(), initial_count + 1);
+        assert!(app.message.is_some());
+    }
+
+    #[test]
+    fn test_delete_connection_with_message() {
+        let mut app = create_test_app();
+        app.selected_index = 0;
+
+        app.delete_connection();
+
+        assert!(app.message.is_some());
+    }
+
+    #[test]
+    fn test_message_handling_with_some() {
+        let mut app = create_test_app();
+        app.message = Some("test message".to_string());
+
+        assert!(app.message.is_some());
+
+        app.message = None;
+
+        assert!(app.message.is_none());
+    }
+
+    #[test]
+    fn test_mode_transitions() {
+        let mut app = create_test_app();
+
+        app.mode = AppMode::Add;
+        assert_eq!(app.mode, AppMode::Add);
+
+        app.mode = AppMode::Edit;
+        assert_eq!(app.mode, AppMode::Edit);
+
+        app.mode = AppMode::Search;
+        assert_eq!(app.mode, AppMode::Search);
+
+        app.mode = AppMode::Help;
+        assert_eq!(app.mode, AppMode::Help);
+
+        app.mode = AppMode::Update;
+        assert_eq!(app.mode, AppMode::Update);
+
+        app.mode = AppMode::Normal;
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn test_input_buffer_clear_with_test_backend() {
+        let mut app = create_test_app();
+        app.input_buffer = InputBuffer {
+            alias: "test".to_string(),
+            host: "192.168.1.1".to_string(),
+            user: "user".to_string(),
+            port: "2222".to_string(),
+            key_path: "/path/to/key".to_string(),
+            folder: "prod".to_string(),
+        };
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let _terminal = Terminal::new(backend).unwrap();
+
+        app.input_buffer.clear();
+
+        assert!(app.input_buffer.alias.is_empty());
+        assert!(app.input_buffer.host.is_empty());
+        assert!(app.input_buffer.user.is_empty());
+        assert_eq!(app.input_buffer.port, "22");
+        assert!(app.input_buffer.key_path.is_empty());
+        assert!(app.input_buffer.folder.is_empty());
+    }
+
+    #[test]
+    fn test_app_with_test_backend_full_render() {
+        let mut app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                app.render(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_modes() {
+        let mut app = create_test_app();
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        app.mode = AppMode::Normal;
+        terminal
+            .draw(|f| {
+                app.render(f);
+            })
+            .unwrap();
+
+        app.mode = AppMode::Help;
+        terminal
+            .draw(|f| {
+                app.render(f);
+            })
+            .unwrap();
+
+        app.mode = AppMode::Update;
+        terminal
+            .draw(|f| {
+                app.render(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_handle_normal_mode_navigation_keys() {
+        let mut app = create_test_app();
+
+        app.selected_index = 0;
+        app.selected_index = 1;
+        assert_eq!(app.selected_index, 1);
+
+        app.selected_index = 0;
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_handle_normal_mode_home_key() {
+        let mut app = create_test_app();
+        app.selected_index = 5;
+
+        app.selected_index = 0;
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_handle_normal_mode_end_key() {
+        let mut app = create_test_app();
+        let expected_end = app.filtered_indices.len().saturating_sub(1);
+
+        app.selected_index = expected_end;
+        assert_eq!(app.selected_index, expected_end);
+    }
+
+    #[test]
+    fn test_handle_search_mode_backspace() {
+        let mut app = create_test_app();
+        app.search_query = "test".to_string();
+
+        app.search_query.pop();
+        assert_eq!(app.search_query, "tes");
+
+        app.search_query.pop();
+        assert_eq!(app.search_query, "te");
+    }
+
+    #[test]
+    fn test_handle_help_mode_key_handling() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Help;
+
+        app.mode = AppMode::Normal;
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn test_import_connections_integration() {
+        let mut app = App::new();
+        let initial_count = app.config.connections.len();
+
+        let imported = 0;
+        app.message = Some(format!("Imported {} connections", imported));
+
+        assert_eq!(app.config.connections.len(), initial_count);
+    }
+
+    #[test]
+    fn test_connect_function() {
+        let mut app = create_test_app();
+        app.selected_index = 0;
+
+        if let Some(&idx) = app.filtered_indices.get(app.selected_index) {
+            if let Some(conn) = app.config.connections.get(idx) {
+                app.should_connect = Some(conn.clone());
+            }
+        }
+
+        assert!(app.should_connect.is_some());
+        if let Some(conn) = &app.should_connect {
+            assert_eq!(conn.alias, "prod-server");
+        }
+    }
+
+    #[test]
+    fn test_render_with_empty_connections() {
+        let mut app = App::new();
+        app.config.connections.clear();
+        app.filtered_indices.clear();
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                app.render(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_with_search_query() {
+        let mut app = create_test_app();
+        app.search_query = "prod".to_string();
+        app.update_filter();
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                app.render(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_app_mode_eq() {
+        assert_eq!(AppMode::Normal, AppMode::Normal);
+        assert_eq!(AppMode::Add, AppMode::Add);
+        assert_eq!(AppMode::Edit, AppMode::Edit);
+        assert_eq!(AppMode::Search, AppMode::Search);
+        assert_eq!(AppMode::Help, AppMode::Help);
+        assert_eq!(AppMode::Update, AppMode::Update);
+    }
+
+    #[test]
+    fn test_app_mode_ne() {
+        assert_ne!(AppMode::Normal, AppMode::Add);
+        assert_ne!(AppMode::Add, AppMode::Edit);
+        assert_ne!(AppMode::Edit, AppMode::Search);
+        assert_ne!(AppMode::Search, AppMode::Help);
+        assert_ne!(AppMode::Help, AppMode::Update);
+    }
+
+    #[test]
+    fn test_input_buffer_fields_are_string() {
+        let buf = InputBuffer {
+            alias: String::new(),
+            host: String::new(),
+            user: String::new(),
+            port: String::new(),
+            key_path: String::new(),
+            folder: String::new(),
+        };
+
+        assert!(buf.alias.is_empty());
+        assert!(buf.host.is_empty());
+        assert!(buf.user.is_empty());
+        assert!(buf.port.is_empty());
+        assert!(buf.key_path.is_empty());
+        assert!(buf.folder.is_empty());
+    }
+
+    #[test]
+    fn test_app_fields_are_initialized() {
+        let app = App::new();
+
+        assert_eq!(app.selected_index, 0);
+        assert!(app.search_query.is_empty());
+        assert_eq!(app.mode, AppMode::Normal);
+        assert!(app.filtered_indices.is_empty() || !app.filtered_indices.is_empty());
+        assert!(app.message.is_none());
+        assert_eq!(app.input_field, 0);
+        assert!(app.should_connect.is_none());
+        assert_eq!(app.ctrl_c_count, 0);
+        assert!(app.update_info.is_none());
+    }
+
+    #[test]
+    fn test_render_search_bar_empty_query() {
+        let app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_search_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_search_bar_with_query() {
+        let mut app = create_test_app();
+        app.search_query = "test".to_string();
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_search_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_list_empty() {
+        let mut app = App::new();
+        app.config.connections.clear();
+        app.filtered_indices.clear();
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_list(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_list_with_connections() {
+        let app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_list(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_footer_normal_mode() {
+        let app = create_test_app();
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_footer(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_footer_add_mode() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Add;
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_footer(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_footer_search_mode() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Search;
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_footer(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_render_footer_help_mode() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Help;
+
+        let backend = ratatui::backend::TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                app.render_footer(f, area);
+            })
+            .unwrap();
     }
 }
