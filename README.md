@@ -46,6 +46,31 @@ sshm
 
 - `-c, --check-update`: Check for updates without running the TUI
 
+### Subcommands
+
+- `add`: Add a new SSH connection
+- `completions`: Generate shell completion scripts
+- `check-update`: Check for updates
+
+### Shell Completion
+
+Generate shell completion scripts for bash, zsh, or PowerShell:
+
+```bash
+# Bash
+sshm completions bash > /etc/bash_completion.d/sshm
+
+# Zsh
+sshm completions zsh > ~/.zsh/_sshm
+# Then add to ~/.zshrc: fpath=(~/.zsh $fpath) && autoload -U compinit && compinit
+
+# Fish
+sshm completions fish > ~/.config/fish/completions/sshm.fish
+
+# PowerShell
+sshm completions powershell | Out-String | Invoke-Expression
+```
+
 ### Keyboard Shortcuts
 
 | Key | Action |

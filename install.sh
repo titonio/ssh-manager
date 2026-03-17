@@ -87,3 +87,38 @@ fi
 echo ""
 echo "Installation complete!"
 echo "Run '$BIN_NAME' to start the application"
+
+# Install shell completions
+echo ""
+echo "Installing shell completions..."
+
+# Get the shell we're running in
+CURRENT_SHELL="${SHELL##*/}"
+
+case "$CURRENT_SHELL" in
+    bash)
+        COMPLETION_FILE="$HOME/.bash_completion.d/$BIN_NAME"
+        mkdir -p "$HOME/.bash_completion.d"
+        $BIN_NAME completions bash > "$COMPLETION_FILE" 2>/dev/null || true
+        echo "Bash completions installed to $COMPLETION_FILE"
+        echo "Please run 'source $COMPLETION_FILE' or restart your shell"
+        ;;
+    zsh)
+        COMPLETION_FILE="$HOME/.zsh/_$BIN_NAME"
+        mkdir -p "$HOME/.zsh"
+        $BIN_NAME completions zsh > "$COMPLETION_FILE" 2>/dev/null || true
+        echo "Zsh completions installed to $COMPLETION_FILE"
+        echo "Add 'fpath=(~/.zsh \$fpath)' and 'autoload -U compinit; compinit' to your .zshrc"
+        ;;
+    fish)
+        COMPLETION_FILE="$HOME/.config/fish/completions/$BIN_NAME.fish"
+        mkdir -p "$HOME/.config/fish/completions"
+        $BIN_NAME completions fish > "$COMPLETION_FILE" 2>/dev/null || true
+        echo "Fish completions installed to $COMPLETION_FILE"
+        ;;
+    *)
+        echo "Shell completions for $CURRENT_SHELL not automatically installed."
+        echo "To install manually, run:"
+        echo "  $BIN_NAME completions bash/zsh/fish > ~/.config/completions/$BIN_NAME"
+        ;;
+esac
