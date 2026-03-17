@@ -292,14 +292,16 @@ mod tests {
         let _exit_fn: fn(i32) -> ! = process::exit;
     }
 
-    // Test CrosstermBackend
+    // Test CrosstermBackend - requires actual TTY, skip in CI
     #[test]
+    #[ignore]
     fn test_crossterm_backend_new() {
         let backend = CrosstermBackend::new(std::io::stdout());
         assert!(backend.size().is_ok());
     }
 
     #[test]
+    #[ignore]
     fn test_crossterm_backend_size() {
         let backend = CrosstermBackend::new(std::io::stdout());
         let size = backend.size();
