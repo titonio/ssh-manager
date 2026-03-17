@@ -1225,8 +1225,6 @@ mod tests {
 
     #[test]
     #[serial]
-    #[test]
-    #[serial]
     fn test_write_and_read_cache_roundtrip() {
         let cache_path = get_cache_file_path().unwrap();
         let test_cache_path = cache_path.with_file_name("update_cache_test_roundtrip.json");
