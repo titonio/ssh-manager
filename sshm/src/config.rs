@@ -968,27 +968,27 @@ Host new
         assert!(config.connections.is_empty());
     }
 
-    #[cfg(test)]
     fn import_from_ssh_config_with_path(config: &mut Config, path: &str) -> usize {
-    let entries = parse_ssh_config(path);
-    let mut imported = 0;
+        let entries = parse_ssh_config(path);
+        let mut imported = 0;
 
-    for entry in entries {
-        let host = entry.hostname.unwrap_or(entry.host.clone());
+        for entry in entries {
+            let host = entry.hostname.unwrap_or(entry.host.clone());
 
-        if !config
-            .connections
-            .iter()
-            .any(|c| c.host == host && c.user == entry.user.as_deref().unwrap_or(""))
-        {
-            let mut conn =
-                Connection::new(entry.host.clone(), host, entry.user.unwrap_or_default());
-            conn.port = entry.port.unwrap_or(22);
-            conn.key_path = entry.key_file;
-            config.connections.push(conn);
-            imported += 1;
+            if !config
+                .connections
+                .iter()
+                .any(|c| c.host == host && c.user == entry.user.as_deref().unwrap_or(""))
+            {
+                let mut conn =
+                    Connection::new(entry.host.clone(), host, entry.user.unwrap_or_default());
+                conn.port = entry.port.unwrap_or(22);
+                conn.key_path = entry.key_file;
+                config.connections.push(conn);
+                imported += 1;
+            }
         }
-    }
 
-    imported
+        imported
+    }
 }
