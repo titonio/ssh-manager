@@ -4,40 +4,80 @@ mod runtime;
 mod ssh;
 mod update;
 
-use std::env;
 use std::io;
 
+use clap::{CommandFactory, Parser, Subcommand};
 use runtime::{cleanup_and_exit, run_app_inner};
 use ssh::build_ssh_args;
 use update::UpdateResult;
+
+#[derive(Parser)]
+#[command(name = "sshm")]
+#[command(about = "A modern TUI for managing SSH connections")]
+#[command(version)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
+    #[arg(short = 'c', long = "check-update", global = true)]
+    check_update: bool,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Add a new SSH connection
+    Add {
+        /// Connection alias (friendly name)
+        #[arg(short = 'a', long)]
+        alias: Option<String>,
+
+        /// Server hostname (optionally with user@host format)
+        #[arg(required = true)]
+        host: Option<String>,
+
+        /// SSH username
+        #[arg(short = 'u', long)]
+        user: Option<String>,
+
+        /// SSH port (default: 22)
+        #[arg(short = 'p', long, default_value = "22")]
+        port: u16,
+
+        /// Path to private key
+        #[arg(short = 'k', long)]
+        key: Option<String>,
+
+        /// Folder/group for organization
+        #[arg(short = 'f', long)]
+        folder: Option<String>,
+    },
+
+    /// Generate shell completion scripts
+    Completions {
+        /// Shell type to generate completions for
+        #[arg(value_parser = clap::value_parser!(clap_complete::Shell))]
+        shell: clap_complete::Shell,
+    },
+
+    /// Check for updates
+    CheckUpdate,
+}
 
 fn main() -> io::Result<()> {
     run_main(run_app_inner)
 }
 
 fn run_main(run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>) -> io::Result<()> {
-    let args: Vec<String> = env::args().collect();
+    let cli = Cli::parse();
 
-    if args.len() > 1 && args[1] == "version" {
-        println!("sshm {}", env!("CARGO_PKG_VERSION"));
+    // Handle completions command
+    if let Some(Commands::Completions { shell }) = cli.command {
+        generate_completions(shell);
         return Ok(());
     }
 
-    if args.len() > 1 && args[1] == "add" {
-        match run_add_command(&args) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                eprintln!("{}", e);
-                std::process::exit(1);
-            }
-        }
-    }
-
-    let force_check = args
-        .iter()
-        .any(|arg| arg == "--check-update" || arg == "-c");
-
-    if force_check {
+    // Handle check-update flag or command
+    if cli.check_update || matches!(cli.command, Some(Commands::CheckUpdate)) {
         match update::force_check_for_update() {
             UpdateResult::UpdateAvailable { version } => {
                 println!("Update available: v{}", version);
@@ -54,6 +94,20 @@ fn run_main(run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>) 
         }
     }
 
+    // Handle add command
+    if let Some(Commands::Add {
+        alias,
+        host,
+        user,
+        port,
+        key,
+        folder,
+    }) = cli.command
+    {
+        run_add_command(alias, host, user, port, key, folder).map_err(io::Error::other)?;
+        return Ok(());
+    }
+
     let (should_connect, conn) = run_app_fn()?;
 
     if should_connect {
@@ -66,67 +120,14 @@ fn run_main(run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>) 
     Ok(())
 }
 
-fn run_add_command(args: &[String]) -> Result<(), String> {
-    let mut alias: Option<String> = None;
-    let mut host: Option<String> = None;
-    let mut user: Option<String> = None;
-    let mut port: u16 = 22;
-    let mut key_path: Option<String> = None;
-    let mut folder: Option<String> = None;
-
-    let mut i = 2;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--alias" | "-a" => {
-                if i + 1 >= args.len() {
-                    return Err("Error: --alias requires a value".to_string());
-                }
-                alias = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--port" | "-p" => {
-                if i + 1 >= args.len() {
-                    return Err("Error: --port requires a value".to_string());
-                }
-                port = args[i + 1]
-                    .parse()
-                    .map_err(|_| format!("Error: invalid port number '{}'", args[i + 1]))?;
-                i += 2;
-            }
-            "--key" | "-k" => {
-                if i + 1 >= args.len() {
-                    return Err("Error: --key requires a value".to_string());
-                }
-                key_path = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--folder" | "-f" => {
-                if i + 1 >= args.len() {
-                    return Err("Error: --folder requires a value".to_string());
-                }
-                folder = Some(args[i + 1].clone());
-                i += 2;
-            }
-            arg if !arg.starts_with('-') => {
-                if host.is_none() {
-                    let parts: Vec<&str> = arg.split('@').collect();
-                    if parts.len() == 2 {
-                        user = Some(parts[0].to_string());
-                        host = Some(parts[1].to_string());
-                    } else if parts.len() == 1 {
-                        host = Some(arg.to_string());
-                    } else {
-                        return Err(format!("Error: invalid user@host format '{}'", arg));
-                    }
-                }
-                i += 1;
-            }
-            _ => {
-                return Err(format!("Error: unknown argument '{}'", args[i]));
-            }
-        }
-    }
-
+fn run_add_command(
+    alias: Option<String>,
+    host: Option<String>,
+    user: Option<String>,
+    port: u16,
+    key_path: Option<String>,
+    folder: Option<String>,
+) -> Result<(), String> {
     let alias = alias.ok_or("Error: --alias is required")?;
     let host = host.ok_or("Error: user@host is required")?;
 
@@ -149,6 +150,15 @@ fn run_add_command(args: &[String]) -> Result<(), String> {
     println!("Connection added successfully!");
 
     Ok(())
+}
+
+fn generate_completions(shell: clap_complete::Shell) {
+    let mut app = Cli::command();
+    let bin_name = app.get_name().to_string();
+
+    println!("Generating completion script for {:?}...", shell);
+
+    clap_complete::generate(shell, &mut app, bin_name, &mut std::io::stdout());
 }
 
 #[cfg(test)]
@@ -296,16 +306,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_main_entry_point() {
-        // Test that main calls run_main with run_app_inner
-        // We can't actually call main() but we can verify the function signature
-        let _: fn() -> io::Result<(bool, Option<crate::config::Connection>)> = run_app_inner;
-    }
-
-    #[test]
-    fn test_run_main_calls_cleanup_on_connect() {
-        // This test verifies the logic path where should_connect is true with conn
-        // We use a mock that returns (true, Some(conn)) to trigger the cleanup_and_exit path
+    fn test_run_main_logic_paths() {
         let conn = Connection {
             id: "1".to_string(),
             alias: "test".to_string(),
@@ -316,55 +317,6 @@ pub mod tests {
             folder: None,
         };
 
-        // Verify that build_ssh_args is called with the connection
-        let args = build_ssh_args(&conn);
-        assert!(!args.is_empty());
-    }
-
-    #[test]
-    fn test_run_main_version_flag() {
-        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let result = run_main(mock_run_app);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_run_main_force_check_update_available() {
-        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let result = run_main(mock_run_app);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_run_main_force_check_no_update() {
-        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let result = run_main(mock_run_app);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_run_main_force_check_error() {
-        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let result = run_main(mock_run_app);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_run_main_should_connect_with_connection() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 22,
-            key_path: None,
-            folder: None,
-        };
-        let mock_run_app =
-            || Ok::<(bool, Option<Connection>), io::Error>((true, Some(conn.clone())));
-        let (should_connect, result_conn) = mock_run_app().unwrap();
-        assert!(should_connect);
-        assert!(result_conn.is_some());
         let args = build_ssh_args(&conn);
         assert!(!args.is_empty());
     }

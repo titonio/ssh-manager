@@ -15,6 +15,8 @@ self-github-update-enhanced = { version = "0.39", features = ["archive-tar", "ar
 tar = "0.4"
 flate2 = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
+clap = { version = "4.5", features = ["derive"] }
+clap_complete = "4.5"
 
 
 

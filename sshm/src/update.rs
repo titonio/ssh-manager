@@ -770,6 +770,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_should_check_update_with_cargo_manifest() {
         let old_value = std::env::var("CARGO_MANIFEST_DIR").ok();
         std::env::set_var("CARGO_MANIFEST_DIR", "/tmp/test");
