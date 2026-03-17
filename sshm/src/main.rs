@@ -23,6 +23,16 @@ fn run_main(run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>) 
         return Ok(());
     }
 
+    if args.len() > 1 && args[1] == "add" {
+        match run_add_command(&args) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     let force_check = args
         .iter()
         .any(|arg| arg == "--check-update" || arg == "-c");
@@ -52,6 +62,91 @@ fn run_main(run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>) 
             cleanup_and_exit(&args);
         }
     }
+
+    Ok(())
+}
+
+fn run_add_command(args: &[String]) -> Result<(), String> {
+    let mut alias: Option<String> = None;
+    let mut host: Option<String> = None;
+    let mut user: Option<String> = None;
+    let mut port: u16 = 22;
+    let mut key_path: Option<String> = None;
+    let mut folder: Option<String> = None;
+
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--alias" | "-a" => {
+                if i + 1 >= args.len() {
+                    return Err("Error: --alias requires a value".to_string());
+                }
+                alias = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--port" | "-p" => {
+                if i + 1 >= args.len() {
+                    return Err("Error: --port requires a value".to_string());
+                }
+                port = args[i + 1]
+                    .parse()
+                    .map_err(|_| format!("Error: invalid port number '{}'", args[i + 1]))?;
+                i += 2;
+            }
+            "--key" | "-k" => {
+                if i + 1 >= args.len() {
+                    return Err("Error: --key requires a value".to_string());
+                }
+                key_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--folder" | "-f" => {
+                if i + 1 >= args.len() {
+                    return Err("Error: --folder requires a value".to_string());
+                }
+                folder = Some(args[i + 1].clone());
+                i += 2;
+            }
+            arg if !arg.starts_with('-') => {
+                if host.is_none() {
+                    let parts: Vec<&str> = arg.split('@').collect();
+                    if parts.len() == 2 {
+                        user = Some(parts[0].to_string());
+                        host = Some(parts[1].to_string());
+                    } else if parts.len() == 1 {
+                        host = Some(arg.to_string());
+                    } else {
+                        return Err(format!("Error: invalid user@host format '{}'", arg));
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                return Err(format!("Error: unknown argument '{}'", args[i]));
+            }
+        }
+    }
+
+    let alias = alias.ok_or("Error: --alias is required")?;
+    let host = host.ok_or("Error: user@host is required")?;
+
+    let conn = config::Connection {
+        id: uuid::Uuid::new_v4().to_string(),
+        alias,
+        host,
+        user: user.unwrap_or_default(),
+        port,
+        key_path,
+        folder,
+    };
+
+    let mut config = config::Config::load();
+    config.add_connection(conn);
+    config
+        .save()
+        .map_err(|e| format!("Error saving config: {}", e))?;
+
+    println!("Connection added successfully!");
 
     Ok(())
 }
