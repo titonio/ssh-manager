@@ -1,7 +1,7 @@
 use crate::config::Connection;
 use crate::ssh::build_ssh_args;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Alignment, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, List, ListItem};
 use std::io;
@@ -49,13 +49,6 @@ pub fn run_pick(connections: Vec<Connection>) -> io::Result<PickerOutcome> {
 
             let inner = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
 
-            if connections.is_empty() {
-                let empty =
-                    ratatui::widgets::Paragraph::new("No Connections").alignment(Alignment::Center);
-                f.render_widget(empty, inner);
-                return;
-            }
-
             let items: Vec<ListItem> = connections
                 .iter()
                 .enumerate()
@@ -82,12 +75,12 @@ pub fn run_pick(connections: Vec<Connection>) -> io::Result<PickerOutcome> {
                 continue;
             }
             match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
+                KeyCode::Up => {
                     if selected_index > 0 {
                         selected_index -= 1;
                     }
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
+                KeyCode::Down => {
                     if selected_index < connections.len().saturating_sub(1) {
                         selected_index += 1;
                     }
