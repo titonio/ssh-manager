@@ -1,10 +1,7 @@
 use ratatui::backend::{Backend, TestBackend};
-use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
 use ratatui::Terminal;
-use ratatui::widgets::{Block, Borders, List, ListItem};
 use sshm::config::Connection;
-use sshm::picker::{build_ssh_command, PickerOutcome};
+use sshm::picker::{build_ssh_command, render_picker_frame, PickerOutcome};
 
 fn create_test_connections() -> Vec<Connection> {
     vec![
@@ -38,50 +35,16 @@ fn create_test_connections() -> Vec<Connection> {
     ]
 }
 
-/// Render the inline picker UI onto a TestBackend.
+/// Render the inline picker UI onto a TestBackend using the shared
+/// `render_picker_frame` function, so tests exercise the same code path
+/// as production `run_pick`.
 fn render_picker(connections: &[Connection], selected_index: usize) -> TestBackend {
     let backend = TestBackend::new(80, 15);
     let mut terminal = Terminal::new(backend).unwrap();
 
-    terminal.draw(|f| {
-        let area = f.area();
-        let block = Block::default()
-            .title(" Pick Connection ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(129, 161, 193)));
-
-        f.render_widget(block, area);
-
-        let inner = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
-
-        if connections.is_empty() {
-            let empty =
-                ratatui::widgets::Paragraph::new("No Connections").alignment(Alignment::Center);
-            f.render_widget(empty, inner);
-            return;
-        }
-
-        let items: Vec<ListItem> = connections
-            .iter()
-            .enumerate()
-            .map(|(i, conn)| {
-                let display = format!("{} ({})", conn.alias, conn.host);
-                let is_selected = i == selected_index;
-                let style = if is_selected {
-                    Style::default()
-                        .fg(Color::Rgb(235, 203, 139))
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Rgb(216, 222, 233))
-                };
-                ListItem::new(display).style(style)
-            })
-            .collect();
-
-        let list = List::new(items);
-        f.render_widget(list, inner);
-    })
-    .unwrap();
+    terminal
+        .draw(|f| render_picker_frame(f, connections, selected_index))
+        .unwrap();
 
     terminal.backend().clone()
 }
@@ -163,7 +126,10 @@ fn test_build_ssh_command_with_key() {
         key_path: Some("/path/to/key".to_string()),
         folder: None,
     };
-    assert_eq!(build_ssh_command(&conn), "ssh -i /path/to/key admin@example.com");
+    assert_eq!(
+        build_ssh_command(&conn),
+        "ssh -i /path/to/key admin@example.com"
+    );
 }
 
 #[test]
@@ -205,14 +171,10 @@ fn test_build_ssh_command_full() {
         key_path: Some("/key".to_string()),
         folder: None,
     };
-    assert_eq!(build_ssh_command(&conn), "ssh -i /key -p 2222 admin@example.com");
-}
-
-#[test]
-fn test_run_pick_empty_connections_returns_cancel() {
-    let result = sshm::picker::run_pick(vec![]);
-    assert!(result.is_ok());
-    assert_eq!(result.unwrap(), PickerOutcome::Cancel);
+    assert_eq!(
+        build_ssh_command(&conn),
+        "ssh -i /key -p 2222 admin@example.com"
+    );
 }
 
 #[test]

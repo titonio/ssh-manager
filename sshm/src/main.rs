@@ -78,7 +78,17 @@ fn run_main(
     run_pick_fn: fn(Vec<config::Connection>) -> io::Result<picker::PickerOutcome>,
 ) -> io::Result<()> {
     let cli = Cli::parse();
+    dispatch(cli, run_app_fn, run_pick_fn)
+}
 
+/// Dispatch on an already-parsed CLI. Separated from `run_main` so tests can
+/// drive the pick path (and assert the update checker is never reached)
+/// without relying on `std::env::args`.
+fn dispatch(
+    cli: Cli,
+    run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>,
+    run_pick_fn: fn(Vec<config::Connection>) -> io::Result<picker::PickerOutcome>,
+) -> io::Result<()> {
     // Handle completions command
     if let Some(Commands::Completions { shell }) = cli.command {
         generate_completions(shell);
@@ -369,7 +379,7 @@ pub mod tests {
             key_path: None,
             folder: None,
         };
-        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
+        let _mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
         let mock_run_pick = move |connections: Vec<Connection>| -> io::Result<PickerOutcome> {
             if connections.is_empty() {
                 Ok(PickerOutcome::Cancel)
@@ -430,46 +440,44 @@ pub mod tests {
         assert!(cmd.contains("admin@example.com"));
     }
 
-    /// The spec requires: "Update checker skip is asserted by the injected-runner test
-    /// (the runner is never asked to run it on the pick path)."
-    /// We verify this by providing a mock run_pick_fn that returns Selected,
-    /// and confirming the call chain never reaches the update checker block.
-    /// The structural guarantee is enforced by the code layout: the Pick branch
-    /// returns before the update checker block is reached.
+    /// The spec requires: "Update checker skip is asserted by the injected-runner
+    /// test (the runner is never asked to run it on the pick path)."
+    ///
+    /// We drive the real `dispatch` with a `Cli { command: Some(Pick), ... }` and a
+    /// `run_app_fn` that panics if ever called. The Pick branch returns before the
+    /// update-checker block, so `run_app_fn` is never invoked — proving the update
+    /// checker is structurally skipped on the pick path. We use a thread-local flag
+    /// instead of a panicking closure because `dispatch` returns `Ok(())` on the
+    /// `Selected` path (it writes to stdout and returns) rather than reaching
+    /// `run_app_fn`.
     #[test]
-    fn test_run_main_pick_does_not_invoke_update_checker() {
-        // A mock run_pick that would panic if called after the update checker path
-        // was traversed — but since the Pick branch returns early, it is never reached.
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 22,
-            key_path: None,
-            folder: None,
+    fn test_dispatch_pick_does_not_invoke_update_checker_or_run_app() {
+        // The pick path runs before the update-checker block, so reaching the
+        // Selected return proves dispatch never reached the update checker.
+        let cli = Cli {
+            command: Some(Commands::Pick),
+            check_update: false,
         };
-        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let mock_run_pick = move |connections: Vec<Connection>| -> io::Result<PickerOutcome> {
-            // This mock returns Selected; if the update checker were invoked,
-            // the Pick branch would not have been taken and this wouldn't be called.
-            if connections.is_empty() {
-                Ok(PickerOutcome::Cancel)
-            } else {
-                Ok(PickerOutcome::Selected(connections[0].clone()))
-            }
-        };
-        // We cannot call run_main directly because it parses CLI args,
-        // but we can verify the structural property: run_pick_fn is called
-        // and returns Selected, and the function returns Ok(()) before
-        // reaching the update checker block.
-        let result = mock_run_pick(vec![conn.clone()]);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            PickerOutcome::Selected(c) => {
-                assert_eq!(c.host, "example.com");
-            }
-            _ => panic!("Expected Selected"),
+
+        // A zero-arg fn that panics if ever called, proving the pick path never
+        // falls through to the fullscreen TUI / update-checker branches.
+        fn run_app_that_panics() -> io::Result<(bool, Option<Connection>)> {
+            panic!("run_app_fn must not be called on the pick path");
         }
+
+        let mock_run_pick = |_connections: Vec<Connection>| -> io::Result<PickerOutcome> {
+            Ok(PickerOutcome::Selected(Connection {
+                id: "1".to_string(),
+                alias: "test".to_string(),
+                host: "example.com".to_string(),
+                user: "admin".to_string(),
+                port: 22,
+                key_path: None,
+                folder: None,
+            }))
+        };
+
+        let result = dispatch(cli, run_app_that_panics, mock_run_pick);
+        assert!(result.is_ok());
     }
 }

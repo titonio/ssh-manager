@@ -1,9 +1,9 @@
 use crate::config::Connection;
 use crate::ssh::build_ssh_args;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::layout::Rect;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders, List, ListItem};
+use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use std::io;
 
 /// Outcome of running the picker.
@@ -18,57 +18,100 @@ pub enum PickerOutcome {
 /// How many lines the inline picker occupies by default.
 const DEFAULT_HEIGHT: u16 = 15;
 
+/// Render a single inline picker frame onto `frame`.
+///
+/// Shared between the production `run_pick` and the TestBackend-based tests
+/// so both exercise the same rendering code (no duplicated render logic).
+pub fn render_picker_frame(
+    frame: &mut ratatui::Frame,
+    connections: &[Connection],
+    selected_index: usize,
+) {
+    let area = frame.area();
+    let block = Block::default()
+        .title(" Pick Connection ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Rgb(129, 161, 193)));
+
+    frame.render_widget(block, area);
+
+    let inner = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
+
+    if connections.is_empty() {
+        let empty = Paragraph::new("No Connections").alignment(Alignment::Center);
+        frame.render_widget(empty, inner);
+        return;
+    }
+
+    let items: Vec<ListItem> = connections
+        .iter()
+        .enumerate()
+        .map(|(i, conn)| {
+            let display = format!("{} ({})", conn.alias, conn.host);
+            let is_selected = i == selected_index;
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Rgb(235, 203, 139))
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Rgb(216, 222, 233))
+            };
+            ListItem::new(display).style(style)
+        })
+        .collect();
+
+    let list = List::new(items);
+    frame.render_widget(list, inner);
+}
+
 /// Run the inline picker, returning a `PickerOutcome`.
 ///
 /// This is the injectable seam: callers can pass a mock runner for testing.
 pub fn run_pick(connections: Vec<Connection>) -> io::Result<PickerOutcome> {
+    // Enable raw mode so arrow keys and Ctrl-C arrive as key events instead of
+    // being line-buffered / generating SIGINT. We do NOT call ratatui::init()
+    // (which switches to alt-screen); the picker renders inline below the cursor.
+    crossterm::terminal::enable_raw_mode()?;
+
+    // Guard ensures raw mode and the cursor are restored on every exit path,
+    // including early returns and panics.
+    struct RawModeGuard;
+    impl Drop for RawModeGuard {
+        fn drop(&mut self) {
+            ratatui::restore();
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+    }
+    let _guard = RawModeGuard;
+
+    // Enter alternate screen? No — we deliberately stay inline (Viewport::Inline).
+    crossterm::execute!(io::stdout(), crossterm::cursor::Hide)?;
+
+    let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
+    let mut terminal = ratatui::Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions { viewport: ratatui::Viewport::Inline(DEFAULT_HEIGHT) },
+    )?;
+
+    // With zero Connections, render a "No Connections" message and wait for any
+    // keypress, then cancel. The spec requires the message be shown rather than
+    // crashing or silently exiting.
     if connections.is_empty() {
+        terminal.draw(|f| render_picker_frame(f, &connections, 0))?;
+        // Wait for any keypress to dismiss.
+        loop {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    break;
+                }
+            }
+        }
         return Ok(PickerOutcome::Cancel);
     }
 
-    // We do NOT call ratatui::init() (which switches to alt-screen).
-    // Instead we create a Terminal directly with a CrosstermBackend so
-    // the picker renders inline below the cursor.
-    let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
-    let mut terminal =
-        ratatui::Terminal::with_options(
-            backend,
-            ratatui::TerminalOptions { viewport: ratatui::Viewport::Inline(DEFAULT_HEIGHT) },
-        )?;
-
     let mut selected_index = 0;
     let outcome = loop {
-        terminal.draw(|f| {
-            let area = f.area();
-            let block = Block::default()
-                .title(" Pick Connection ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Rgb(129, 161, 193)));
-
-            f.render_widget(block, area);
-
-            let inner = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
-
-            let items: Vec<ListItem> = connections
-                .iter()
-                .enumerate()
-                .map(|(i, conn)| {
-                    let display = format!("{} ({})", conn.alias, conn.host);
-                    let is_selected = i == selected_index;
-                    let style = if is_selected {
-                        Style::default()
-                            .fg(Color::Rgb(235, 203, 139))
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Rgb(216, 222, 233))
-                    };
-                    ListItem::new(display).style(style)
-                })
-                .collect();
-
-            let list = List::new(items);
-            f.render_widget(list, inner);
-        })?;
+        terminal.draw(|f| render_picker_frame(f, &connections, selected_index))?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
@@ -96,8 +139,6 @@ pub fn run_pick(connections: Vec<Connection>) -> io::Result<PickerOutcome> {
         }
     };
 
-    // Restore terminal state
-    ratatui::restore();
     Ok(outcome)
 }
 
@@ -174,11 +215,22 @@ mod tests {
     }
 
     #[test]
-    fn test_run_pick_empty_connections_returns_cancel() {
-        // When there are no connections, run_pick returns Cancel immediately
-        // without ever opening a terminal.
-        let result = run_pick(vec![]);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), PickerOutcome::Cancel);
+    fn test_render_picker_frame_empty_shows_message() {
+        // Rendering an empty connection list without a real terminal is tested
+        // TTY-free via TestBackend. run_pick itself blocks on a keypress for the
+        // empty case (the spec requires showing the message), so it cannot be
+        // driven directly in a unit test.
+        let backend = ratatui::backend::TestBackend::new(80, 15);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        terminal.draw(|f| render_picker_frame(f, &[], 0)).unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("No Connections"));
     }
 }
