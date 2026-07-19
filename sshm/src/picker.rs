@@ -74,10 +74,13 @@ pub fn run_pick(connections: Vec<Connection>) -> io::Result<PickerOutcome> {
     crossterm::terminal::enable_raw_mode()?;
 
     // Guard ensures raw mode and the cursor are restored on every exit path,
-    // including early returns and panics.
+    // including early returns and panics. We explicitly re-show the cursor
+    // because ratatui::restore() is the counterpart to ratatui::init() (which
+    // we deliberately did NOT call), so it may not emit cursor::Show.
     struct RawModeGuard;
     impl Drop for RawModeGuard {
         fn drop(&mut self) {
+            let _ = crossterm::execute!(io::stdout(), crossterm::cursor::Show);
             ratatui::restore();
             let _ = crossterm::terminal::disable_raw_mode();
         }
@@ -131,7 +134,13 @@ pub fn run_pick(connections: Vec<Connection>) -> io::Result<PickerOutcome> {
                 KeyCode::Enter => {
                     break PickerOutcome::Selected(connections[selected_index].clone());
                 }
-                KeyCode::Esc | KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                // Plain Esc cancels. Note: a guard on an or-pattern binds to
+                // the *whole* pattern, so Esc and Ctrl-C must be separate arms —
+                // `Esc | Char('c') if ctrl` would require Ctrl for BOTH keys.
+                KeyCode::Esc => {
+                    break PickerOutcome::Cancel;
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     break PickerOutcome::Cancel;
                 }
                 _ => {}

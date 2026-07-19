@@ -1,7 +1,7 @@
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::Terminal;
 use sshm::config::Connection;
-use sshm::picker::{build_ssh_command, render_picker_frame, PickerOutcome};
+use sshm::picker::render_picker_frame;
 
 fn create_test_connections() -> Vec<Connection> {
     vec![
@@ -101,97 +101,5 @@ fn test_picker_header() {
     assert!(content.contains("Pick Connection"));
 }
 
-#[test]
-fn test_build_ssh_command_basic() {
-    let conn = Connection {
-        id: "1".to_string(),
-        alias: "test".to_string(),
-        host: "example.com".to_string(),
-        user: "admin".to_string(),
-        port: 22,
-        key_path: None,
-        folder: None,
-    };
-    assert_eq!(build_ssh_command(&conn), "ssh admin@example.com");
-}
-
-#[test]
-fn test_build_ssh_command_with_key() {
-    let conn = Connection {
-        id: "1".to_string(),
-        alias: "test".to_string(),
-        host: "example.com".to_string(),
-        user: "admin".to_string(),
-        port: 22,
-        key_path: Some("/path/to/key".to_string()),
-        folder: None,
-    };
-    assert_eq!(
-        build_ssh_command(&conn),
-        "ssh -i /path/to/key admin@example.com"
-    );
-}
-
-#[test]
-fn test_build_ssh_command_with_port() {
-    let conn = Connection {
-        id: "1".to_string(),
-        alias: "test".to_string(),
-        host: "example.com".to_string(),
-        user: "admin".to_string(),
-        port: 2222,
-        key_path: None,
-        folder: None,
-    };
-    assert_eq!(build_ssh_command(&conn), "ssh -p 2222 admin@example.com");
-}
-
-#[test]
-fn test_build_ssh_command_empty_user() {
-    let conn = Connection {
-        id: "1".to_string(),
-        alias: "test".to_string(),
-        host: "example.com".to_string(),
-        user: "".to_string(),
-        port: 22,
-        key_path: None,
-        folder: None,
-    };
-    assert_eq!(build_ssh_command(&conn), "ssh example.com");
-}
-
-#[test]
-fn test_build_ssh_command_full() {
-    let conn = Connection {
-        id: "1".to_string(),
-        alias: "test".to_string(),
-        host: "example.com".to_string(),
-        user: "admin".to_string(),
-        port: 2222,
-        key_path: Some("/key".to_string()),
-        folder: None,
-    };
-    assert_eq!(
-        build_ssh_command(&conn),
-        "ssh -i /key -p 2222 admin@example.com"
-    );
-}
-
-#[test]
-fn test_picker_outcome_variants() {
-    let cancel = PickerOutcome::Cancel;
-    assert_eq!(cancel, PickerOutcome::Cancel);
-
-    let conn = Connection {
-        id: "1".to_string(),
-        alias: "u".to_string(),
-        host: "h".to_string(),
-        user: "".to_string(),
-        port: 22,
-        key_path: None,
-        folder: None,
-    };
-    let selected = PickerOutcome::Selected(conn.clone());
-    assert_eq!(selected, PickerOutcome::Selected(conn));
-    assert_ne!(selected, PickerOutcome::Cancel);
-}
+// build_ssh_command and PickerOutcome variant tests live in src/picker.rs
+// unit tests to avoid duplication (they're pure functions tested TTY-free).

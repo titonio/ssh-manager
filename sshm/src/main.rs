@@ -368,59 +368,9 @@ pub mod tests {
         assert!(!args.is_empty());
     }
 
-    #[test]
-    fn test_run_main_pick_selected_connection() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 22,
-            key_path: None,
-            folder: None,
-        };
-        let _mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let mock_run_pick = move |connections: Vec<Connection>| -> io::Result<PickerOutcome> {
-            if connections.is_empty() {
-                Ok(PickerOutcome::Cancel)
-            } else {
-                Ok(PickerOutcome::Selected(connections[0].clone()))
-            }
-        };
-        // The mock_run_pick returns Selected — we verify the seam works
-        let result = mock_run_pick(vec![conn.clone()]);
-        assert!(result.is_ok());
-        match result.unwrap() {
-            PickerOutcome::Selected(c) => {
-                assert_eq!(c.host, "example.com");
-            }
-            _ => panic!("Expected Selected"),
-        }
-    }
-
-    #[test]
-    fn test_run_main_pick_cancel() {
-        let mock_run_pick = |_connections: Vec<Connection>| -> io::Result<PickerOutcome> {
-            Ok(PickerOutcome::Cancel)
-        };
-        let result = mock_run_pick(vec![]);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), PickerOutcome::Cancel);
-    }
-
-    #[test]
-    fn test_run_main_pick_no_connections_returns_cancel() {
-        let mock_run_pick = |connections: Vec<Connection>| -> io::Result<PickerOutcome> {
-            if connections.is_empty() {
-                Ok(PickerOutcome::Cancel)
-            } else {
-                Ok(PickerOutcome::Selected(connections[0].clone()))
-            }
-        };
-        let result = mock_run_pick(vec![]);
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), PickerOutcome::Cancel);
-    }
+    // NOTE: pick-path branch behavior is asserted via dispatch in
+    // test_dispatch_pick_does_not_invoke_update_checker_or_run_app below,
+    // which drives the real dispatch logic rather than a standalone mock.
 
     #[test]
     fn test_run_main_pick_build_ssh_command_reuses_args() {
