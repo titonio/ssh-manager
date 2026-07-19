@@ -100,9 +100,25 @@ jobs:
     - name: Install cargo-audit
       uses: taiki-e/install-action@cargo-audit
 
+    # The advisories ignored below are all in *transitive* dependencies of
+    # `self-github-update-enhanced` (the only published self-update crate
+    # available for this target). We cannot upgrade them directly:
+    #
+    #   - quick-xml 0.3.1 (RUSTSEC-2026-0194, RUSTSEC-2026-0195): pinned by
+    #     self-github-update-enhanced 0.39.2; quick-xml 0.41+ is API-
+    #     incompatible. Exposure limited to parsing GitHub release metadata.
+    #   - number_prefix 0.4.0 (RUSTSEC-2025-0119): unmaintained, pulled by
+    #     `indicatif` <- self-github-update-enhanced. No fixed version exists.
+    #
+    # Remove these ignores once self-github-update-enhanced releases a version
+    # that bumps quick-xml/indicatif.
     - name: Security audit
       working-directory: sshm
-      run: cargo audit
+      run: |
+        cargo audit \
+          --ignore RUSTSEC-2026-0195 \
+          --ignore RUSTSEC-2026-0194 \
+          --ignore RUSTSEC-2025-0119
 
   build-linux:
     if: startsWith(github.ref, 'refs/tags/v')
