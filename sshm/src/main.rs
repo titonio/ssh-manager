@@ -62,6 +62,13 @@ enum Commands {
         shell: clap_complete::Shell,
     },
 
+    /// Generate shell initialization scripts
+    Init {
+        /// Shell type to generate initialization script for
+        #[arg(value_parser = clap::value_parser!(ShellType))]
+        shell: ShellType,
+    },
+
     /// Check for updates
     CheckUpdate,
 
@@ -71,6 +78,11 @@ enum Commands {
         #[arg(long)]
         query: Option<String>,
     },
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum ShellType {
+    Zsh,
 }
 
 fn main() -> io::Result<()> {
@@ -97,6 +109,16 @@ fn dispatch(
     if let Some(Commands::Completions { shell }) = cli.command {
         generate_completions(shell);
         return Ok(());
+    }
+
+    // Handle init command
+    if let Some(Commands::Init { shell }) = cli.command {
+        match shell {
+            ShellType::Zsh => {
+                print_init_zsh_script();
+                return Ok(());
+            }
+        }
     }
 
     // Handle pick command — inline picker (insert, don't execute)
@@ -200,6 +222,102 @@ fn generate_completions(shell: clap_complete::Shell) {
     println!("Generating completion script for {:?}...", shell);
 
     clap_complete::generate(shell, &mut app, bin_name, &mut std::io::stdout());
+}
+
+/// Generate the zsh initialization script for the inline picker widget.
+/// 
+/// Returns the script content as a string for testing and printing.
+fn generate_init_zsh_script() -> String {
+    // Default bind key (Ctrl+Alt+S)
+    let default_bind_key = "^[[27;2~";
+    
+    // Check for SSHM_NO_BIND environment variable
+    let no_bind = std::env::var("SSHM_NO_BIND").is_ok();
+    
+    // Check for custom bind key via SSHM_BIND_KEY environment variable
+    let bind_key = std::env::var("SSHM_BIND_KEY").unwrap_or_else(|_| default_bind_key.to_string());
+    
+    if no_bind {
+        r#"# sshm init zsh - Inline Picker Widget (no bind)
+# Sourced via: eval "$(sshm init zsh)"
+# Note: Bind lines suppressed by SSHM_NO_BIND=1
+
+# ZLE widget function for sshm inline picker
+_sshm_inline_picker() {
+    # Save the current buffer
+    local saved_buffer="$BUFFER"
+    
+    # Run the picker with the current buffer as the query
+    local result
+    result=$(sshm pick --query "$BUFFER")
+    local exit_code=$?
+    
+    # On non-zero exit (cancel), restore the buffer
+    if [[ $exit_code -ne 0 ]]; then
+        BUFFER="$saved_buffer"
+        zle reset-prompt
+        return
+    fi
+    
+    # On success (exit 0), splice the result into LBUFFER
+    if [[ -n "$result" ]]; then
+        LBUFFER+="$result"
+        # Move cursor to the end
+        CURSOR=${#LBUFFER}
+    fi
+    
+    # Redraw the prompt
+    zle reset-prompt
+}
+
+# Register the ZLE widget
+zle -N _sshm_inline_picker
+"#.to_string()
+    } else {
+        format!(r#"# sshm init zsh - Inline Picker Widget
+# Sourced via: eval "$(sshm init zsh)"
+# Bind key: {} (override with SSHM_BIND_KEY)
+
+# ZLE widget function for sshm inline picker
+_sshm_inline_picker() {{
+    # Save the current buffer
+    local saved_buffer="$BUFFER"
+    
+    # Run the picker with the current buffer as the query
+    local result
+    result=$(sshm pick --query "$BUFFER")
+    local exit_code=$?
+    
+    # On non-zero exit (cancel), restore the buffer
+    if [[ $exit_code -ne 0 ]]; then
+        BUFFER="$saved_buffer"
+        zle reset-prompt
+        return
+    fi
+    
+    # On success (exit 0), splice the result into LBUFFER
+    if [[ -n "$result" ]]; then
+        LBUFFER+="$result"
+        # Move cursor to the end
+        CURSOR=${{#LBUFFER}}
+    fi
+    
+    # Redraw the prompt
+    zle reset-prompt
+}}
+
+# Register the ZLE widget
+zle -N _sshm_inline_picker
+
+# Bind the widget to the trigger key
+bindkey '{}' _sshm_inline_picker
+"#, bind_key, bind_key)
+    }
+}
+
+/// Print the zsh initialization script for the inline picker widget.
+fn print_init_zsh_script() {
+    print!("{}", generate_init_zsh_script());
 }
 
 #[cfg(test)]
@@ -434,5 +552,222 @@ pub mod tests {
 
         let result = dispatch(cli, run_app_that_panics, mock_run_pick);
         assert!(result.is_ok());
+    }
+
+    // ── sshm init zsh snapshot tests (AC8, AC9) ──────────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_init_zsh_default() {
+        // Clear any env overrides
+        std::env::remove_var("SSHM_NO_BIND");
+        std::env::remove_var("SSHM_BIND_KEY");
+        
+        let script = generate_init_zsh_script();
+        insta::assert_snapshot!(script, @r###"
+        # sshm init zsh - Inline Picker Widget
+        # Sourced via: eval "$(sshm init zsh)"
+        # Bind key: ^[[27;2~ (override with SSHM_BIND_KEY)
+
+        # ZLE widget function for sshm inline picker
+        _sshm_inline_picker() {
+            # Save the current buffer
+            local saved_buffer="$BUFFER"
+            
+            # Run the picker with the current buffer as the query
+            local result
+            result=$(sshm pick --query "$BUFFER")
+            local exit_code=$?
+            
+            # On non-zero exit (cancel), restore the buffer
+            if [[ $exit_code -ne 0 ]]; then
+                BUFFER="$saved_buffer"
+                zle reset-prompt
+                return
+            fi
+            
+            # On success (exit 0), splice the result into LBUFFER
+            if [[ -n "$result" ]]; then
+                LBUFFER+="$result"
+                # Move cursor to the end
+                CURSOR=${#LBUFFER}
+            fi
+            
+            # Redraw the prompt
+            zle reset-prompt
+        }
+
+        # Register the ZLE widget
+        zle -N _sshm_inline_picker
+
+        # Bind the widget to the trigger key
+        bindkey '^[[27;2~' _sshm_inline_picker
+        "###);
+    }
+
+    #[test]
+    fn test_snapshot_init_zsh_no_bind() {
+        // Set SSHM_NO_BIND to suppress bind lines
+        std::env::set_var("SSHM_NO_BIND", "1");
+        std::env::remove_var("SSHM_BIND_KEY");
+        
+        let script = generate_init_zsh_script();
+        insta::assert_snapshot!(script, @r###"
+        # sshm init zsh - Inline Picker Widget (no bind)
+        # Sourced via: eval "$(sshm init zsh)"
+        # Note: Bind lines suppressed by SSHM_NO_BIND=1
+
+        # ZLE widget function for sshm inline picker
+        _sshm_inline_picker() {
+            # Save the current buffer
+            local saved_buffer="$BUFFER"
+            
+            # Run the picker with the current buffer as the query
+            local result
+            result=$(sshm pick --query "$BUFFER")
+            local exit_code=$?
+            
+            # On non-zero exit (cancel), restore the buffer
+            if [[ $exit_code -ne 0 ]]; then
+                BUFFER="$saved_buffer"
+                zle reset-prompt
+                return
+            fi
+            
+            # On success (exit 0), splice the result into LBUFFER
+            if [[ -n "$result" ]]; then
+                LBUFFER+="$result"
+                # Move cursor to the end
+                CURSOR=${#LBUFFER}
+            fi
+            
+            # Redraw the prompt
+            zle reset-prompt
+        }
+
+        # Register the ZLE widget
+        zle -N _sshm_inline_picker
+        "###);
+        
+        // Clean up
+        std::env::remove_var("SSHM_NO_BIND");
+    }
+
+    #[test]
+    fn test_snapshot_init_zsh_custom_bind_key() {
+        // Clear SSHM_NO_BIND and set custom SSHM_BIND_KEY
+        std::env::remove_var("SSHM_NO_BIND");
+        std::env::set_var("SSHM_BIND_KEY", "^S");
+        
+        let script = generate_init_zsh_script();
+        insta::assert_snapshot!(script, @r###"
+        # sshm init zsh - Inline Picker Widget
+        # Sourced via: eval "$(sshm init zsh)"
+        # Bind key: ^S (override with SSHM_BIND_KEY)
+
+        # ZLE widget function for sshm inline picker
+        _sshm_inline_picker() {
+            # Save the current buffer
+            local saved_buffer="$BUFFER"
+            
+            # Run the picker with the current buffer as the query
+            local result
+            result=$(sshm pick --query "$BUFFER")
+            local exit_code=$?
+            
+            # On non-zero exit (cancel), restore the buffer
+            if [[ $exit_code -ne 0 ]]; then
+                BUFFER="$saved_buffer"
+                zle reset-prompt
+                return
+            fi
+            
+            # On success (exit 0), splice the result into LBUFFER
+            if [[ -n "$result" ]]; then
+                LBUFFER+="$result"
+                # Move cursor to the end
+                CURSOR=${#LBUFFER}
+            fi
+            
+            # Redraw the prompt
+            zle reset-prompt
+        }
+
+        # Register the ZLE widget
+        zle -N _sshm_inline_picker
+
+        # Bind the widget to the trigger key
+        bindkey '^S' _sshm_inline_picker
+        "###);
+        
+        // Clean up
+        std::env::remove_var("SSHM_BIND_KEY");
+    }
+
+    // ── sshm init zsh contract assertions (AC9) ──────────────────────────────────────────────
+
+    #[test]
+    fn test_init_zsh_contains_sshm_pick() {
+        let script = generate_init_zsh_script();
+        assert!(script.contains("sshm pick"));
+    }
+
+    #[test]
+    fn test_init_zsh_seeds_query_buffer() {
+        let script = generate_init_zsh_script();
+        assert!(script.contains("--query \"$BUFFER\""));
+    }
+
+    #[test]
+    fn test_init_zsh_binds_ctrl_alt_s_by_default() {
+        std::env::remove_var("SSHM_NO_BIND");
+        std::env::remove_var("SSHM_BIND_KEY");
+        
+        let script = generate_init_zsh_script();
+        assert!(script.contains("bindkey"));
+        assert!(script.contains("^[[27;2~"));
+    }
+
+    #[test]
+    fn test_init_zsh_suppresses_bind_with_no_bind_flag() {
+        std::env::set_var("SSHM_NO_BIND", "1");
+        
+        let script = generate_init_zsh_script();
+        assert!(!script.contains("bindkey"));
+        assert!(script.contains("no bind"));
+        
+        // Clean up
+        std::env::remove_var("SSHM_NO_BIND");
+    }
+
+    #[test]
+    fn test_init_zsh_honors_sshm_bind_key() {
+        std::env::remove_var("SSHM_NO_BIND");
+        std::env::set_var("SSHM_BIND_KEY", "^X");
+        
+        let script = generate_init_zsh_script();
+        assert!(script.contains("bindkey"));
+        assert!(script.contains("'^X'"));
+        
+        // Clean up
+        std::env::remove_var("SSHM_BIND_KEY");
+    }
+
+    #[test]
+    fn test_init_zsh_splices_into_lbuffer_with_cursor_to_end() {
+        let script = generate_init_zsh_script();
+        assert!(script.contains("LBUFFER+="));
+        assert!(script.contains("CURSOR=${#LBUFFER}"));
+    }
+
+    #[test]
+    fn test_init_zsh_calls_reset_prompt() {
+        let script = generate_init_zsh_script();
+        assert!(script.contains("zle reset-prompt"));
+    }
+
+    #[test]
+    fn test_init_zsh_restores_buffer_on_cancel() {
+        let script = generate_init_zsh_script();
+        assert!(script.contains("BUFFER=\"$saved_buffer\""));
     }
 }
