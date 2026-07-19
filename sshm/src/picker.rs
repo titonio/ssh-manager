@@ -35,7 +35,12 @@ pub fn render_picker_frame(
 
     frame.render_widget(block, area);
 
-    let inner = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), area.height.saturating_sub(2));
+    let inner = Rect::new(
+        area.x + 1,
+        area.y + 1,
+        area.width.saturating_sub(2),
+        area.height.saturating_sub(2),
+    );
 
     if connections.is_empty() {
         let empty = Paragraph::new("No Connections").alignment(Alignment::Center);
@@ -93,7 +98,9 @@ pub fn run_pick(connections: Vec<Connection>) -> io::Result<PickerOutcome> {
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
     let mut terminal = ratatui::Terminal::with_options(
         backend,
-        ratatui::TerminalOptions { viewport: ratatui::Viewport::Inline(DEFAULT_HEIGHT) },
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Inline(DEFAULT_HEIGHT),
+        },
     )?;
 
     // With zero Connections, render a "No Connections" message and wait for any
@@ -191,7 +198,10 @@ mod tests {
     #[test]
     fn test_build_ssh_command_with_key() {
         let conn = make_connection("admin", "example.com", 22, Some("/path/to/key"));
-        assert_eq!(build_ssh_command(&conn), "ssh -i /path/to/key admin@example.com");
+        assert_eq!(
+            build_ssh_command(&conn),
+            "ssh -i /path/to/key admin@example.com"
+        );
     }
 
     #[test]
@@ -209,7 +219,10 @@ mod tests {
     #[test]
     fn test_build_ssh_command_full() {
         let conn = make_connection("admin", "example.com", 2222, Some("/key"));
-        assert_eq!(build_ssh_command(&conn), "ssh -i /key -p 2222 admin@example.com");
+        assert_eq!(
+            build_ssh_command(&conn),
+            "ssh -i /key -p 2222 admin@example.com"
+        );
     }
 
     #[test]

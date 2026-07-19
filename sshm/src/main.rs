@@ -8,8 +8,8 @@ mod update;
 use std::io;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use picker::run_pick;
 use picker::build_ssh_command;
+use picker::run_pick;
 use runtime::{cleanup_and_exit, run_app_inner};
 use ssh::build_ssh_args;
 use update::UpdateResult;
@@ -213,9 +213,8 @@ pub mod tests {
     #[test]
     fn test_main_should_connect_false_returns_ok() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let mock_run_pick = |_c: Vec<Connection>| -> io::Result<PickerOutcome> {
-            Ok(PickerOutcome::Cancel)
-        };
+        let mock_run_pick =
+            |_c: Vec<Connection>| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
         let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
@@ -242,9 +241,8 @@ pub mod tests {
     #[test]
     fn test_main_should_connect_true_no_conn() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((true, None));
-        let mock_run_pick = |_c: Vec<Connection>| -> io::Result<PickerOutcome> {
-            Ok(PickerOutcome::Cancel)
-        };
+        let mock_run_pick =
+            |_c: Vec<Connection>| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
         let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
@@ -327,9 +325,8 @@ pub mod tests {
     #[test]
     fn test_run_main_logic() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let mock_run_pick = |_c: Vec<Connection>| -> io::Result<PickerOutcome> {
-            Ok(PickerOutcome::Cancel)
-        };
+        let mock_run_pick =
+            |_c: Vec<Connection>| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
         let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
