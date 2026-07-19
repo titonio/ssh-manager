@@ -162,6 +162,12 @@ pub fn build_picker_row_spans<'a>(
         .fg(HIGHLIGHT_FG)
         .add_modifier(HIGHLIGHT_MOD);
 
+    // Style for selected row background (used when no character-level highlights)
+    let selected_style = Style::default()
+        .bg(Color::Rgb(129, 161, 193))
+        .fg(Color::Rgb(236, 239, 244))
+        .add_modifier(Modifier::BOLD);
+
     let mut spans: Vec<Span> = Vec::new();
     for (idx, ch) in text.char_indices() {
         if highlight_set.contains(&idx) {
@@ -176,6 +182,9 @@ pub fn build_picker_row_spans<'a>(
             } else {
                 Span::styled(ch.to_string(), highlight_style)
             });
+        } else if is_selected {
+            // Apply selected row style to non-highlighted characters
+            spans.push(Span::styled(ch.to_string(), selected_style));
         } else {
             spans.push(Span::raw(ch.to_string()));
         }
@@ -272,7 +281,14 @@ pub fn render_picker_frame(
 
     let list_height = inner.height.saturating_sub(1);
     let list_area = Rect::new(inner.x, inner.y + 1, inner.width, list_height);
-    let list = List::new(items);
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .bg(Color::Rgb(129, 161, 193))
+                .fg(Color::Rgb(236, 239, 244))
+                .add_modifier(Modifier::BOLD)
+        )
+        .highlight_symbol("> ");
     frame.render_widget(list, list_area);
 
     let footer_text = "↑↓/j k: Navigate | Enter: Select | Esc/Ctrl-C: Cancel";
@@ -308,6 +324,12 @@ pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Resu
     }
     let _guard = RawModeGuard;
 
+    // Disable mouse support to ensure all input goes to key handlers
+    crossterm::execute!(io::stdout(), crossterm::event::DisableMouseCapture)?;
+    // Disable focus events to prevent them from interfering with key handling
+    crossterm::execute!(io::stdout(), crossterm::event::DisableFocusChange)?;
+    // Disable bracketed paste to ensure paste events don't interfere
+    crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste)?;
     crossterm::execute!(io::stdout(), crossterm::cursor::Hide)?;
 
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
@@ -323,6 +345,11 @@ pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Resu
     let mut matches = compute_matches(&connections, &matcher, &query);
     let mut selected_index = 0;
 
+    // Ensure selected_index is valid even with empty matches
+    if !matches.is_empty() && selected_index >= matches.len() {
+        selected_index = matches.len().saturating_sub(1);
+    }
+
     if connections.is_empty() {
         terminal
             .draw(|f| render_picker_frame(f, &connections, &matches, selected_index, &query))?;
@@ -336,11 +363,22 @@ pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Resu
         return Ok(PickerOutcome::Cancel);
     }
 
+    // Initial draw to ensure the UI is rendered before we start reading input
+    terminal
+        .draw(|f| render_picker_frame(f, &connections, &matches, selected_index, &query))?;
+
+    // Ensure the terminal is ready for input before entering the main loop
+    // This helps with terminals that need a moment to initialize after enabling raw mode
+    let _ = event::poll(std::time::Duration::from_millis(100));
+
     // Recompute matches from the current query and clamp selected_index.
     // Shared between Backspace and Char arms to avoid duplicated code.
     let recompute = |query: &str, matches: &mut Vec<MatchResult>, selected_index: &mut usize| {
         *matches = compute_matches(&connections, &matcher, query);
-        if *selected_index >= matches.len() {
+        // Clamp selected_index to valid range, handling empty matches case
+        if matches.is_empty() {
+            *selected_index = 0;
+        } else if *selected_index >= matches.len() {
             *selected_index = matches.len().saturating_sub(1);
         }
     };
@@ -350,9 +388,8 @@ pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Resu
             .draw(|f| render_picker_frame(f, &connections, &matches, selected_index, &query))?;
 
         if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
+            // Process all key events (Press, Repeat, Release)
+            // This ensures navigation works even if terminal sends different event kinds
             match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     selected_index = selected_index.saturating_sub(1);

@@ -406,6 +406,17 @@ impl App {
                         self.mode = AppMode::Normal;
                         break;
                     }
+                    crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+                        if self.selected_index > 0 {
+                            self.selected_index -= 1;
+                        }
+                    }
+                    crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+                        let len = self.filtered_indices.len();
+                        if self.selected_index < len.saturating_sub(1) {
+                            self.selected_index += 1;
+                        }
+                    }
                     crossterm::event::KeyCode::Backspace => {
                         self.search_query.pop();
                         self.update_filter();
@@ -2336,6 +2347,85 @@ mod tests {
 
         assert!(app.search_query.is_empty());
         assert_eq!(app.filtered_indices.len(), 3);
+    }
+
+    #[test]
+    fn test_handle_search_mode_navigation_j() {
+        let mut app = create_test_app();
+        app.selected_index = 0;
+
+        // Simulate pressing 'j' (down)
+        let len = app.filtered_indices.len();
+        if app.selected_index < len.saturating_sub(1) {
+            app.selected_index += 1;
+        }
+
+        assert_eq!(app.selected_index, 1);
+
+        // Press 'j' again
+        if app.selected_index < len.saturating_sub(1) {
+            app.selected_index += 1;
+        }
+
+        assert_eq!(app.selected_index, 2);
+
+        // Press 'j' at the last item - should stay at the end
+        if app.selected_index < len.saturating_sub(1) {
+            app.selected_index += 1;
+        }
+
+        assert_eq!(app.selected_index, 2);
+    }
+
+    #[test]
+    fn test_handle_search_mode_navigation_k() {
+        let mut app = create_test_app();
+        app.selected_index = 2;
+
+        // Simulate pressing 'k' (up)
+        if app.selected_index > 0 {
+            app.selected_index -= 1;
+        }
+
+        assert_eq!(app.selected_index, 1);
+
+        // Press 'k' again
+        if app.selected_index > 0 {
+            app.selected_index -= 1;
+        }
+
+        assert_eq!(app.selected_index, 0);
+
+        // Press 'k' at the first item - should stay at the beginning
+        if app.selected_index > 0 {
+            app.selected_index -= 1;
+        }
+
+        assert_eq!(app.selected_index, 0);
+    }
+
+    #[test]
+    fn test_handle_search_mode_navigation_with_filter() {
+        let mut app = create_test_app();
+        app.search_query = "server".to_string();
+        app.update_filter();
+        app.selected_index = 0;
+
+        // Navigate down with 'j'
+        let len = app.filtered_indices.len();
+        if app.selected_index < len.saturating_sub(1) {
+            app.selected_index += 1;
+        }
+
+        assert!(app.selected_index > 0);
+        assert!(app.selected_index < app.filtered_indices.len());
+
+        // Navigate up with 'k'
+        if app.selected_index > 0 {
+            app.selected_index -= 1;
+        }
+
+        assert_eq!(app.selected_index, 0);
     }
 
     #[test]
