@@ -1,0 +1,6 @@
+---
+source: src/picker.rs
+assertion_line: 959
+expression: content
+---
+┌ Pick Connection ─────────────────────────────────────────────────────────────┐│Type to search...                                                             ││[production] prod-server (admin@192.168.1.10:22)                              ││[development] dev-server (developer@192.168.1.20:2222)                        ││web-server (www@example.com:22)                                               ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││             ↑↓/j k: Navigate | Enter: Select | Esc/Ctrl-C: Cancel            │└──────────────────────────────────────────────────────────────────────────────┘

@@ -66,7 +66,11 @@ enum Commands {
     CheckUpdate,
 
     /// Open an inline picker to select a Connection (insert, don't execute)
-    Pick,
+    Pick {
+        /// Seed the picker with an initial fuzzy query (for shell widget integration)
+        #[arg(long)]
+        query: Option<String>,
+    },
 }
 
 fn main() -> io::Result<()> {
@@ -75,7 +79,7 @@ fn main() -> io::Result<()> {
 
 fn run_main(
     run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>,
-    run_pick_fn: fn(Vec<config::Connection>) -> io::Result<picker::PickerOutcome>,
+    run_pick_fn: fn(Vec<config::Connection>, String) -> io::Result<picker::PickerOutcome>,
 ) -> io::Result<()> {
     let cli = Cli::parse();
     dispatch(cli, run_app_fn, run_pick_fn)
@@ -87,7 +91,7 @@ fn run_main(
 fn dispatch(
     cli: Cli,
     run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>,
-    run_pick_fn: fn(Vec<config::Connection>) -> io::Result<picker::PickerOutcome>,
+    run_pick_fn: fn(Vec<config::Connection>, String) -> io::Result<picker::PickerOutcome>,
 ) -> io::Result<()> {
     // Handle completions command
     if let Some(Commands::Completions { shell }) = cli.command {
@@ -96,9 +100,9 @@ fn dispatch(
     }
 
     // Handle pick command — inline picker (insert, don't execute)
-    if matches!(cli.command, Some(Commands::Pick)) {
+    if let Some(Commands::Pick { query }) = cli.command {
         let connections = config::Config::load().connections;
-        match run_pick_fn(connections) {
+        match run_pick_fn(connections, query.unwrap_or_default()) {
             Ok(picker::PickerOutcome::Selected(conn)) => {
                 println!("{}", build_ssh_command(&conn));
                 return Ok(());
@@ -213,8 +217,9 @@ pub mod tests {
     #[test]
     fn test_main_should_connect_false_returns_ok() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let mock_run_pick =
-            |_c: Vec<Connection>| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
+        let mock_run_pick = |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> {
+            Ok(PickerOutcome::Cancel)
+        };
         let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
@@ -241,8 +246,9 @@ pub mod tests {
     #[test]
     fn test_main_should_connect_true_no_conn() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((true, None));
-        let mock_run_pick =
-            |_c: Vec<Connection>| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
+        let mock_run_pick = |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> {
+            Ok(PickerOutcome::Cancel)
+        };
         let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
@@ -325,8 +331,9 @@ pub mod tests {
     #[test]
     fn test_run_main_logic() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let mock_run_pick =
-            |_c: Vec<Connection>| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
+        let mock_run_pick = |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> {
+            Ok(PickerOutcome::Cancel)
+        };
         let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
@@ -402,7 +409,7 @@ pub mod tests {
         // The pick path runs before the update-checker block, so reaching the
         // Selected return proves dispatch never reached the update checker.
         let cli = Cli {
-            command: Some(Commands::Pick),
+            command: Some(Commands::Pick { query: None }),
             check_update: false,
         };
 
@@ -412,17 +419,18 @@ pub mod tests {
             panic!("run_app_fn must not be called on the pick path");
         }
 
-        let mock_run_pick = |_connections: Vec<Connection>| -> io::Result<PickerOutcome> {
-            Ok(PickerOutcome::Selected(Connection {
-                id: "1".to_string(),
-                alias: "test".to_string(),
-                host: "example.com".to_string(),
-                user: "admin".to_string(),
-                port: 22,
-                key_path: None,
-                folder: None,
-            }))
-        };
+        let mock_run_pick =
+            |_connections: Vec<Connection>, _query: String| -> io::Result<PickerOutcome> {
+                Ok(PickerOutcome::Selected(Connection {
+                    id: "1".to_string(),
+                    alias: "test".to_string(),
+                    host: "example.com".to_string(),
+                    user: "admin".to_string(),
+                    port: 22,
+                    key_path: None,
+                    folder: None,
+                }))
+            };
 
         let result = dispatch(cli, run_app_that_panics, mock_run_pick);
         assert!(result.is_ok());
