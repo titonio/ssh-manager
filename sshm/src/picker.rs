@@ -71,20 +71,30 @@ pub fn compute_matches(
             ("folder", conn.folder.as_deref().unwrap_or("")),
         ];
 
-        let mut best_score: i64 = i64::MIN;
-        let mut best_indices: Option<Vec<usize>> = None;
+        let offsets = compute_field_offsets(conn);
 
-        for (_field_name, field) in &fields {
+        let mut best_score: i64 = i64::MIN;
+        let mut best_display_indices: Option<Vec<usize>> = None;
+
+        for (field_name, field) in &fields {
             if let Some((score, indices)) = matcher.fuzzy_indices(field, query) {
                 if score > best_score {
                     best_score = score;
-                    best_indices = Some(indices);
+                    // Map field-relative indices to absolute display positions.
+                    let field_start = offsets
+                        .iter()
+                        .find(|(n, _, _)| n == field_name)
+                        .map(|(_, s, _)| *s)
+                        .unwrap_or(0);
+                    best_display_indices = Some(
+                        indices.iter().map(|&i| field_start + i).collect(),
+                    );
                 }
             }
         }
 
-        if let Some(indices) = best_indices {
-            results.push((i, best_score, indices));
+        if let Some(display_indices) = best_display_indices {
+            results.push((i, best_score, display_indices));
         }
     }
 
@@ -126,7 +136,7 @@ pub fn compute_field_offsets(conn: &Connection) -> Vec<(&str, usize, usize)> {
     };
     offsets.push(("alias", alias_start, alias_start + conn.alias.len()));
 
-    let user_start = alias_start + conn.alias.len() + 3;
+    let user_start = alias_start + conn.alias.len() + 2; // " (" is 2 chars
     offsets.push(("user", user_start, user_start + conn.user.len()));
 
     let host_start = user_start + conn.user.len() + 1;
@@ -147,28 +157,16 @@ pub fn compute_field_offsets(conn: &Connection) -> Vec<(&str, usize, usize)> {
 }
 
 /// Build a `Vec<Span>` for a single picker row with matched-char highlighting.
+///
+/// `highlight_indices` are **absolute display positions** (as produced by
+/// `compute_matches`). No offset translation is needed here.
 pub fn build_picker_row_spans<'a>(
     conn: &'a Connection,
     highlight_indices: &'a [usize],
     is_selected: bool,
 ) -> Vec<Span<'a>> {
     let text = build_row_text(conn);
-    let offsets = compute_field_offsets(conn);
-
-    let highlight_set: HashSet<usize> = highlight_indices
-        .iter()
-        .filter_map(|&field_pos| {
-            for (_name, start, end) in &offsets {
-                if *start <= field_pos && field_pos < *end {
-                    let display_pos = field_pos - start;
-                    if display_pos < text.len() {
-                        return Some(display_pos);
-                    }
-                }
-            }
-            None
-        })
-        .collect();
+    let highlight_set: HashSet<usize> = highlight_indices.iter().copied().collect();
 
     let highlight_style = Style::default()
         .fg(HIGHLIGHT_FG)
@@ -231,7 +229,7 @@ pub fn build_picker_rows<'a>(
 pub fn render_picker_frame(
     frame: &mut ratatui::Frame,
     connections: &[Connection],
-    matches: &[(usize, i64, Vec<usize>)],
+    matches: &[MatchResult],
     selected_index: usize,
     query: &str,
 ) {
@@ -287,7 +285,7 @@ pub fn render_picker_frame(
     let list = List::new(items);
     frame.render_widget(list, list_area);
 
-    let footer_text = "↑↓/j k: Navigate | Enter: Select | Esc: Cancel";
+    let footer_text = "↑↓/j k: Navigate | Enter: Select | Esc/Ctrl-C: Cancel";
     let footer_area = Rect::new(
         inner.x,
         inner.y + inner.height.saturating_sub(1),
@@ -350,6 +348,15 @@ pub fn run_pick(
         return Ok(PickerOutcome::Cancel);
     }
 
+    // Recompute matches from the current query and clamp selected_index.
+    // Shared between Backspace and Char arms to avoid duplicated code.
+    let recompute = |query: &str, matches: &mut Vec<MatchResult>, selected_index: &mut usize| {
+        *matches = compute_matches(&connections, &matcher, query);
+        if *selected_index >= matches.len() {
+            *selected_index = matches.len().saturating_sub(1);
+        }
+    };
+
     let outcome = loop {
         terminal.draw(|f| {
             render_picker_frame(f, &connections, &matches, selected_index, &query)
@@ -383,18 +390,12 @@ pub fn run_pick(
                 KeyCode::Backspace => {
                     if !query.is_empty() {
                         query.pop();
-                        matches = compute_matches(&connections, &matcher, &query);
-                        if selected_index >= matches.len() {
-                            selected_index = matches.len().saturating_sub(1);
-                        }
+                        recompute(&query, &mut matches, &mut selected_index);
                     }
                 }
                 KeyCode::Char(c) => {
                     query.push(c);
-                    matches = compute_matches(&connections, &matcher, &query);
-                    if selected_index >= matches.len() {
-                        selected_index = matches.len().saturating_sub(1);
-                    }
+                    recompute(&query, &mut matches, &mut selected_index);
                 }
                 _ => {}
             }
@@ -576,9 +577,9 @@ mod tests {
         let offsets = compute_field_offsets(&conn);
         // alias starts at 0, ends at 3
         assert_eq!(offsets[0], ("alias", 0, 3));
-        // user starts at 6 (alias(3) + " (" (3)), ends at 9
-        assert_eq!(offsets[1], ("user", 6, 9));
-        // host starts at 10 (user(9) + "@" (1))
+        // user starts at 5 (alias(3) + " (" (2)), ends at 8
+        assert_eq!(offsets[1], ("user", 5, 8));
+        // host starts at 9 (user(8) + "@" (1))
         assert_eq!(offsets[2].0, "host");
     }
 
@@ -627,13 +628,21 @@ mod tests {
 
     #[test]
     fn test_build_picker_row_spans_folder_highlight() {
+        // `highlight_indices` are **absolute display positions** (as produced
+        // by `compute_matches`). Positions 1..4 = 'p','r','o','d' in
+        // "[production] web (www@web.com:22)".
         let conn = make_conn("web", "web.com", "www", 22, Some("production"));
-        // "prod" matches positions 0..3 in "production" field.
-        // In display text "[production] web (www@web.com:22)", folder chars
-        // are at positions 1..10. Field pos 0 → display pos 1, etc.
-        let spans = build_picker_row_spans(&conn, &[0, 1, 2, 3], false);
-        // Position 1 in display should be highlighted (the 'p' of production).
-        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+        let spans = build_picker_row_spans(&conn, &[1, 2, 3, 4], false);
+        // Position 0 = '[' should NOT be highlighted.
+        assert!(!spans[0].style.add_modifier.contains(Modifier::BOLD));
+        // Positions 1..4 = 'p','r','o','d' SHOULD be highlighted.
+        for i in 1..=4 {
+            assert!(
+                spans[i].style.add_modifier.contains(Modifier::BOLD),
+                "position {} should be highlighted",
+                i
+            );
+        }
     }
 
     // ── build_picker_rows ────────────────────────────────────────────────
@@ -859,5 +868,176 @@ mod tests {
         let selected = PickerOutcome::Selected(conn.clone());
         assert_eq!(selected, PickerOutcome::Selected(conn));
         assert_ne!(selected, PickerOutcome::Cancel);
+    }
+
+    // ── compute_field_offsets ↔ build_row_text sync ──────────────────────
+
+    #[test]
+    fn test_field_offsets_sync_with_row_text() {
+        // compute_field_offsets and build_row_text must agree on row layout.
+        // If build_row_text changes, this test catches drift.
+        let cases = vec![
+            make_conn("web", "example.com", "www", 22, None),
+            make_conn("prod-web", "prod.example.com", "admin", 22, Some("production")),
+            make_conn("dev", "localhost", "dev", 2222, Some("staging")),
+        ];
+        for conn in cases {
+            let text = build_row_text(&conn);
+            let offsets = compute_field_offsets(&conn);
+
+            // Field ranges must not overlap.
+            for (i, (_, si, ei)) in offsets.iter().enumerate() {
+                for (_, sj, ej) in offsets.iter().skip(i + 1) {
+                    assert!(
+                        ei <= sj || ej <= si,
+                        "overlap: ({},{}) vs ({},{})",
+                        si, ei, sj, ej
+                    );
+                }
+            }
+
+            // Each field's offset must be within text bounds.
+            for (_, s, e) in &offsets {
+                assert!(*s < text.len() && *e <= text.len());
+            }
+
+            // Start positions must be monotonically increasing.
+            for windows in offsets.windows(2) {
+                assert!(
+                    windows[0].1 < windows[1].1,
+                    "field order drift: {:?} should come before {:?}",
+                    windows[0].0, windows[1].0
+                );
+            }
+
+            // Each field's substring in the display text must match the actual value.
+            for (name, s, e) in &offsets {
+                let display_field = &text[*s..*e];
+                let actual: &str = match *name {
+                    "folder" => conn.folder.as_deref().unwrap_or(""),
+                    "alias" => &conn.alias,
+                    "user" => &conn.user,
+                    "host" => &conn.host,
+                    "port" => &conn.port.to_string(),
+                    _ => panic!("unknown field: {}", name),
+                };
+                assert_eq!(
+                    display_field, actual,
+                    "field {:?} text drift: display={:?}, actual={:?}",
+                    name, display_field, actual
+                );
+            }
+        }
+    }
+
+    // ── compute_matches maps indices to display positions ────────────────
+
+    #[test]
+    fn test_compute_matches_display_indices_mapped() {
+        let conns = vec![make_conn("web", "web.com", "www", 22, Some("production"))];
+        let matcher = SkimMatcherV2::default();
+        let results = compute_matches(&conns, &matcher, "prod");
+        assert_eq!(results.len(), 1);
+        // "prod" matches positions 0..3 in "production".
+        // Display: "[production] web (www@web.com:22)" → p,r,o,d at 1,2,3,4.
+        assert_eq!(results[0].2, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn test_compute_matches_alias_no_folder_zero_offset() {
+        // When there's no folder, alias starts at 0, so display = field positions.
+        let conns = vec![make_conn("server", "host.com", "u", 22, None)];
+        let matcher = SkimMatcherV2::default();
+        let results = compute_matches(&conns, &matcher, "ser");
+        assert_eq!(results[0].2, vec![0, 1, 2]);
+    }
+
+    // ── insta snapshots (AC11) ───────────────────────────────────────────
+
+    #[test]
+    fn test_snapshot_pre_narrowed_list() {
+        let conns = vec![
+            make_conn("prod-server", "192.168.1.10", "admin", 22, Some("production")),
+            make_conn("dev-server", "192.168.1.20", "developer", 2222, Some("development")),
+            make_conn("web-server", "example.com", "www", 22, None),
+        ];
+        let matcher = SkimMatcherV2::default();
+        let matches = compute_matches(&conns, &matcher, "");
+        let backend = TestBackend::new(80, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_picker_frame(f, &conns, &matches, 0, ""))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        insta::assert_snapshot!(content);
+    }
+
+    #[test]
+    fn test_snapshot_matched_character_highlight() {
+        let conns = vec![make_conn("prod-server", "192.168.1.10", "admin", 22, Some("production"))];
+        let matcher = SkimMatcherV2::default();
+        let matches = compute_matches(&conns, &matcher, "prod");
+        let backend = TestBackend::new(80, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_picker_frame(f, &conns, &matches, 0, "prod"))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        insta::assert_snapshot!(content);
+    }
+
+    #[test]
+    fn test_snapshot_folder_vs_no_folder_rows() {
+        let conns = vec![
+            make_conn("web", "h.com", "u", 22, Some("staging")),
+            make_conn("db", "h2.com", "u", 22, None),
+        ];
+        let matcher = SkimMatcherV2::default();
+        let matches = compute_matches(&conns, &matcher, "");
+        let backend = TestBackend::new(80, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_picker_frame(f, &conns, &matches, 0, ""))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        insta::assert_snapshot!(content);
+    }
+
+    #[test]
+    fn test_snapshot_no_matches_state() {
+        let conns = vec![make_conn("web", "h1", "u", 22, None)];
+        let matcher = SkimMatcherV2::default();
+        let matches = compute_matches(&conns, &matcher, "zzzznonexistent");
+        let backend = TestBackend::new(80, 15);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| render_picker_frame(f, &conns, &matches, 0, "zzzznonexistent"))
+            .unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        insta::assert_snapshot!(content);
     }
 }
