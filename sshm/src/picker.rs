@@ -286,7 +286,7 @@ pub fn render_picker_frame(
             Style::default()
                 .bg(Color::Rgb(129, 161, 193))
                 .fg(Color::Rgb(236, 239, 244))
-                .add_modifier(Modifier::BOLD)
+                .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
     frame.render_widget(list, list_area);
@@ -364,8 +364,7 @@ pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Resu
     }
 
     // Initial draw to ensure the UI is rendered before we start reading input
-    terminal
-        .draw(|f| render_picker_frame(f, &connections, &matches, selected_index, &query))?;
+    terminal.draw(|f| render_picker_frame(f, &connections, &matches, selected_index, &query))?;
 
     // Ensure the terminal is ready for input before entering the main loop
     // This helps with terminals that need a moment to initialize after enabling raw mode
