@@ -217,8 +217,9 @@ pub mod tests {
     #[test]
     fn test_main_should_connect_false_returns_ok() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let mock_run_pick =
-            |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
+        let mock_run_pick = |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> {
+            Ok(PickerOutcome::Cancel)
+        };
         let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
@@ -245,8 +246,9 @@ pub mod tests {
     #[test]
     fn test_main_should_connect_true_no_conn() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((true, None));
-        let mock_run_pick =
-            |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
+        let mock_run_pick = |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> {
+            Ok(PickerOutcome::Cancel)
+        };
         let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
@@ -329,8 +331,9 @@ pub mod tests {
     #[test]
     fn test_run_main_logic() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let mock_run_pick =
-            |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
+        let mock_run_pick = |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> {
+            Ok(PickerOutcome::Cancel)
+        };
         let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
@@ -416,17 +419,18 @@ pub mod tests {
             panic!("run_app_fn must not be called on the pick path");
         }
 
-        let mock_run_pick = |_connections: Vec<Connection>, _query: String| -> io::Result<PickerOutcome> {
-            Ok(PickerOutcome::Selected(Connection {
-                id: "1".to_string(),
-                alias: "test".to_string(),
-                host: "example.com".to_string(),
-                user: "admin".to_string(),
-                port: 22,
-                key_path: None,
-                folder: None,
-            }))
-        };
+        let mock_run_pick =
+            |_connections: Vec<Connection>, _query: String| -> io::Result<PickerOutcome> {
+                Ok(PickerOutcome::Selected(Connection {
+                    id: "1".to_string(),
+                    alias: "test".to_string(),
+                    host: "example.com".to_string(),
+                    user: "admin".to_string(),
+                    port: 22,
+                    key_path: None,
+                    folder: None,
+                }))
+            };
 
         let result = dispatch(cli, run_app_that_panics, mock_run_pick);
         assert!(result.is_ok());

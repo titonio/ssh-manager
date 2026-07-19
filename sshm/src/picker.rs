@@ -86,9 +86,7 @@ pub fn compute_matches(
                         .find(|(n, _, _)| n == field_name)
                         .map(|(_, s, _)| *s)
                         .unwrap_or(0);
-                    best_display_indices = Some(
-                        indices.iter().map(|&i| field_start + i).collect(),
-                    );
+                    best_display_indices = Some(indices.iter().map(|&i| field_start + i).collect());
                 }
             }
         }
@@ -140,18 +138,10 @@ pub fn compute_field_offsets(conn: &Connection) -> Vec<(&str, usize, usize)> {
     offsets.push(("user", user_start, user_start + conn.user.len()));
 
     let host_start = user_start + conn.user.len() + 1;
-    offsets.push((
-        "host",
-        host_start,
-        host_start + conn.host.len(),
-    ));
+    offsets.push(("host", host_start, host_start + conn.host.len()));
 
     let port_start = host_start + conn.host.len() + 1;
-    offsets.push((
-        "port",
-        port_start,
-        port_start + conn.port.to_string().len(),
-    ));
+    offsets.push(("port", port_start, port_start + conn.port.to_string().len()));
 
     offsets
 }
@@ -305,10 +295,7 @@ pub fn render_picker_frame(
 /// Run the inline picker with live query editing.
 ///
 /// `initial_query` seeds the picker (used by `sshm pick --query <text>`).
-pub fn run_pick(
-    connections: Vec<Connection>,
-    initial_query: String,
-) -> io::Result<PickerOutcome> {
+pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Result<PickerOutcome> {
     crossterm::terminal::enable_raw_mode()?;
 
     struct RawModeGuard;
@@ -337,7 +324,8 @@ pub fn run_pick(
     let mut selected_index = 0;
 
     if connections.is_empty() {
-        terminal.draw(|f| render_picker_frame(f, &connections, &matches, selected_index, &query))?;
+        terminal
+            .draw(|f| render_picker_frame(f, &connections, &matches, selected_index, &query))?;
         loop {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -358,9 +346,8 @@ pub fn run_pick(
     };
 
     let outcome = loop {
-        terminal.draw(|f| {
-            render_picker_frame(f, &connections, &matches, selected_index, &query)
-        })?;
+        terminal
+            .draw(|f| render_picker_frame(f, &connections, &matches, selected_index, &query))?;
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
@@ -636,9 +623,9 @@ mod tests {
         // Position 0 = '[' should NOT be highlighted.
         assert!(!spans[0].style.add_modifier.contains(Modifier::BOLD));
         // Positions 1..4 = 'p','r','o','d' SHOULD be highlighted.
-        for i in 1..=4 {
+        for (i, span) in spans.iter().enumerate().skip(1).take(4) {
             assert!(
-                spans[i].style.add_modifier.contains(Modifier::BOLD),
+                span.style.add_modifier.contains(Modifier::BOLD),
                 "position {} should be highlighted",
                 i
             );
@@ -715,8 +702,20 @@ mod tests {
     #[test]
     fn test_render_pre_narrowed_list() {
         let conns = vec![
-            make_conn("prod-server", "192.168.1.10", "admin", 22, Some("production")),
-            make_conn("dev-server", "192.168.1.20", "developer", 2222, Some("development")),
+            make_conn(
+                "prod-server",
+                "192.168.1.10",
+                "admin",
+                22,
+                Some("production"),
+            ),
+            make_conn(
+                "dev-server",
+                "192.168.1.20",
+                "developer",
+                2222,
+                Some("development"),
+            ),
             make_conn("web-server", "example.com", "www", 22, None),
         ];
         let matcher = SkimMatcherV2::default();
@@ -776,10 +775,9 @@ mod tests {
             .unwrap();
         let buf = terminal.backend().buffer();
         // Check that some cells have the highlight style applied.
-        let has_highlight = buf
-            .content
-            .iter()
-            .any(|c| c.style().fg == Some(HIGHLIGHT_FG) || c.style().add_modifier.contains(Modifier::BOLD));
+        let has_highlight = buf.content.iter().any(|c| {
+            c.style().fg == Some(HIGHLIGHT_FG) || c.style().add_modifier.contains(Modifier::BOLD)
+        });
         assert!(has_highlight, "Expected highlighted characters in output");
     }
 
@@ -878,7 +876,13 @@ mod tests {
         // If build_row_text changes, this test catches drift.
         let cases = vec![
             make_conn("web", "example.com", "www", 22, None),
-            make_conn("prod-web", "prod.example.com", "admin", 22, Some("production")),
+            make_conn(
+                "prod-web",
+                "prod.example.com",
+                "admin",
+                22,
+                Some("production"),
+            ),
             make_conn("dev", "localhost", "dev", 2222, Some("staging")),
         ];
         for conn in cases {
@@ -891,7 +895,10 @@ mod tests {
                     assert!(
                         ei <= sj || ej <= si,
                         "overlap: ({},{}) vs ({},{})",
-                        si, ei, sj, ej
+                        si,
+                        ei,
+                        sj,
+                        ej
                     );
                 }
             }
@@ -906,7 +913,8 @@ mod tests {
                 assert!(
                     windows[0].1 < windows[1].1,
                     "field order drift: {:?} should come before {:?}",
-                    windows[0].0, windows[1].0
+                    windows[0].0,
+                    windows[1].0
                 );
             }
 
@@ -957,8 +965,20 @@ mod tests {
     #[test]
     fn test_snapshot_pre_narrowed_list() {
         let conns = vec![
-            make_conn("prod-server", "192.168.1.10", "admin", 22, Some("production")),
-            make_conn("dev-server", "192.168.1.20", "developer", 2222, Some("development")),
+            make_conn(
+                "prod-server",
+                "192.168.1.10",
+                "admin",
+                22,
+                Some("production"),
+            ),
+            make_conn(
+                "dev-server",
+                "192.168.1.20",
+                "developer",
+                2222,
+                Some("development"),
+            ),
             make_conn("web-server", "example.com", "www", 22, None),
         ];
         let matcher = SkimMatcherV2::default();
@@ -980,7 +1000,13 @@ mod tests {
 
     #[test]
     fn test_snapshot_matched_character_highlight() {
-        let conns = vec![make_conn("prod-server", "192.168.1.10", "admin", 22, Some("production"))];
+        let conns = vec![make_conn(
+            "prod-server",
+            "192.168.1.10",
+            "admin",
+            22,
+            Some("production"),
+        )];
         let matcher = SkimMatcherV2::default();
         let matches = compute_matches(&conns, &matcher, "prod");
         let backend = TestBackend::new(80, 15);

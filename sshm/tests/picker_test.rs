@@ -1,8 +1,8 @@
+use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::Terminal;
 use sshm::config::Connection;
 use sshm::picker::{compute_matches, render_picker_frame};
-use fuzzy_matcher::skim::SkimMatcherV2;
 
 fn create_test_connections() -> Vec<Connection> {
     vec![
@@ -38,11 +38,7 @@ fn create_test_connections() -> Vec<Connection> {
 
 /// Render the inline picker UI onto a TestBackend using the shared
 /// `render_picker_frame` function.
-fn render_picker(
-    connections: &[Connection],
-    query: &str,
-    selected_index: usize,
-) -> TestBackend {
+fn render_picker(connections: &[Connection], query: &str, selected_index: usize) -> TestBackend {
     let matcher = SkimMatcherV2::default();
     let matches = compute_matches(connections, &matcher, query);
     let backend = TestBackend::new(80, 15);
@@ -168,11 +164,15 @@ fn test_picker_match_highlight() {
 
     let buffer = backend.buffer();
     // Verify the buffer contains styled cells (highlighted matches).
-    let has_styled = buffer
-        .content
-        .iter()
-        .any(|c| c.style().add_modifier.contains(ratatui::style::Modifier::BOLD));
-    assert!(has_styled, "Expected highlighted characters for fuzzy match");
+    let has_styled = buffer.content.iter().any(|c| {
+        c.style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::BOLD)
+    });
+    assert!(
+        has_styled,
+        "Expected highlighted characters for fuzzy match"
+    );
 }
 
 #[test]
