@@ -129,9 +129,7 @@ pub fn run_pick(connections: Vec<Connection>) -> io::Result<PickerOutcome> {
             }
             match key.code {
                 KeyCode::Up => {
-                    if selected_index > 0 {
-                        selected_index -= 1;
-                    }
+                    selected_index = selected_index.saturating_sub(1);
                 }
                 KeyCode::Down => {
                     if selected_index < connections.len().saturating_sub(1) {
