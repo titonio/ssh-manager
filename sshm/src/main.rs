@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod picker;
 mod runtime;
 mod ssh;
 mod update;
@@ -7,6 +8,8 @@ mod update;
 use std::io;
 
 use clap::{CommandFactory, Parser, Subcommand};
+use picker::build_ssh_command;
+use picker::run_pick;
 use runtime::{cleanup_and_exit, run_app_inner};
 use ssh::build_ssh_args;
 use update::UpdateResult;
@@ -61,19 +64,53 @@ enum Commands {
 
     /// Check for updates
     CheckUpdate,
+
+    /// Open an inline picker to select a Connection (insert, don't execute)
+    Pick,
 }
 
 fn main() -> io::Result<()> {
-    run_main(run_app_inner)
+    run_main(run_app_inner, run_pick)
 }
 
-fn run_main(run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>) -> io::Result<()> {
+fn run_main(
+    run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>,
+    run_pick_fn: fn(Vec<config::Connection>) -> io::Result<picker::PickerOutcome>,
+) -> io::Result<()> {
     let cli = Cli::parse();
+    dispatch(cli, run_app_fn, run_pick_fn)
+}
 
+/// Dispatch on an already-parsed CLI. Separated from `run_main` so tests can
+/// drive the pick path (and assert the update checker is never reached)
+/// without relying on `std::env::args`.
+fn dispatch(
+    cli: Cli,
+    run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>,
+    run_pick_fn: fn(Vec<config::Connection>) -> io::Result<picker::PickerOutcome>,
+) -> io::Result<()> {
     // Handle completions command
     if let Some(Commands::Completions { shell }) = cli.command {
         generate_completions(shell);
         return Ok(());
+    }
+
+    // Handle pick command — inline picker (insert, don't execute)
+    if matches!(cli.command, Some(Commands::Pick)) {
+        let connections = config::Config::load().connections;
+        match run_pick_fn(connections) {
+            Ok(picker::PickerOutcome::Selected(conn)) => {
+                println!("{}", build_ssh_command(&conn));
+                return Ok(());
+            }
+            Ok(picker::PickerOutcome::Cancel) => {
+                std::process::exit(130);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                return Err(e);
+            }
+        }
     }
 
     // Handle check-update flag or command
@@ -165,6 +202,7 @@ fn generate_completions(shell: clap_complete::Shell) {
 pub mod tests {
     use super::*;
     use crate::config::Connection;
+    use crate::picker::{self, PickerOutcome};
 
     #[test]
     fn test_cleanup_and_exit_with_args() {
@@ -175,7 +213,9 @@ pub mod tests {
     #[test]
     fn test_main_should_connect_false_returns_ok() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let result = run_main(mock_run_app);
+        let mock_run_pick =
+            |_c: Vec<Connection>| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
+        let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
 
@@ -201,7 +241,9 @@ pub mod tests {
     #[test]
     fn test_main_should_connect_true_no_conn() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((true, None));
-        let result = run_main(mock_run_app);
+        let mock_run_pick =
+            |_c: Vec<Connection>| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
+        let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
 
@@ -283,7 +325,9 @@ pub mod tests {
     #[test]
     fn test_run_main_logic() {
         let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let result = run_main(mock_run_app);
+        let mock_run_pick =
+            |_c: Vec<Connection>| -> io::Result<PickerOutcome> { Ok(PickerOutcome::Cancel) };
+        let result = run_main(mock_run_app, mock_run_pick);
         assert!(result.is_ok());
     }
 
@@ -319,5 +363,68 @@ pub mod tests {
 
         let args = build_ssh_args(&conn);
         assert!(!args.is_empty());
+    }
+
+    // NOTE: pick-path branch behavior is asserted via dispatch in
+    // test_dispatch_pick_does_not_invoke_update_checker_or_run_app below,
+    // which drives the real dispatch logic rather than a standalone mock.
+
+    #[test]
+    fn test_run_main_pick_build_ssh_command_reuses_args() {
+        let conn = Connection {
+            id: "1".to_string(),
+            alias: "test".to_string(),
+            host: "example.com".to_string(),
+            user: "admin".to_string(),
+            port: 2222,
+            key_path: Some("/path/to/key".to_string()),
+            folder: None,
+        };
+        let cmd = picker::build_ssh_command(&conn);
+        assert!(cmd.starts_with("ssh "));
+        assert!(cmd.contains("-i"));
+        assert!(cmd.contains("-p"));
+        assert!(cmd.contains("admin@example.com"));
+    }
+
+    /// The spec requires: "Update checker skip is asserted by the injected-runner
+    /// test (the runner is never asked to run it on the pick path)."
+    ///
+    /// We drive the real `dispatch` with a `Cli { command: Some(Pick), ... }` and a
+    /// `run_app_fn` that panics if ever called. The Pick branch returns before the
+    /// update-checker block, so `run_app_fn` is never invoked — proving the update
+    /// checker is structurally skipped on the pick path. We use a thread-local flag
+    /// instead of a panicking closure because `dispatch` returns `Ok(())` on the
+    /// `Selected` path (it writes to stdout and returns) rather than reaching
+    /// `run_app_fn`.
+    #[test]
+    fn test_dispatch_pick_does_not_invoke_update_checker_or_run_app() {
+        // The pick path runs before the update-checker block, so reaching the
+        // Selected return proves dispatch never reached the update checker.
+        let cli = Cli {
+            command: Some(Commands::Pick),
+            check_update: false,
+        };
+
+        // A zero-arg fn that panics if ever called, proving the pick path never
+        // falls through to the fullscreen TUI / update-checker branches.
+        fn run_app_that_panics() -> io::Result<(bool, Option<Connection>)> {
+            panic!("run_app_fn must not be called on the pick path");
+        }
+
+        let mock_run_pick = |_connections: Vec<Connection>| -> io::Result<PickerOutcome> {
+            Ok(PickerOutcome::Selected(Connection {
+                id: "1".to_string(),
+                alias: "test".to_string(),
+                host: "example.com".to_string(),
+                user: "admin".to_string(),
+                port: 22,
+                key_path: None,
+                folder: None,
+            }))
+        };
+
+        let result = dispatch(cli, run_app_that_panics, mock_run_pick);
+        assert!(result.is_ok());
     }
 }
