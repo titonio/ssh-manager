@@ -308,15 +308,164 @@ pub fn render_picker_frame(
 // Runner (interactive)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Which stream the inline-picker TUI should be drawn to.
+///
+/// This is the pure routing decision, separated from the side-effect of
+/// opening `/dev/tty` so it can be unit-tested in isolation. Test-only: the
+/// actual fd-1 redirection is performed by [`StdoutRedirect`] in `run_pick`.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TuiOutputKind {
+    /// Draw the TUI to stdout (the normal `sshm pick` invocation).
+    Stdout,
+    /// Draw the TUI to `/dev/tty` because stdout is captured and reserved for
+    /// returning the selected `ssh` command.
+    DevTty,
+}
+
+/// Pure atuin-style routing decision (test-only): when stdout is a real TTY,
+/// draw the inline picker there as usual; when stdout is captured (e.g. shell
+/// command substitution `result=$(sshm pick --query ...)`), route the TUI to
+/// `/dev/tty` so the escape sequences reach the real terminal. Without this,
+/// ratatui's inline viewport cannot read the cursor position and the picker
+/// fails to render when invoked from a ZLE widget. The real side-effect of
+/// redirecting fd 1 lives in [`StdoutRedirect`] / `run_pick`.
+#[cfg(test)]
+fn tui_output_kind(stdout_is_tty: bool) -> TuiOutputKind {
+    if stdout_is_tty {
+        TuiOutputKind::Stdout
+    } else {
+        TuiOutputKind::DevTty
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// fd-1 redirection (Unix only) — the atuin-style fix for command substitution
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Under `result=$(sshm pick --query ...)` the shell connects sshm pick's
+// stdout (fd 1) to a pipe and reads the accepted `ssh` command from it.
+// But crossterm::cursor::position() (used by ratatui's inline viewport) writes
+// `ESC [ 6n` directly to `io::stdout()` — i.e. fd 1 — to ask the terminal for
+// the cursor position, and reads the reply via crossterm's event source. When
+// fd 1 is a pipe, the request never reaches the terminal, so the read times
+// out and the picker fails to render.
+//
+// The fix: when stdout is captured, temporarily point fd 1 at `/dev/tty` for
+// the duration of the picker (so all UI escapes — including crossterm's CPR —
+// reach the real terminal) while saving the original pipe fd. The caller then
+// prints the accepted `ssh` command to the *restored* stdout (the pipe), so
+// `$(...)` still captures exactly the clean `ssh ...` string. This mirrors
+// how atuin runs its search behind command substitution.
+
+#[cfg(unix)]
+mod fd {
+    use std::os::unix::io::RawFd;
+
+    extern "C" {
+        fn dup(fd: RawFd) -> RawFd;
+        fn dup2(old: RawFd, new: RawFd) -> RawFd;
+        fn close(fd: RawFd) -> RawFd;
+    }
+
+    /// Duplicate fd 1 (stdout) onto `/dev/tty`, returning the saved original
+    /// fd (which [`restore`] will later dup back over fd 1). Returns `None` if
+    /// stdout is already a TTY (no redirection needed).
+    pub fn redirect_stdout_to_tty() -> std::io::Result<Option<RawFd>> {
+        use std::io::IsTerminal;
+        use std::os::unix::io::AsRawFd;
+        if std::io::stdout().is_terminal() {
+            return Ok(None);
+        }
+        let tty = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")?;
+        let saved = unsafe { dup(1) };
+        if saved < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { dup2(tty.as_raw_fd(), 1) } < 0 {
+            let e = std::io::Error::last_os_error();
+            unsafe { close(saved) };
+            return Err(e);
+        }
+        Ok(Some(saved))
+    }
+
+    /// Restore fd 1 to the saved original.
+    pub fn restore_stdout(saved: RawFd) {
+        unsafe {
+            dup2(saved, 1);
+            close(saved);
+        }
+    }
+}
+
+/// RAII guard that redirects fd 1 to `/dev/tty` on construction (when stdout is
+/// captured) and restores the original fd 1 on drop. While live, every write
+/// to `io::stdout()` — including crossterm's cursor-position-request — lands on
+/// the real terminal, and the saved pipe is reinstated before the caller
+/// prints the result.
+struct StdoutRedirect {
+    #[cfg(unix)]
+    saved: Option<std::os::unix::io::RawFd>,
+}
+
+#[cfg(unix)]
+impl StdoutRedirect {
+    fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            saved: fd::redirect_stdout_to_tty()?,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for StdoutRedirect {
+    fn drop(&mut self) {
+        if let Some(saved) = self.saved.take() {
+            fd::restore_stdout(saved);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+impl StdoutRedirect {
+    fn new() -> std::io::Result<Self> {
+        Ok(Self {})
+    }
+}
+
+#[cfg(not(unix))]
+impl Drop for StdoutRedirect {
+    fn drop(&mut self) {}
+}
+
 /// Run the inline picker with live query editing.
 ///
 /// `initial_query` seeds the picker (used by `sshm pick --query <text>`).
 pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Result<PickerOutcome> {
+    // Atuin-style: when stdout is captured by a shell command substitution
+    // (`result=$(sshm pick --query ...)`), redirect fd 1 to `/dev/tty` for the
+    // duration of the picker so that *every* terminal escape — including
+    // crossterm's cursor-position-request, which writes directly to
+    // `io::stdout()` regardless of ratatui's backend writer — reaches the real
+    // terminal. The original stdout (the pipe) is saved and reinstated on
+    // drop, so the caller's `println!` of the accepted `ssh` command is still
+    // captured by `$(...)`. Construct this guard *before* raw mode so the
+    // RawModeGuard drop (which shows the cursor via io::stdout()) also lands
+    // on /dev/tty; the StdoutRedirect drops last, restoring fd 1.
+    let _stdout_redirect = StdoutRedirect::new()?;
+
     crossterm::terminal::enable_raw_mode()?;
 
     struct RawModeGuard;
     impl Drop for RawModeGuard {
         fn drop(&mut self) {
+            // fd 1 is still routed to /dev/tty while this guard drops (the
+            // StdoutRedirect guard outlives it), so cursor::Show reaches the
+            // same terminal the picker drew to.
             let _ = crossterm::execute!(io::stdout(), crossterm::cursor::Show);
             ratatui::restore();
             let _ = crossterm::terminal::disable_raw_mode();
@@ -332,6 +481,8 @@ pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Resu
     crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste)?;
     crossterm::execute!(io::stdout(), crossterm::cursor::Hide)?;
 
+    // With fd 1 optionally redirected to /dev/tty, the ratatui backend can
+    // simply use `io::stdout()` — all draws go to the real terminal.
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
     let mut terminal = ratatui::Terminal::with_options(
         backend,
@@ -464,6 +615,21 @@ mod tests {
             key_path: None,
             folder: folder.map(|s| s.to_string()),
         }
+    }
+
+    // ── tui_output_kind (atuin-style /dev/tty routing) ──────────────────
+
+    #[test]
+    fn test_tui_output_kind_routes_to_stdout_when_stdout_is_tty() {
+        // When stdout is a real TTY (normal `sshm pick`), draw there as usual.
+        assert_eq!(tui_output_kind(true), TuiOutputKind::Stdout);
+    }
+
+    #[test]
+    fn test_tui_output_kind_routes_to_dev_tty_when_stdout_captured() {
+        // When stdout is captured (shell command substitution `$(sshm pick ...)`),
+        // the TUI must go to /dev/tty so only the ssh command is returned on stdout.
+        assert_eq!(tui_output_kind(false), TuiOutputKind::DevTty);
     }
 
     // ── compute_matches ──────────────────────────────────────────────────

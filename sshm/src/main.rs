@@ -225,18 +225,22 @@ fn generate_completions(shell: clap_complete::Shell) {
 }
 
 /// Generate the zsh initialization script for the inline picker widget.
-/// 
+///
 /// Returns the script content as a string for testing and printing.
 fn generate_init_zsh_script() -> String {
     // Default bind key (Ctrl+Alt+S)
-    let default_bind_key = "^[[27;2~";
-    
+    // Default bind key for Ctrl+Alt+S in zsh notation: `\e` is ESC (the
+    // Alt/Meta modifier prefix) and `^S` is Ctrl+S, yielding Ctrl+Alt+S. This
+    // matches the legacy xterm encoding ESC + Ctrl-S that the terminals send,
+    // and is far more portable than a guessed CSI sequence.
+    let default_bind_key = "\\e^S";
+
     // Check for SSHM_NO_BIND environment variable
     let no_bind = std::env::var("SSHM_NO_BIND").is_ok();
-    
+
     // Check for custom bind key via SSHM_BIND_KEY environment variable
     let bind_key = std::env::var("SSHM_BIND_KEY").unwrap_or_else(|_| default_bind_key.to_string());
-    
+
     if no_bind {
         r#"# sshm init zsh - Inline Picker Widget (no bind)
 # Sourced via: eval "$(sshm init zsh)"
@@ -272,9 +276,11 @@ _sshm_inline_picker() {
 
 # Register the ZLE widget
 zle -N _sshm_inline_picker
-"#.to_string()
+"#
+        .to_string()
     } else {
-        format!(r#"# sshm init zsh - Inline Picker Widget
+        format!(
+            r#"# sshm init zsh - Inline Picker Widget
 # Sourced via: eval "$(sshm init zsh)"
 # Bind key: {} (override with SSHM_BIND_KEY)
 
@@ -311,7 +317,9 @@ zle -N _sshm_inline_picker
 
 # Bind the widget to the trigger key
 bindkey '{}' _sshm_inline_picker
-"#, bind_key, bind_key)
+"#,
+            bind_key, bind_key
+        )
     }
 }
 
@@ -325,6 +333,7 @@ pub mod tests {
     use super::*;
     use crate::config::Connection;
     use crate::picker::{self, PickerOutcome};
+    use serial_test::serial;
 
     #[test]
     fn test_cleanup_and_exit_with_args() {
@@ -557,16 +566,17 @@ pub mod tests {
     // ── sshm init zsh snapshot tests (AC8, AC9) ──────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn test_snapshot_init_zsh_default() {
         // Clear any env overrides
         std::env::remove_var("SSHM_NO_BIND");
         std::env::remove_var("SSHM_BIND_KEY");
-        
+
         let script = generate_init_zsh_script();
         insta::assert_snapshot!(script, @r###"
         # sshm init zsh - Inline Picker Widget
         # Sourced via: eval "$(sshm init zsh)"
-        # Bind key: ^[[27;2~ (override with SSHM_BIND_KEY)
+        # Bind key: \e^S (override with SSHM_BIND_KEY)
 
         # ZLE widget function for sshm inline picker
         _sshm_inline_picker() {
@@ -600,16 +610,17 @@ pub mod tests {
         zle -N _sshm_inline_picker
 
         # Bind the widget to the trigger key
-        bindkey '^[[27;2~' _sshm_inline_picker
+        bindkey '\e^S' _sshm_inline_picker
         "###);
     }
 
     #[test]
+    #[serial]
     fn test_snapshot_init_zsh_no_bind() {
         // Set SSHM_NO_BIND to suppress bind lines
         std::env::set_var("SSHM_NO_BIND", "1");
         std::env::remove_var("SSHM_BIND_KEY");
-        
+
         let script = generate_init_zsh_script();
         insta::assert_snapshot!(script, @r###"
         # sshm init zsh - Inline Picker Widget (no bind)
@@ -647,17 +658,18 @@ pub mod tests {
         # Register the ZLE widget
         zle -N _sshm_inline_picker
         "###);
-        
+
         // Clean up
         std::env::remove_var("SSHM_NO_BIND");
     }
 
     #[test]
+    #[serial]
     fn test_snapshot_init_zsh_custom_bind_key() {
         // Clear SSHM_NO_BIND and set custom SSHM_BIND_KEY
         std::env::remove_var("SSHM_NO_BIND");
         std::env::set_var("SSHM_BIND_KEY", "^S");
-        
+
         let script = generate_init_zsh_script();
         insta::assert_snapshot!(script, @r###"
         # sshm init zsh - Inline Picker Widget
@@ -698,7 +710,7 @@ pub mod tests {
         # Bind the widget to the trigger key
         bindkey '^S' _sshm_inline_picker
         "###);
-        
+
         // Clean up
         std::env::remove_var("SSHM_BIND_KEY");
     }
@@ -718,36 +730,41 @@ pub mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_init_zsh_binds_ctrl_alt_s_by_default() {
         std::env::remove_var("SSHM_NO_BIND");
         std::env::remove_var("SSHM_BIND_KEY");
-        
+
         let script = generate_init_zsh_script();
         assert!(script.contains("bindkey"));
-        assert!(script.contains("^[[27;2~"));
+        // \e^S is zsh notation for Ctrl+Alt+S (ESC + Ctrl+S, the legacy xterm
+        // encoding). It is far more portable than a guessed CSI sequence.
+        assert!(script.contains("\\e^S"));
     }
 
     #[test]
+    #[serial]
     fn test_init_zsh_suppresses_bind_with_no_bind_flag() {
         std::env::set_var("SSHM_NO_BIND", "1");
-        
+
         let script = generate_init_zsh_script();
         assert!(!script.contains("bindkey"));
         assert!(script.contains("no bind"));
-        
+
         // Clean up
         std::env::remove_var("SSHM_NO_BIND");
     }
 
     #[test]
+    #[serial]
     fn test_init_zsh_honors_sshm_bind_key() {
         std::env::remove_var("SSHM_NO_BIND");
         std::env::set_var("SSHM_BIND_KEY", "^X");
-        
+
         let script = generate_init_zsh_script();
         assert!(script.contains("bindkey"));
         assert!(script.contains("'^X'"));
-        
+
         // Clean up
         std::env::remove_var("SSHM_BIND_KEY");
     }
