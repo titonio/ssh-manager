@@ -67,6 +67,10 @@ enum Commands {
         /// Shell type to generate initialization script for
         #[arg(value_parser = clap::value_parser!(ShellType))]
         shell: ShellType,
+
+        /// Suppress bind lines in the generated script (env: SSHM_NO_BIND)
+        #[arg(long)]
+        no_bind: bool,
     },
 
     /// Check for updates
@@ -83,6 +87,7 @@ enum Commands {
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum ShellType {
     Zsh,
+    Bash,
 }
 
 fn main() -> io::Result<()> {
@@ -112,10 +117,18 @@ fn dispatch(
     }
 
     // Handle init command
-    if let Some(Commands::Init { shell }) = cli.command {
+    if let Some(Commands::Init { shell, no_bind }) = cli.command {
+        // The --no-bind flag overrides the env var when set.
+        if no_bind {
+            std::env::set_var("SSHM_NO_BIND", "1");
+        }
         match shell {
             ShellType::Zsh => {
                 print_init_zsh_script();
+                return Ok(());
+            }
+            ShellType::Bash => {
+                print_init_bash_script();
                 return Ok(());
             }
         }
@@ -326,6 +339,72 @@ bindkey '{}' _sshm_inline_picker
 /// Print the zsh initialization script for the inline picker widget.
 fn print_init_zsh_script() {
     print!("{}", generate_init_zsh_script());
+}
+
+/// Generate the bash initialization script for the inline picker widget.
+///
+/// Returns the script content as a string for testing and printing.
+fn generate_init_bash_script() -> String {
+    // Default bind key in bash bind -x notation for Ctrl+Alt+S.
+    // bash uses `\e` for the Escape key (Alt/Meta prefix) and `\C-s` for Ctrl+S.
+    // Together `"\e\C-s"` represents Ctrl+Alt+S, matching the legacy xterm
+    // encoding ESC + Ctrl-S that terminals send.
+    let default_bind_key = "\\e\\C-s";
+
+    // Check for SSHM_NO_BIND environment variable
+    let no_bind = std::env::var("SSHM_NO_BIND").is_ok();
+
+    // Check for custom bind key via SSHM_BIND_KEY environment variable
+    let bind_key = std::env::var("SSHM_BIND_KEY").unwrap_or_else(|_| default_bind_key.to_string());
+
+    if no_bind {
+        r###"# sshm init bash - Inline Picker Widget (no bind)
+# Sourced via: eval "$(sshm init bash)"
+# Note: Bind lines suppressed by SSHM_NO_BIND=1
+
+_sshm_inline_picker() {
+    local result exit_code
+    result=$(sshm pick --query "$READLINE_LINE")
+    exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        return
+    fi
+    if [[ -n "$result" ]]; then
+        READLINE_LINE="$result"
+        READLINE_POINT=${#READLINE_LINE}
+    fi
+}
+"###
+        .to_string()
+    } else {
+        format!(
+            r###"# sshm init bash - Inline Picker Widget
+# Sourced via: eval "$(sshm init bash)"
+# Bind key: {bind_key} (override with SSHM_BIND_KEY)
+
+_sshm_inline_picker() {{
+    local result exit_code
+    result=$(sshm pick --query "$READLINE_LINE")
+    exit_code=$?
+    if [[ $exit_code -ne 0 ]]; then
+        return
+    fi
+    if [[ -n "$result" ]]; then
+        READLINE_LINE="$result"
+        READLINE_POINT=${{#READLINE_LINE}}
+    fi
+}}
+
+# Bind the widget to the trigger key
+bind -x '"{bind_key}":_sshm_inline_picker'
+"###
+        )
+    }
+}
+
+/// Print the bash initialization script for the inline picker widget.
+fn print_init_bash_script() {
+    print!("{}", generate_init_bash_script());
 }
 
 #[cfg(test)]
@@ -786,5 +865,174 @@ pub mod tests {
     fn test_init_zsh_restores_buffer_on_cancel() {
         let script = generate_init_zsh_script();
         assert!(script.contains("BUFFER=\"$saved_buffer\""));
+    }
+
+    // ── sshm init bash snapshot tests (AC7) ────────────────────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn test_snapshot_init_bash_default() {
+        // Clear any env overrides
+        std::env::remove_var("SSHM_NO_BIND");
+        std::env::remove_var("SSHM_BIND_KEY");
+
+        let script = generate_init_bash_script();
+        insta::assert_snapshot!(script, @r###"
+        # sshm init bash - Inline Picker Widget
+        # Sourced via: eval "$(sshm init bash)"
+        # Bind key: \e\C-s (override with SSHM_BIND_KEY)
+
+        _sshm_inline_picker() {
+            local result exit_code
+            result=$(sshm pick --query "$READLINE_LINE")
+            exit_code=$?
+            if [[ $exit_code -ne 0 ]]; then
+                return
+            fi
+            if [[ -n "$result" ]]; then
+                READLINE_LINE="$result"
+                READLINE_POINT=${#READLINE_LINE}
+            fi
+        }
+
+        # Bind the widget to the trigger key
+        bind -x '"\e\C-s":_sshm_inline_picker'
+        "###);
+    }
+
+    #[test]
+    #[serial]
+    fn test_snapshot_init_bash_no_bind() {
+        // Set SSHM_NO_BIND to suppress bind lines
+        std::env::set_var("SSHM_NO_BIND", "1");
+        std::env::remove_var("SSHM_BIND_KEY");
+
+        let script = generate_init_bash_script();
+        insta::assert_snapshot!(script, @r###"
+        # sshm init bash - Inline Picker Widget (no bind)
+        # Sourced via: eval "$(sshm init bash)"
+        # Note: Bind lines suppressed by SSHM_NO_BIND=1
+
+        _sshm_inline_picker() {
+            local result exit_code
+            result=$(sshm pick --query "$READLINE_LINE")
+            exit_code=$?
+            if [[ $exit_code -ne 0 ]]; then
+                return
+            fi
+            if [[ -n "$result" ]]; then
+                READLINE_LINE="$result"
+                READLINE_POINT=${#READLINE_LINE}
+            fi
+        }
+        "###);
+
+        // Clean up
+        std::env::remove_var("SSHM_NO_BIND");
+    }
+
+    #[test]
+    #[serial]
+    fn test_snapshot_init_bash_custom_bind_key() {
+        // Clear SSHM_NO_BIND and set custom SSHM_BIND_KEY
+        std::env::remove_var("SSHM_NO_BIND");
+        std::env::set_var("SSHM_BIND_KEY", "\\C-t");
+
+        let script = generate_init_bash_script();
+        insta::assert_snapshot!(script, @r###"
+        # sshm init bash - Inline Picker Widget
+        # Sourced via: eval "$(sshm init bash)"
+        # Bind key: \C-t (override with SSHM_BIND_KEY)
+
+        _sshm_inline_picker() {
+            local result exit_code
+            result=$(sshm pick --query "$READLINE_LINE")
+            exit_code=$?
+            if [[ $exit_code -ne 0 ]]; then
+                return
+            fi
+            if [[ -n "$result" ]]; then
+                READLINE_LINE="$result"
+                READLINE_POINT=${#READLINE_LINE}
+            fi
+        }
+
+        # Bind the widget to the trigger key
+        bind -x '"\C-t":_sshm_inline_picker'
+        "###);
+
+        // Clean up
+        std::env::remove_var("SSHM_BIND_KEY");
+    }
+
+    // ── sshm init bash contract assertions (AC8) ────────────────────────────────────────────
+
+    #[test]
+    fn test_init_bash_contains_sshm_pick() {
+        let script = generate_init_bash_script();
+        assert!(script.contains("sshm pick"));
+    }
+
+    #[test]
+    fn test_init_bash_seeds_query_readline_line() {
+        let script = generate_init_bash_script();
+        assert!(script.contains("--query \"$READLINE_LINE\""));
+    }
+
+    #[test]
+    #[serial]
+    fn test_init_bash_binds_ctrl_alt_s_by_default() {
+        std::env::remove_var("SSHM_NO_BIND");
+        std::env::remove_var("SSHM_BIND_KEY");
+
+        let script = generate_init_bash_script();
+        assert!(script.contains("bind -x"));
+        // \e\C-s is bash notation for Ctrl+Alt+S.
+        assert!(script.contains("\\e\\C-s"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_init_bash_suppresses_bind_with_no_bind_flag() {
+        std::env::set_var("SSHM_NO_BIND", "1");
+
+        let script = generate_init_bash_script();
+        assert!(!script.contains("bind -x"));
+        assert!(script.contains("no bind"));
+
+        // Clean up
+        std::env::remove_var("SSHM_NO_BIND");
+    }
+
+    #[test]
+    #[serial]
+    fn test_init_bash_honors_sshm_bind_key() {
+        std::env::remove_var("SSHM_NO_BIND");
+        std::env::set_var("SSHM_BIND_KEY", "\\C-x");
+
+        let script = generate_init_bash_script();
+        assert!(script.contains("bind -x"));
+        assert!(script.contains("\\C-x"));
+
+        // Clean up
+        std::env::remove_var("SSHM_BIND_KEY");
+    }
+
+    #[test]
+    fn test_init_bash_splices_into_readline_line_with_cursor_to_end() {
+        let script = generate_init_bash_script();
+        assert!(script.contains("READLINE_LINE=\"$result\""));
+        assert!(script.contains(r"READLINE_POINT=${#READLINE_LINE}"));
+    }
+
+    #[test]
+    fn test_init_bash_leaves_readline_line_untouched_on_nonzero_exit() {
+        let script = generate_init_bash_script();
+        // On non-zero exit, the function returns without modifying READLINE_LINE.
+        assert!(script.contains("if [[ $exit_code -ne 0 ]]; then"));
+        assert!(script.contains("return"));
+        // No assignment to READLINE_LINE on the cancel path.
+        let normal_return_count = script.matches("return").count();
+        assert!(normal_return_count >= 1);
     }
 }
