@@ -11,3 +11,11 @@ _Avoid_: entry, server, host (host is a field of a Connection, not the Connectio
 **Inline Picker**:
 The inline, filter-as-you-type selector that lists Connections below the cursor (not fullscreen) and emits the chosen one to the shell. Triggered from a shell widget, distinct from the fullscreen TUI that runs on a bare `sshm`.
 _Avoid_: dropdown, popup, completion menu
+
+**Shell Widget**:
+A ZLE widget (zsh) or readline function (bash) emitted by `sshm init zsh|bash`
+that opens the Inline Picker. Two entry points: a bound key (Ctrl+Alt+S) that
+seeds the picker from the buffer, and the `**` completion trigger that opens
+the picker unfiltered. The `**<TAB>` route is zsh-only; the widget falls
+through to normal `.expand-or-complete` when the trigger token is absent.
+_Avoid_: override, hook, completion menu

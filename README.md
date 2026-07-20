@@ -10,6 +10,8 @@ A modern Terminal User Interface (TUI) for managing SSH connections, built with 
 - **Organized by Folders**: Group connections into folders for better organization
 - **Custom SSH Keys**: Support for custom private key paths
 - **Non-Standard Ports**: Configure custom SSH ports (default: 22)
+- **Inline Picker**: Filter-as-you-type selector triggered from the shell (Ctrl+Alt+S or `**<TAB>`)
+- **Shell Integration**: `sshm init zsh|bash` emits ZLE/widget scripts with trigger bindings
 - **Automatic Updates**: Built-in update checker with GitHub release integration
 - **Nord Theme**: Beautiful Nordic-inspired color scheme
 
@@ -51,6 +53,66 @@ sshm
 - `add`: Add a new SSH connection
 - `completions`: Generate shell completion scripts
 - `check-update`: Check for updates
+- `init`: Generate shell initialization scripts (zsh, bash) for the inline picker widget
+- `pick`: Open an inline fuzzy picker to select a Connection (inserts `ssh` command, doesn't execute)
+
+### Shell Integration (Inline Picker)
+
+Source the init script to bind an inline fuzzy picker that lets you select an SSH
+connection and insert its `ssh` command onto the command line without executing it:
+
+```bash
+# Zsh (recommended)
+eval "$(sshm init zsh)"
+# Now press Ctrl+Alt+S or type ** and press Tab to open the picker
+
+# Bash
+eval "$(sshm init bash)"
+# Now press Ctrl+Alt+S to open the picker
+```
+
+#### Trigger key: Ctrl+Alt+S
+
+Opens the inline picker seeded with the current buffer text as a filter query.
+Pick a connection → the `ssh` command is inserted at the cursor. Cancel (Esc/Ctrl-C)
+→ the buffer is left untouched.
+
+Override the bind key via the `SSHM_BIND_KEY` environment variable (zsh notation
+for zsh, readline notation for bash):
+
+```bash
+# Zsh: bind to Ctrl+X instead
+SSHM_BIND_KEY='^X' eval "$(sshm init zsh)"
+
+# Bash: bind to Ctrl+\ instead
+SSHM_BIND_KEY='\C-\\' eval "$(sshm init bash)"
+```
+
+Suppress all bind lines (emit only the widget function) with `SSHM_NO_BIND=1`
+or the `--no-bind` flag:
+
+```bash
+eval "$(sshm init zsh --no-bind)"
+# Manually bind the widget later:
+# bindkey '^S' _sshm_inline_picker
+```
+
+#### Completion trigger: `**<TAB>` (zsh only)
+
+Type `**` at the end of the buffer and press Tab to open the picker (showing all
+connections). Pick a connection → the `ssh` command is inserted at the cursor.
+When the trigger token isn't present, normal zsh completion runs unchanged.
+
+This works alongside Ctrl+Alt+S — the bound key remains the primary entry,
+`**<TAB>` is the completion-style alternative.
+
+The Tab binding is suppressed under `SSHM_NO_BIND=1`.
+
+#### Bash caveat for `**<TAB>`
+
+When sourced in bash, `**<TAB>` opens the picker only when `**` is present at the
+end of `READLINE_LINE`. Without `**`, Tab has no effect (bash cannot chain from
+`bind -x` into normal completion).
 
 ### Shell Completion
 
@@ -73,6 +135,8 @@ sshm completions powershell | Out-String | Invoke-Expression
 
 ### Keyboard Shortcuts
 
+#### Fullscreen TUI
+
 | Key | Action |
 |-----|--------|
 | `↑`/`↓` or `j`/`k` | Navigate connection list |
@@ -84,6 +148,16 @@ sshm completions powershell | Out-String | Invoke-Expression
 | `i` | Import from ~/.ssh/config |
 | `q` | Quit application |
 | `?` | Show help |
+
+#### Shell Inline Picker
+
+| Trigger | Action |
+|---------|--------|
+| `Ctrl+Alt+S` | Open picker (seeded with buffer as query) |
+| `**<TAB>` (zsh) | Open picker (showing all connections) |
+| `Enter` in picker | Insert selected `ssh` command at cursor |
+| `Esc`/`Ctrl-C` in picker | Cancel, leave buffer untouched |
+| `↑`/`↓` or `j`/`k` in picker | Navigate connections in picker |
 
 ## Configuration
 
@@ -131,9 +205,10 @@ The application stores its configuration in:
 ssh-manager/
 ├── sshm/                    # Main application
 │   ├── src/
-│   │   ├── main.rs          # Entry point
+│   │   ├── main.rs          # Entry point, CLI dispatch, init script generation
 │   │   ├── app.rs           # TUI application logic
 │   │   ├── config.rs        # Configuration management
+│   │   ├── picker.rs        # Inline fuzzy picker (ratatui) + ssh command builder
 │   │   ├── runtime.rs       # Runtime and cleanup
 │   │   ├── ssh.rs           # SSH connection handling
 │   │   └── update.rs        # Update checking
@@ -142,6 +217,7 @@ ssh-manager/
 ├── .github/
 │   └── workflows/
 │       └── ci.yml           # CI/CD pipeline
+├── CONTEXT.md               # Domain language and glossary
 ├── TUI_DESIGN_GUIDELINES.md # TUI design documentation
 └── README.md                # This file
 ```
@@ -154,7 +230,9 @@ ssh-manager/
 - **dirs** - Platform directory detection
 - **fuzzy-matcher** - Fuzzy search functionality
 - **uuid** - Unique connection identifiers
+- **clap + clap_complete** - CLI parsing and shell completion generation
 - **self-github-update-enhanced** - Auto-update from GitHub
+- **insta** (dev) - Snapshot testing
 
 ## Testing
 
@@ -193,7 +271,8 @@ The project uses GitHub Actions for:
 
 ## Version History
 
-- **0.1.5** - Current version with update functionality
+- **0.1.9** - Current version with inline picker, shell init scripts (zsh + bash), and `**<TAB>` completion trigger
+- **0.1.5** - Update functionality
 - **0.1.0** - Initial release
 
 ## License
