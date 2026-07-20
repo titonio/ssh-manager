@@ -67,6 +67,10 @@ enum Commands {
         /// Shell type to generate initialization script for
         #[arg(value_parser = clap::value_parser!(ShellType))]
         shell: ShellType,
+
+        /// Suppress bind lines in the generated script (env: SSHM_NO_BIND)
+        #[arg(long)]
+        no_bind: bool,
     },
 
     /// Check for updates
@@ -113,7 +117,11 @@ fn dispatch(
     }
 
     // Handle init command
-    if let Some(Commands::Init { shell }) = cli.command {
+    if let Some(Commands::Init { shell, no_bind }) = cli.command {
+        // The --no-bind flag overrides the env var when set.
+        if no_bind {
+            std::env::set_var("SSHM_NO_BIND", "1");
+        }
         match shell {
             ShellType::Zsh => {
                 print_init_zsh_script();
