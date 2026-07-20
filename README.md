@@ -271,7 +271,8 @@ The project uses GitHub Actions for:
 
 ## Version History
 
-- **0.1.9** - Current version with inline picker, shell init scripts (zsh + bash), and `**<TAB>` completion trigger
+- **0.1.10** - Current version with `**<TAB>` completion trigger, bash support for `sshm init`, `--no-bind` flag, and serialized test fixes
+- **0.1.9** - Inline picker, shell init scripts (zsh + bash), and `**<TAB>` completion trigger
 - **0.1.5** - Update functionality
 - **0.1.0** - Initial release
 
