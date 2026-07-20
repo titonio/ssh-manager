@@ -740,6 +740,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_cache_operation_types() {
         // Verify that cache operations return Results
         let write_result = write_cache(Some("1.0.0".to_string()));
@@ -798,12 +799,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_write_cache_basic() {
         let result = write_cache(Some("0.2.0".to_string()));
         assert!(result.is_ok());
     }
 
     #[test]
+    #[serial]
     fn test_read_cache_basic() {
         // Read cache should work even if cache file doesn't exist
         let result = read_cache();
@@ -839,6 +842,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_write_cache_basic_operation() {
         let result = write_cache(Some("1.0.0".to_string()));
         assert!(result.is_ok());
@@ -870,6 +874,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_cache_operations_return_results() {
         let write_result = write_cache(Some("1.0.0".to_string()));
         assert!(write_result.is_ok() || write_result.is_err());
