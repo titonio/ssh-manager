@@ -260,6 +260,22 @@ fn generate_init_zsh_script() -> String {
 # Sourced via: eval "$(sshm init zsh)"
 # Note: Bind lines suppressed by SSHM_NO_BIND=1
 
+# Shell function wrapper: makes "sshm pick" insert onto the command line
+# when run interactively (stdout is a terminal).  For pipe/redirect usage the
+# raw binary output is preserved.
+sshm() {
+    if [[ "$1" == "pick" && -t 1 ]]; then
+        local result
+        result=$(command sshm pick "${@:2}")
+        local ret=$?
+        if [[ $ret -eq 0 && -n "$result" ]]; then
+            print -z "$result"
+        fi
+        return $ret
+    fi
+    command sshm "$@"
+}
+
 # ZLE widget function for sshm inline picker (Ctrl+Alt+S)
 _sshm_inline_picker() {
     local saved_buffer="$BUFFER"
@@ -275,8 +291,8 @@ _sshm_inline_picker() {
     fi
     
     if [[ -n "$result" ]]; then
-        LBUFFER+="$result"
-        CURSOR=${#LBUFFER}
+        BUFFER="$result"
+        CURSOR=${#BUFFER}
     fi
     
     zle reset-prompt
@@ -287,10 +303,11 @@ _sshm_inline_picker() {
 _sshm_completion_picker() {
     if [[ $LBUFFER == *'**' ]]; then
         local saved_buffer="$BUFFER"
-        LBUFFER=${LBUFFER%'**'}
+        local stripped="${LBUFFER%'**'}"
+        LBUFFER="$stripped"
         
         local result
-        result=$(sshm pick --query "")
+        result=$(sshm pick --query "$stripped")
         local exit_code=$?
         
         if [[ $exit_code -ne 0 ]]; then
@@ -300,8 +317,8 @@ _sshm_completion_picker() {
         fi
         
         if [[ -n "$result" ]]; then
-            LBUFFER+="$result"
-            CURSOR=${#LBUFFER}
+            BUFFER="$result"
+            CURSOR=${#BUFFER}
         fi
         
         zle reset-prompt
@@ -321,6 +338,22 @@ zle -N _sshm_completion_picker
 # Sourced via: eval "$(sshm init zsh)"
 # Bind key: {} (override with SSHM_BIND_KEY)
 
+# Shell function wrapper: makes "sshm pick" insert onto the command line
+# when run interactively (stdout is a terminal).  For pipe/redirect usage the
+# raw binary output is preserved.
+sshm() {{
+    if [[ "$1" == "pick" && -t 1 ]]; then
+        local result
+        result=$(command sshm pick "${{@:2}}")
+        local ret=$?
+        if [[ $ret -eq 0 && -n "$result" ]]; then
+            print -z "$result"
+        fi
+        return $ret
+    fi
+    command sshm "$@"
+}}
+
 # ZLE widget function for sshm inline picker (Ctrl+Alt+S)
 _sshm_inline_picker() {{
     local saved_buffer="$BUFFER"
@@ -336,8 +369,8 @@ _sshm_inline_picker() {{
     fi
     
     if [[ -n "$result" ]]; then
-        LBUFFER+="$result"
-        CURSOR=${{#LBUFFER}}
+        BUFFER="$result"
+        CURSOR=${{#BUFFER}}
     fi
     
     zle reset-prompt
@@ -348,10 +381,11 @@ _sshm_inline_picker() {{
 _sshm_completion_picker() {{
     if [[ $LBUFFER == *'**' ]]; then
         local saved_buffer="$BUFFER"
-        LBUFFER=${{LBUFFER%'**'}}
+        local stripped="${{LBUFFER%'**'}}"
+        LBUFFER="$stripped"
         
         local result
-        result=$(sshm pick --query "")
+        result=$(sshm pick --query "$stripped")
         local exit_code=$?
         
         if [[ $exit_code -ne 0 ]]; then
@@ -361,8 +395,8 @@ _sshm_completion_picker() {{
         fi
         
         if [[ -n "$result" ]]; then
-            LBUFFER+="$result"
-            CURSOR=${{#LBUFFER}}
+            BUFFER="$result"
+            CURSOR=${{#BUFFER}}
         fi
         
         zle reset-prompt
@@ -753,6 +787,22 @@ pub mod tests {
         # Sourced via: eval "$(sshm init zsh)"
         # Bind key: \e^S (override with SSHM_BIND_KEY)
 
+        # Shell function wrapper: makes "sshm pick" insert onto the command line
+        # when run interactively (stdout is a terminal).  For pipe/redirect usage the
+        # raw binary output is preserved.
+        sshm() {
+            if [[ "$1" == "pick" && -t 1 ]]; then
+                local result
+                result=$(command sshm pick "${@:2}")
+                local ret=$?
+                if [[ $ret -eq 0 && -n "$result" ]]; then
+                    print -z "$result"
+                fi
+                return $ret
+            fi
+            command sshm "$@"
+        }
+
         # ZLE widget function for sshm inline picker (Ctrl+Alt+S)
         _sshm_inline_picker() {
             local saved_buffer="$BUFFER"
@@ -768,8 +818,8 @@ pub mod tests {
             fi
             
             if [[ -n "$result" ]]; then
-                LBUFFER+="$result"
-                CURSOR=${#LBUFFER}
+                BUFFER="$result"
+                CURSOR=${#BUFFER}
             fi
             
             zle reset-prompt
@@ -780,10 +830,11 @@ pub mod tests {
         _sshm_completion_picker() {
             if [[ $LBUFFER == *'**' ]]; then
                 local saved_buffer="$BUFFER"
-                LBUFFER=${LBUFFER%'**'}
+                local stripped="${LBUFFER%'**'}"
+                LBUFFER="$stripped"
                 
                 local result
-                result=$(sshm pick --query "")
+                result=$(sshm pick --query "$stripped")
                 local exit_code=$?
                 
                 if [[ $exit_code -ne 0 ]]; then
@@ -793,8 +844,8 @@ pub mod tests {
                 fi
                 
                 if [[ -n "$result" ]]; then
-                    LBUFFER+="$result"
-                    CURSOR=${#LBUFFER}
+                    BUFFER="$result"
+                    CURSOR=${#BUFFER}
                 fi
                 
                 zle reset-prompt
@@ -828,6 +879,22 @@ pub mod tests {
         # Sourced via: eval "$(sshm init zsh)"
         # Note: Bind lines suppressed by SSHM_NO_BIND=1
 
+        # Shell function wrapper: makes "sshm pick" insert onto the command line
+        # when run interactively (stdout is a terminal).  For pipe/redirect usage the
+        # raw binary output is preserved.
+        sshm() {
+            if [[ "$1" == "pick" && -t 1 ]]; then
+                local result
+                result=$(command sshm pick "${@:2}")
+                local ret=$?
+                if [[ $ret -eq 0 && -n "$result" ]]; then
+                    print -z "$result"
+                fi
+                return $ret
+            fi
+            command sshm "$@"
+        }
+
         # ZLE widget function for sshm inline picker (Ctrl+Alt+S)
         _sshm_inline_picker() {
             local saved_buffer="$BUFFER"
@@ -843,8 +910,8 @@ pub mod tests {
             fi
             
             if [[ -n "$result" ]]; then
-                LBUFFER+="$result"
-                CURSOR=${#LBUFFER}
+                BUFFER="$result"
+                CURSOR=${#BUFFER}
             fi
             
             zle reset-prompt
@@ -855,10 +922,11 @@ pub mod tests {
         _sshm_completion_picker() {
             if [[ $LBUFFER == *'**' ]]; then
                 local saved_buffer="$BUFFER"
-                LBUFFER=${LBUFFER%'**'}
+                local stripped="${LBUFFER%'**'}"
+                LBUFFER="$stripped"
                 
                 local result
-                result=$(sshm pick --query "")
+                result=$(sshm pick --query "$stripped")
                 local exit_code=$?
                 
                 if [[ $exit_code -ne 0 ]]; then
@@ -868,8 +936,8 @@ pub mod tests {
                 fi
                 
                 if [[ -n "$result" ]]; then
-                    LBUFFER+="$result"
-                    CURSOR=${#LBUFFER}
+                    BUFFER="$result"
+                    CURSOR=${#BUFFER}
                 fi
                 
                 zle reset-prompt
@@ -900,6 +968,22 @@ pub mod tests {
         # Sourced via: eval "$(sshm init zsh)"
         # Bind key: ^S (override with SSHM_BIND_KEY)
 
+        # Shell function wrapper: makes "sshm pick" insert onto the command line
+        # when run interactively (stdout is a terminal).  For pipe/redirect usage the
+        # raw binary output is preserved.
+        sshm() {
+            if [[ "$1" == "pick" && -t 1 ]]; then
+                local result
+                result=$(command sshm pick "${@:2}")
+                local ret=$?
+                if [[ $ret -eq 0 && -n "$result" ]]; then
+                    print -z "$result"
+                fi
+                return $ret
+            fi
+            command sshm "$@"
+        }
+
         # ZLE widget function for sshm inline picker (Ctrl+Alt+S)
         _sshm_inline_picker() {
             local saved_buffer="$BUFFER"
@@ -915,8 +999,8 @@ pub mod tests {
             fi
             
             if [[ -n "$result" ]]; then
-                LBUFFER+="$result"
-                CURSOR=${#LBUFFER}
+                BUFFER="$result"
+                CURSOR=${#BUFFER}
             fi
             
             zle reset-prompt
@@ -927,10 +1011,11 @@ pub mod tests {
         _sshm_completion_picker() {
             if [[ $LBUFFER == *'**' ]]; then
                 local saved_buffer="$BUFFER"
-                LBUFFER=${LBUFFER%'**'}
+                local stripped="${LBUFFER%'**'}"
+                LBUFFER="$stripped"
                 
                 local result
-                result=$(sshm pick --query "")
+                result=$(sshm pick --query "$stripped")
                 local exit_code=$?
                 
                 if [[ $exit_code -ne 0 ]]; then
@@ -940,8 +1025,8 @@ pub mod tests {
                 fi
                 
                 if [[ -n "$result" ]]; then
-                    LBUFFER+="$result"
-                    CURSOR=${#LBUFFER}
+                    BUFFER="$result"
+                    CURSOR=${#BUFFER}
                 fi
                 
                 zle reset-prompt
@@ -1020,10 +1105,11 @@ pub mod tests {
     }
 
     #[test]
-    fn test_init_zsh_splices_into_lbuffer_with_cursor_to_end() {
+    fn test_init_zsh_replaces_buffer_with_cursor_to_end() {
         let script = generate_init_zsh_script();
-        assert!(script.contains("LBUFFER+="));
-        assert!(script.contains("CURSOR=${#LBUFFER}"));
+        // Result replaces the buffer (not appended) so the full ssh command is on the command line.
+        assert!(script.contains("BUFFER=\"$result\""));
+        assert!(script.contains("CURSOR=${#BUFFER}"));
     }
 
     #[test]
@@ -1098,7 +1184,7 @@ pub mod tests {
             .find("local saved_buffer=\"$BUFFER\"")
             .expect("must save buffer");
         let strip_pos = script
-            .find("LBUFFER=${LBUFFER%'**'}")
+            .find("local stripped=\"${LBUFFER%'**'}\"")
             .expect("must strip **");
         // saved_buffer must appear before stripping in the completion function
         assert!(
@@ -1114,10 +1200,11 @@ pub mod tests {
     }
 
     #[test]
-    fn test_init_zsh_completion_inserts_into_lbuffer() {
+    fn test_init_zsh_completion_replaces_buffer() {
         let script = generate_init_zsh_script();
-        assert!(script.contains("LBUFFER+=\"$result\""));
-        assert!(script.contains("CURSOR=${#LBUFFER}"));
+        // Result replaces the buffer (not appended) so the full ssh command is on the command line.
+        assert!(script.contains("BUFFER=\"$result\""));
+        assert!(script.contains("CURSOR=${#BUFFER}"));
     }
 
     // ── sshm init bash snapshot tests (AC7) ────────────────────────────────────────────────
