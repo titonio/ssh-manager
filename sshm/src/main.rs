@@ -255,12 +255,10 @@ fn generate_init_zsh_script() -> String {
     // Check for custom bind key via SSHM_BIND_KEY environment variable
     let bind_key = std::env::var("SSHM_BIND_KEY").unwrap_or_else(|_| default_bind_key.to_string());
 
-    if no_bind {
-        r#"# sshm init zsh - Inline Picker Widget + **<TAB> completion trigger (no bind)
-# Sourced via: eval "$(sshm init zsh)"
-# Note: Bind lines suppressed by SSHM_NO_BIND=1
-
-# Shell function wrapper: makes "sshm pick" insert onto the command line
+    // Shared script body (identical in both no-bind and bind variants).
+    // The header (# sshm init zsh …) is emitted separately by each branch
+    // because the no-bind variant has a different first line.
+    let shared_body = r#"# Shell function wrapper: makes "sshm pick" insert onto the command line
 # when run interactively (stdout is a terminal).  For pipe/redirect usage the
 # raw binary output is preserved.
 sshm() {
@@ -272,6 +270,13 @@ sshm() {
             print -z "$result"
         fi
         return $ret
+    fi
+    # Shortcut: "sshm ssh user@host …" passes through to ssh directly.
+    # This lets "sshm **<TAB>" (which completes to "sshm ssh user@host")
+    # execute the ssh command when Enter is pressed.
+    if [[ "$1" == "ssh" ]]; then
+        command ssh "${@:2}"
+        return $?
     fi
     command sshm "$@"
 }
@@ -298,125 +303,66 @@ _sshm_inline_picker() {
     zle reset-prompt
 }
 
-# **<TAB> completion trigger: when LBUFFER ends with **, pressing Tab opens
-# the inline picker instead of running normal zsh completion
-_sshm_completion_picker() {
-    if [[ $LBUFFER == *'**' ]]; then
-        local saved_buffer="$BUFFER"
-        local stripped="${LBUFFER%'**'}"
-        LBUFFER="$stripped"
-        
-        local result
-        result=$(sshm pick --query "$stripped")
-        local exit_code=$?
-        
-        if [[ $exit_code -ne 0 ]]; then
-            BUFFER="$saved_buffer"
-            zle reset-prompt
-            return
+# Completion function for ssh / sshm: intercepts the ** trigger token like fzf does.
+# Integrates through zsh's completion system — Tab is NOT hijacked.
+# When the word being completed ends with **, the inline picker opens;
+# otherwise normal ssh completion runs unchanged.
+_sshm() {
+    if [[ $PREFIX == *'**' ]]; then
+        local stripped="${PREFIX%'**'}"
+        local result ret
+        result=$(sshm pick --query "$stripped" 2>/dev/null)
+        ret=$?
+        if [[ $ret -eq 0 && -n "$result" ]]; then
+            IPREFIX=""
+            # When completing for "ssh", strip the "ssh " prefix since
+            # the user already typed "ssh".  For "sshm" or other callers,
+            # keep the full result so it replaces the trigger word.
+            if [[ $words[1] == "ssh" ]]; then
+                compadd -U -- "${result#ssh }"
+            else
+                compadd -U -- "$result"
+            fi
+            return 0
         fi
-        
-        if [[ -n "$result" ]]; then
-            BUFFER="$result"
-            CURSOR=${#BUFFER}
-        fi
-        
-        zle reset-prompt
-    else
-        zle .expand-or-complete
+        return 1
+    fi
+    # Pass through to original ssh completion
+    if (( $+functions[_ssh] )); then
+        _ssh "$@"
     fi
 }
 
-# Register the ZLE widgets
+# Register the ZLE widget
 zle -N _sshm_inline_picker
-zle -N _sshm_completion_picker
-"#
-        .to_string()
+
+# Register **<TAB> completion via compdef (if completion system is loaded).
+# This does NOT hijack Tab — it hooks into zsh's completion chain naturally.
+if (( $+functions[compdef] )); then
+    compdef _sshm ssh sshm
+fi
+"#;
+
+    if no_bind {
+        let mut s = String::from("# sshm init zsh - Inline Picker Widget + **<TAB> completion trigger (no bind)\n");
+        s.push_str("# Sourced via: eval \"$(sshm init zsh)\"\n");
+        s.push_str("# Note: Bind lines suppressed by SSHM_NO_BIND=1\n\n");
+        s.push_str(shared_body);
+        s
     } else {
-        format!(
-            r#"# sshm init zsh - Inline Picker Widget + **<TAB> completion trigger
-# Sourced via: eval "$(sshm init zsh)"
-# Bind key: {} (override with SSHM_BIND_KEY)
-
-# Shell function wrapper: makes "sshm pick" insert onto the command line
-# when run interactively (stdout is a terminal).  For pipe/redirect usage the
-# raw binary output is preserved.
-sshm() {{
-    if [[ "$1" == "pick" && -t 1 ]]; then
-        local result
-        result=$(command sshm pick "${{@:2}}")
-        local ret=$?
-        if [[ $ret -eq 0 && -n "$result" ]]; then
-            print -z "$result"
-        fi
-        return $ret
-    fi
-    command sshm "$@"
-}}
-
-# ZLE widget function for sshm inline picker (Ctrl+Alt+S)
-_sshm_inline_picker() {{
-    local saved_buffer="$BUFFER"
-    
-    local result
-    result=$(sshm pick --query "$BUFFER")
-    local exit_code=$?
-    
-    if [[ $exit_code -ne 0 ]]; then
-        BUFFER="$saved_buffer"
-        zle reset-prompt
-        return
-    fi
-    
-    if [[ -n "$result" ]]; then
-        BUFFER="$result"
-        CURSOR=${{#BUFFER}}
-    fi
-    
-    zle reset-prompt
-}}
-
-# **<TAB> completion trigger: when LBUFFER ends with **, pressing Tab opens
-# the inline picker instead of running normal zsh completion
-_sshm_completion_picker() {{
-    if [[ $LBUFFER == *'**' ]]; then
-        local saved_buffer="$BUFFER"
-        local stripped="${{LBUFFER%'**'}}"
-        LBUFFER="$stripped"
-        
-        local result
-        result=$(sshm pick --query "$stripped")
-        local exit_code=$?
-        
-        if [[ $exit_code -ne 0 ]]; then
-            BUFFER="$saved_buffer"
-            zle reset-prompt
-            return
-        fi
-        
-        if [[ -n "$result" ]]; then
-            BUFFER="$result"
-            CURSOR=${{#BUFFER}}
-        fi
-        
-        zle reset-prompt
-    else
-        zle .expand-or-complete
-    fi
-}}
-
-# Register the ZLE widgets
-zle -N _sshm_inline_picker
-zle -N _sshm_completion_picker
-
-# Bind the widget to the trigger key (Ctrl+Alt+S)
-bindkey '{}' _sshm_inline_picker
-
-# Bind **<TAB> completion trigger (Tab key)
-bindkey '^I' _sshm_completion_picker
-"#,
-            bind_key, bind_key
-        )
+        let mut s = format!(
+            "# sshm init zsh - Inline Picker Widget + **<TAB> completion trigger\n\
+             # Sourced via: eval \"$(sshm init zsh)\"\n\
+             # Bind key: {bind} (override with SSHM_BIND_KEY)\n\n",
+            bind = bind_key
+        );
+        s.push_str(shared_body);
+        s.push_str(&format!(
+            "\n# Bind the widget to the trigger key (Ctrl+Alt+S)\n\
+             bindkey '{bind}' _sshm_inline_picker\n",
+            bind = bind_key
+        ));
+        s
     }
 }
 
@@ -800,6 +746,13 @@ pub mod tests {
                 fi
                 return $ret
             fi
+            # Shortcut: "sshm ssh user@host …" passes through to ssh directly.
+            # This lets "sshm **<TAB>" (which completes to "sshm ssh user@host")
+            # execute the ssh command when Enter is pressed.
+            if [[ "$1" == "ssh" ]]; then
+                command ssh "${@:2}"
+                return $?
+            fi
             command sshm "$@"
         }
 
@@ -825,44 +778,47 @@ pub mod tests {
             zle reset-prompt
         }
 
-        # **<TAB> completion trigger: when LBUFFER ends with **, pressing Tab opens
-        # the inline picker instead of running normal zsh completion
-        _sshm_completion_picker() {
-            if [[ $LBUFFER == *'**' ]]; then
-                local saved_buffer="$BUFFER"
-                local stripped="${LBUFFER%'**'}"
-                LBUFFER="$stripped"
-                
-                local result
-                result=$(sshm pick --query "$stripped")
-                local exit_code=$?
-                
-                if [[ $exit_code -ne 0 ]]; then
-                    BUFFER="$saved_buffer"
-                    zle reset-prompt
-                    return
+        # Completion function for ssh / sshm: intercepts the ** trigger token like fzf does.
+        # Integrates through zsh's completion system — Tab is NOT hijacked.
+        # When the word being completed ends with **, the inline picker opens;
+        # otherwise normal ssh completion runs unchanged.
+        _sshm() {
+            if [[ $PREFIX == *'**' ]]; then
+                local stripped="${PREFIX%'**'}"
+                local result ret
+                result=$(sshm pick --query "$stripped" 2>/dev/null)
+                ret=$?
+                if [[ $ret -eq 0 && -n "$result" ]]; then
+                    IPREFIX=""
+                    # When completing for "ssh", strip the "ssh " prefix since
+                    # the user already typed "ssh".  For "sshm" or other callers,
+                    # keep the full result so it replaces the trigger word.
+                    if [[ $words[1] == "ssh" ]]; then
+                        compadd -U -- "${result#ssh }"
+                    else
+                        compadd -U -- "$result"
+                    fi
+                    return 0
                 fi
-                
-                if [[ -n "$result" ]]; then
-                    BUFFER="$result"
-                    CURSOR=${#BUFFER}
-                fi
-                
-                zle reset-prompt
-            else
-                zle .expand-or-complete
+                return 1
+            fi
+            # Pass through to original ssh completion
+            if (( $+functions[_ssh] )); then
+                _ssh "$@"
             fi
         }
 
-        # Register the ZLE widgets
+        # Register the ZLE widget
         zle -N _sshm_inline_picker
-        zle -N _sshm_completion_picker
+
+        # Register **<TAB> completion via compdef (if completion system is loaded).
+        # This does NOT hijack Tab — it hooks into zsh's completion chain naturally.
+        if (( $+functions[compdef] )); then
+            compdef _sshm ssh sshm
+        fi
 
         # Bind the widget to the trigger key (Ctrl+Alt+S)
         bindkey '\e^S' _sshm_inline_picker
-
-        # Bind **<TAB> completion trigger (Tab key)
-        bindkey '^I' _sshm_completion_picker
         "###);
     }
 
@@ -892,6 +848,13 @@ pub mod tests {
                 fi
                 return $ret
             fi
+            # Shortcut: "sshm ssh user@host …" passes through to ssh directly.
+            # This lets "sshm **<TAB>" (which completes to "sshm ssh user@host")
+            # execute the ssh command when Enter is pressed.
+            if [[ "$1" == "ssh" ]]; then
+                command ssh "${@:2}"
+                return $?
+            fi
             command sshm "$@"
         }
 
@@ -917,38 +880,44 @@ pub mod tests {
             zle reset-prompt
         }
 
-        # **<TAB> completion trigger: when LBUFFER ends with **, pressing Tab opens
-        # the inline picker instead of running normal zsh completion
-        _sshm_completion_picker() {
-            if [[ $LBUFFER == *'**' ]]; then
-                local saved_buffer="$BUFFER"
-                local stripped="${LBUFFER%'**'}"
-                LBUFFER="$stripped"
-                
-                local result
-                result=$(sshm pick --query "$stripped")
-                local exit_code=$?
-                
-                if [[ $exit_code -ne 0 ]]; then
-                    BUFFER="$saved_buffer"
-                    zle reset-prompt
-                    return
+        # Completion function for ssh / sshm: intercepts the ** trigger token like fzf does.
+        # Integrates through zsh's completion system — Tab is NOT hijacked.
+        # When the word being completed ends with **, the inline picker opens;
+        # otherwise normal ssh completion runs unchanged.
+        _sshm() {
+            if [[ $PREFIX == *'**' ]]; then
+                local stripped="${PREFIX%'**'}"
+                local result ret
+                result=$(sshm pick --query "$stripped" 2>/dev/null)
+                ret=$?
+                if [[ $ret -eq 0 && -n "$result" ]]; then
+                    IPREFIX=""
+                    # When completing for "ssh", strip the "ssh " prefix since
+                    # the user already typed "ssh".  For "sshm" or other callers,
+                    # keep the full result so it replaces the trigger word.
+                    if [[ $words[1] == "ssh" ]]; then
+                        compadd -U -- "${result#ssh }"
+                    else
+                        compadd -U -- "$result"
+                    fi
+                    return 0
                 fi
-                
-                if [[ -n "$result" ]]; then
-                    BUFFER="$result"
-                    CURSOR=${#BUFFER}
-                fi
-                
-                zle reset-prompt
-            else
-                zle .expand-or-complete
+                return 1
+            fi
+            # Pass through to original ssh completion
+            if (( $+functions[_ssh] )); then
+                _ssh "$@"
             fi
         }
 
-        # Register the ZLE widgets
+        # Register the ZLE widget
         zle -N _sshm_inline_picker
-        zle -N _sshm_completion_picker
+
+        # Register **<TAB> completion via compdef (if completion system is loaded).
+        # This does NOT hijack Tab — it hooks into zsh's completion chain naturally.
+        if (( $+functions[compdef] )); then
+            compdef _sshm ssh sshm
+        fi
         "###);
 
         // Clean up
@@ -981,6 +950,13 @@ pub mod tests {
                 fi
                 return $ret
             fi
+            # Shortcut: "sshm ssh user@host …" passes through to ssh directly.
+            # This lets "sshm **<TAB>" (which completes to "sshm ssh user@host")
+            # execute the ssh command when Enter is pressed.
+            if [[ "$1" == "ssh" ]]; then
+                command ssh "${@:2}"
+                return $?
+            fi
             command sshm "$@"
         }
 
@@ -1006,44 +982,47 @@ pub mod tests {
             zle reset-prompt
         }
 
-        # **<TAB> completion trigger: when LBUFFER ends with **, pressing Tab opens
-        # the inline picker instead of running normal zsh completion
-        _sshm_completion_picker() {
-            if [[ $LBUFFER == *'**' ]]; then
-                local saved_buffer="$BUFFER"
-                local stripped="${LBUFFER%'**'}"
-                LBUFFER="$stripped"
-                
-                local result
-                result=$(sshm pick --query "$stripped")
-                local exit_code=$?
-                
-                if [[ $exit_code -ne 0 ]]; then
-                    BUFFER="$saved_buffer"
-                    zle reset-prompt
-                    return
+        # Completion function for ssh / sshm: intercepts the ** trigger token like fzf does.
+        # Integrates through zsh's completion system — Tab is NOT hijacked.
+        # When the word being completed ends with **, the inline picker opens;
+        # otherwise normal ssh completion runs unchanged.
+        _sshm() {
+            if [[ $PREFIX == *'**' ]]; then
+                local stripped="${PREFIX%'**'}"
+                local result ret
+                result=$(sshm pick --query "$stripped" 2>/dev/null)
+                ret=$?
+                if [[ $ret -eq 0 && -n "$result" ]]; then
+                    IPREFIX=""
+                    # When completing for "ssh", strip the "ssh " prefix since
+                    # the user already typed "ssh".  For "sshm" or other callers,
+                    # keep the full result so it replaces the trigger word.
+                    if [[ $words[1] == "ssh" ]]; then
+                        compadd -U -- "${result#ssh }"
+                    else
+                        compadd -U -- "$result"
+                    fi
+                    return 0
                 fi
-                
-                if [[ -n "$result" ]]; then
-                    BUFFER="$result"
-                    CURSOR=${#BUFFER}
-                fi
-                
-                zle reset-prompt
-            else
-                zle .expand-or-complete
+                return 1
+            fi
+            # Pass through to original ssh completion
+            if (( $+functions[_ssh] )); then
+                _ssh "$@"
             fi
         }
 
-        # Register the ZLE widgets
+        # Register the ZLE widget
         zle -N _sshm_inline_picker
-        zle -N _sshm_completion_picker
+
+        # Register **<TAB> completion via compdef (if completion system is loaded).
+        # This does NOT hijack Tab — it hooks into zsh's completion chain naturally.
+        if (( $+functions[compdef] )); then
+            compdef _sshm ssh sshm
+        fi
 
         # Bind the widget to the trigger key (Ctrl+Alt+S)
         bindkey '^S' _sshm_inline_picker
-
-        # Bind **<TAB> completion trigger (Tab key)
-        bindkey '^I' _sshm_completion_picker
         "###);
 
         // Clean up
@@ -1124,49 +1103,61 @@ pub mod tests {
         assert!(script.contains("BUFFER=\"$saved_buffer\""));
     }
 
-    // ── sshm init zsh **<TAB> completion trigger contract tests (AC for #16) ─────────────────
+    // ── sshm init zsh **<TAB> completion trigger contract tests (AC for #16, #23) ───────────
 
     #[test]
-    fn test_init_zsh_has_completion_trigger_function() {
+    fn test_init_zsh_has_completion_function() {
         let script = generate_init_zsh_script();
-        assert!(script.contains("_sshm_completion_picker"));
+        // The **<TAB> trigger is now a compdef-registered completion function, not a
+        // ZLE widget that hijacks Tab.
+        assert!(script.contains("_sshm()"));
     }
 
     #[test]
-    fn test_init_zsh_completion_checks_lbuffer_for_doublestar() {
+    fn test_init_zsh_completion_checks_prefix_for_doublestar() {
         let script = generate_init_zsh_script();
-        // The widget checks if LBUFFER ends with **
-        assert!(script.contains("LBUFFER == *'**'"));
+        // The completion function checks $PREFIX (not $LBUFFER) — it runs inside
+        // zsh's completion system, not as a raw Tab binding.
+        assert!(script.contains("PREFIX == *'**'"));
     }
 
     #[test]
     fn test_init_zsh_completion_strips_doublestar() {
         let script = generate_init_zsh_script();
-        // The widget strips ** from the end of LBUFFER
-        assert!(script.contains("${LBUFFER%'**'}"));
+        // Strips ** from the end of PREFIX (the word being completed).
+        assert!(script.contains("${PREFIX%'**'}"));
     }
 
     #[test]
-    fn test_init_zsh_completion_falls_through_to_expand_or_complete() {
+    fn test_init_zsh_completion_falls_through_via_compdef() {
         let script = generate_init_zsh_script();
-        // When ** is not present, fall through to normal completion
-        assert!(script.contains("zle .expand-or-complete"));
+        // When ** is not present, passes through to original _ssh completion.
+        // Does NOT hijack Tab — completion chain is preserved.
+        assert!(script.contains("_ssh \"$@\""));
+    }
+
+    #[test]
+    fn test_init_zsh_completion_uses_compdef_not_bindkey() {
+        let script = generate_init_zsh_script();
+        // The trigger hooks into zsh's completion system via compdef, not
+        // by hijacking the Tab key with bindkey.
+        assert!(script.contains("compdef _sshm ssh"));
     }
 
     #[test]
     #[serial]
-    fn test_init_zsh_completion_binds_tab_by_default() {
+    fn test_init_zsh_completion_no_tab_binding() {
         std::env::remove_var("SSHM_NO_BIND");
         std::env::remove_var("SSHM_BIND_KEY");
 
         let script = generate_init_zsh_script();
-        // Tab binding (^I) for the completion trigger
-        assert!(script.contains("bindkey '^I' _sshm_completion_picker"));
+        // Tab must NOT be hijacked — normal completion stays intact.
+        assert!(!script.contains("bindkey '^I'"));
     }
 
     #[test]
     #[serial]
-    fn test_init_zsh_completion_binds_tab_suppressed_with_no_bind() {
+    fn test_init_zsh_completion_no_tab_binding_with_no_bind() {
         std::env::set_var("SSHM_NO_BIND", "1");
 
         let script = generate_init_zsh_script();
@@ -1176,33 +1167,24 @@ pub mod tests {
     }
 
     #[test]
-    fn test_init_zsh_completion_saves_buffer_before_stripping() {
+    fn test_init_zsh_completion_compadd_with_result() {
         let script = generate_init_zsh_script();
-        // The saved_buffer must capture the state BEFORE stripping **
-        // so that cancellation restores the full original buffer
-        let saved_before = script
-            .find("local saved_buffer=\"$BUFFER\"")
-            .expect("must save buffer");
-        let strip_pos = script
-            .find("local stripped=\"${LBUFFER%'**'}\"")
-            .expect("must strip **");
-        // saved_buffer must appear before stripping in the completion function
-        assert!(
-            saved_before < strip_pos,
-            "saved_buffer must be captured before stripping **"
-        );
+        // The completion function uses compadd to insert the selected host
+        // (with the "ssh " prefix stripped).
+        assert!(script.contains("compadd -U -- \"${result#ssh }\""));
     }
 
     #[test]
-    fn test_init_zsh_completion_registers_widget() {
+    fn test_init_zsh_compdef_guarded_by_function_check() {
         let script = generate_init_zsh_script();
-        assert!(script.contains("zle -N _sshm_completion_picker"));
+        // compdef is only called when the completion system is loaded.
+        assert!(script.contains("$+functions[compdef]"));
     }
 
     #[test]
     fn test_init_zsh_completion_replaces_buffer() {
         let script = generate_init_zsh_script();
-        // Result replaces the buffer (not appended) so the full ssh command is on the command line.
+        // The _sshm_inline_picker widget still replaces the buffer (Ctrl+Alt+S).
         assert!(script.contains("BUFFER=\"$result\""));
         assert!(script.contains("CURSOR=${#BUFFER}"));
     }
