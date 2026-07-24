@@ -344,7 +344,9 @@ fi
 "#;
 
     if no_bind {
-        let mut s = String::from("# sshm init zsh - Inline Picker Widget + **<TAB> completion trigger (no bind)\n");
+        let mut s = String::from(
+            "# sshm init zsh - Inline Picker Widget + **<TAB> completion trigger (no bind)\n",
+        );
         s.push_str("# Sourced via: eval \"$(sshm init zsh)\"\n");
         s.push_str("# Note: Bind lines suppressed by SSHM_NO_BIND=1\n\n");
         s.push_str(shared_body);
