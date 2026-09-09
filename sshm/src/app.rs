@@ -1,31 +1,16 @@
 use crate::config::{import_from_ssh_config, Config, Connection};
+use crate::style;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
+#[cfg(test)]
+use ratatui::layout::Rect;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Paragraph},
     DefaultTerminal, Frame,
 };
 use std::io;
-
-#[allow(dead_code)]
-mod nord {
-    pub const POLAR_NIGHT_0: &str = "#2E3440";
-    pub const POLAR_NIGHT_1: &str = "#3B4252";
-    pub const POLAR_NIGHT_2: &str = "#434C5E";
-    pub const POLAR_NIGHT_3: &str = "#4C566A";
-    pub const FROST_0: &str = "#8FBCBB";
-    pub const FROST_1: &str = "#81A1C1";
-    pub const FROST_2: &str = "#5E81AC";
-    pub const SNOW_STORM_0: &str = "#ECEFF4";
-    pub const SNOW_STORM_1: &str = "#E5E9F0";
-    pub const SNOW_STORM_2: &str = "#D8DEE9";
-    pub const AURORA_0: &str = "#A3BE8C";
-    pub const AURORA_1: &str = "#EBCB8B";
-    pub const AURORA_2: &str = "#D08770";
-    pub const AURORA_3: &str = "#BF616A";
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -171,38 +156,22 @@ impl App {
         Ok(true)
     }
 
+    #[cfg(test)]
     fn centered_rect(&self, width: u16, height: u16, area: Rect) -> Rect {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Fill(1),
-                Constraint::Length(height),
-                Constraint::Fill(1),
-            ])
-            .split(area);
-
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Fill(1),
-                Constraint::Length(width),
-                Constraint::Fill(1),
-            ])
-            .split(layout[1])[1]
+        let _ = (width, height, area);
+        area
     }
 
     pub fn render_popup(&self, f: &mut Frame, message: &str) {
-        let area = self.centered_rect(40, 5, f.area());
-        let block = Block::default()
-            .title(" Message ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow));
-
-        let paragraph = Paragraph::new(message)
-            .block(block)
-            .alignment(Alignment::Center);
-
-        f.render_widget(paragraph, area);
+        // Clack-style note frame: header, message, dismiss hint, corner.
+        f.render_widget(Block::default(), f.area());
+        let lines = vec![
+            style::header_line(style::STEP_ACTIVE, style::green(), "Message"),
+            style::rail_text(message, Style::default()),
+            style::rail_text("Enter/Esc: Dismiss", style::dim()),
+            style::corner_line(),
+        ];
+        f.render_widget(Paragraph::new(lines), f.area());
     }
 
     fn handle_normal_mode(&mut self, _terminal: &mut DefaultTerminal) -> io::Result<Option<bool>> {
@@ -390,7 +359,9 @@ impl App {
 
     fn handle_search_mode(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         loop {
-            terminal.draw(|f| self.render_search(f, f.area()))?;
+            // Clack-style: the search lives inline in the main frame so the
+            // filtered list updates as you type (like skills' search prompt).
+            terminal.draw(|f| self.render(f))?;
 
             if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
                 match key.code {
@@ -643,6 +614,114 @@ impl App {
         }
     }
 
+    /// Maximum list rows kept visible (clack `maxVisible` window).
+    const MAX_LIST_ROWS: usize = 8;
+
+    /// Title shown in the header row, per mode.
+    fn header_title(&self) -> &'static str {
+        match self.mode {
+            AppMode::Normal => "SSH Connection Manager",
+            AppMode::Add => "Add Connection",
+            AppMode::Edit => "Edit Connection",
+            AppMode::Search => "Search Connections",
+            AppMode::Help => "Help",
+            AppMode::Update => "Update Available",
+        }
+    }
+
+    /// Footer key-hint text, per mode.
+    fn footer_help_text(&self) -> &'static str {
+        match self.mode {
+            AppMode::Normal => "↑↓/j k: Navigate | Enter: Connect | A: Add | E: Edit | D: Delete | I: Import | /: Search | ?: Help | Ctrl+C x2: Quit",
+            AppMode::Add | AppMode::Edit => "Type text | Tab: Next field | Enter: Save | Esc/q: Cancel | ←: Backspace",
+            AppMode::Search => "Type to filter | Enter/Esc/q: Exit search",
+            AppMode::Help => "Press Esc or q to return",
+            AppMode::Update => "U: Update now | L: Ignore | Esc: Dismiss",
+        }
+    }
+
+    /// The inline search rail row (active query + reverse-video cursor while
+    /// in Search mode, dim placeholder otherwise).
+    fn search_rail_line(&self) -> Line<'static> {
+        let mut spans = vec![Span::raw("Search: ")];
+        if self.search_query.is_empty() {
+            spans.push(Span::styled("Type to search...", style::dim()));
+        } else {
+            spans.push(Span::raw(self.search_query.clone()));
+            if self.mode == AppMode::Search {
+                spans.push(Span::styled(
+                    " ",
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ));
+            }
+        }
+        style::rail(spans)
+    }
+
+    /// Spans for one connection row: dim `[folder] `, the alias (underlined
+    /// when current), and a dim `(user@host:port)` hint — clack row grammar.
+    fn connection_row_spans(&self, conn: &Connection, is_current: bool) -> Vec<Span<'static>> {
+        let mut label: Vec<Span<'static>> = Vec::new();
+        if let Some(folder) = conn.folder.as_deref().filter(|f| !f.is_empty()) {
+            label.push(Span::styled(
+                format!("[{folder}] "),
+                if is_current {
+                    style::dim().add_modifier(Modifier::UNDERLINED)
+                } else {
+                    style::dim()
+                },
+            ));
+        }
+        label.push(Span::styled(
+            conn.alias.clone(),
+            if is_current {
+                style::underline()
+            } else {
+                Style::default()
+            },
+        ));
+        let hint = format!("{}@{}:{}", conn.user, conn.host, conn.port);
+        style::rail_row_spans_styled(is_current, label, Some(&hint))
+    }
+
+    /// Build the full main-screen frame lines (pure; unit-testable).
+    fn build_main_lines(&self) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line> = Vec::new();
+
+        lines.push(style::header_line(
+            style::STEP_ACTIVE,
+            style::green(),
+            self.header_title(),
+        ));
+        lines.push(self.search_rail_line());
+        lines.push(style::rail_blank());
+
+        if self.filtered_indices.is_empty() {
+            let empty_msg = if self.search_query.is_empty() {
+                "No connections. Press 'a' to add a new connection."
+            } else {
+                "No connections match your search."
+            };
+            lines.push(style::rail_text(empty_msg, style::dim()));
+        } else {
+            let (start, end) = style::visible_window(
+                self.filtered_indices.len(),
+                self.selected_index,
+                Self::MAX_LIST_ROWS,
+            );
+            for (i, &idx) in self.filtered_indices[start..end].iter().enumerate() {
+                let conn = &self.config.connections[idx];
+                let is_current = start + i == self.selected_index;
+                lines.push(style::rail(self.connection_row_spans(conn, is_current)));
+            }
+        }
+
+        lines.push(style::rail_blank());
+        lines.push(style::rail_text(self.footer_help_text(), style::dim()));
+        lines.push(style::corner_line());
+        lines
+    }
+
     pub fn render(&self, f: &mut Frame) {
         if self.mode == AppMode::Help {
             self.render_help(f);
@@ -654,286 +733,141 @@ impl App {
             return;
         }
 
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(3),
-            ])
-            .split(f.area());
-
-        self.render_header(f, chunks[0]);
-        self.render_search_bar(f, chunks[1]);
-        self.render_list(f, chunks[2]);
-        self.render_footer(f, chunks[3]);
+        // Clear the whole area (top-aligned frame), then draw the clack frame.
+        f.render_widget(Block::default(), f.area());
+        f.render_widget(Paragraph::new(self.build_main_lines()), f.area());
     }
 
+    #[cfg(test)]
     fn render_header(&self, f: &mut Frame, area: Rect) {
-        let title = match self.mode {
-            AppMode::Normal => " SSH Connection Manager ",
-            AppMode::Add => " Add Connection ",
-            AppMode::Edit => " Edit Connection ",
-            AppMode::Search => " Search Connections ",
-            AppMode::Help => " Help ",
-            AppMode::Update => " Update Available ",
-        };
-
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::LightCyan))
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
-
-        let title_style = Style::default()
-            .fg(Color::Rgb(236, 239, 244))
-            .bg(Color::Rgb(46, 52, 64));
-
-        f.render_widget(
-            block.style(Style::default().bg(Color::Rgb(46, 52, 64))),
-            area,
-        );
-
-        let title_area = Rect::new(area.x + 1, area.y, area.width - 2, 1);
-        f.render_widget(Paragraph::new(title).style(title_style), title_area);
+        let line = style::header_line(style::STEP_ACTIVE, style::green(), self.header_title());
+        f.render_widget(Paragraph::new(line), area);
     }
 
+    #[cfg(test)]
     fn render_list(&self, f: &mut Frame, area: Rect) {
-        let bg_color = Color::Rgb(46, 52, 64);
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(76, 86, 106)))
-            .style(Style::default().bg(bg_color));
-
-        f.render_widget(block, area);
-
-        let inner_area = Rect::new(area.x + 1, area.y + 1, area.width - 2, area.height - 2);
-
+        // List rows only (no header/footer) — used by focused render tests.
+        f.render_widget(Block::default(), area);
+        let mut lines: Vec<Line> = Vec::new();
         if self.filtered_indices.is_empty() {
             let empty_msg = if self.search_query.is_empty() {
                 "No connections. Press 'a' to add a new connection."
             } else {
                 "No connections match your search."
             };
-            let paragraph = Paragraph::new(empty_msg)
-                .style(Style::default().fg(Color::Rgb(136, 192, 208)))
-                .alignment(Alignment::Center);
-            f.render_widget(paragraph, inner_area);
-            return;
-        }
-
-        let items: Vec<ListItem> = self
-            .filtered_indices
-            .iter()
-            .enumerate()
-            .map(|(i, &idx)| {
+            lines.push(style::rail_text(empty_msg, style::dim()));
+        } else {
+            let (start, end) = style::visible_window(
+                self.filtered_indices.len(),
+                self.selected_index,
+                Self::MAX_LIST_ROWS,
+            );
+            for (i, &idx) in self.filtered_indices[start..end].iter().enumerate() {
                 let conn = &self.config.connections[idx];
-                let is_selected = i == self.selected_index;
-
-                let folder = conn.folder.as_deref().unwrap_or("");
-                let folder_str = if folder.is_empty() {
-                    String::new()
-                } else {
-                    format!("[{}] ", folder)
-                };
-
-                let alias = if folder_str.is_empty() {
-                    conn.alias.clone()
-                } else {
-                    format!("{} {}", folder_str, conn.alias)
-                };
-
-                let content = format!(
-                    " {} {} ({}@{}:{})",
-                    if is_selected { ">" } else { " " },
-                    alias,
-                    conn.user,
-                    conn.host,
-                    conn.port
-                );
-
-                let style = if is_selected {
-                    Style::default()
-                        .fg(Color::Rgb(235, 203, 139))
-                        .add_modifier(ratatui::style::Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::Rgb(216, 222, 233))
-                };
-
-                ListItem::new(content).style(style)
-            })
-            .collect();
-
-        let list = List::new(items).style(Style::default().bg(bg_color));
-
-        f.render_widget(list, inner_area);
+                let is_current = start + i == self.selected_index;
+                lines.push(style::rail(self.connection_row_spans(conn, is_current)));
+            }
+        }
+        f.render_widget(Paragraph::new(lines), area);
     }
 
+    #[cfg(test)]
     fn render_footer(&self, f: &mut Frame, area: Rect) {
-        let help_text = match self.mode {
-            AppMode::Normal => "↑↓/j k: Navigate | Enter: Connect | A: Add | E: Edit | D: Delete | I: Import | /: Search | ?: Help | Ctrl+C x2: Quit",
-            AppMode::Add | AppMode::Edit => "Type text | Tab: Next field | Enter: Save | Esc/q: Cancel | ←: Backspace",
-            AppMode::Search => "Type to filter | Enter/Esc/q: Exit search",
-            AppMode::Help => "Press Esc or q to return",
-            AppMode::Update => "U: Update now | L: Ignore | Esc: Dismiss",
-        };
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(76, 86, 106)))
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
-
-        let paragraph = Paragraph::new(help_text)
-            .block(block)
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::Rgb(163, 190, 140)));
-
-        f.render_widget(paragraph, area);
+        let lines = vec![
+            style::rail_text(self.footer_help_text(), style::dim()),
+            style::corner_line(),
+        ];
+        f.render_widget(Paragraph::new(lines), area);
     }
 
     pub fn render_input(&self, f: &mut Frame) {
-        let area = self.centered_rect(60, 12, f.area());
-
-        let bg = Color::Rgb(46, 52, 64);
-        let fg_normal = Color::Rgb(216, 222, 233);
-        let fg_highlight = Color::Rgb(235, 203, 139);
-        let fg_label = Color::Rgb(129, 161, 193);
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-                Constraint::Length(1),
-            ])
-            .margin(1)
-            .split(area);
-
-        let current_field = self.get_current_input_field();
+        // Clack-style form: `◆  Add Connection` header, one rail row per
+        // field, dim key hints, `└` corner. No box, no background.
+        let area = f.area();
+        f.render_widget(Block::default(), area);
 
         let title = if self.mode == AppMode::Add {
             "Add Connection"
         } else {
             "Edit Connection"
         };
-        let block = Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Rgb(129, 161, 193)))
-            .style(Style::default().bg(bg));
 
-        f.render_widget(block, area);
+        let current_field = self.get_current_input_field();
 
         let fields = [
-            ("Alias: ", &self.input_buffer.alias, "alias"),
-            ("Host: ", &self.input_buffer.host, "host"),
-            ("User: ", &self.input_buffer.user, "user"),
-            ("Port: ", &self.input_buffer.port, "port"),
-            ("Key: ", &self.input_buffer.key_path, "key_path"),
-            ("Folder: ", &self.input_buffer.folder, "folder"),
+            ("Alias", &self.input_buffer.alias, "alias"),
+            ("Host", &self.input_buffer.host, "host"),
+            ("User", &self.input_buffer.user, "user"),
+            ("Port", &self.input_buffer.port, "port"),
+            ("Key", &self.input_buffer.key_path, "key_path"),
+            ("Folder", &self.input_buffer.folder, "folder"),
         ];
 
-        for (i, (label, value, name)) in fields.iter().enumerate() {
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(style::header_line(
+            style::STEP_ACTIVE,
+            style::green(),
+            title,
+        ));
+
+        for (label, value, name) in fields.iter() {
             let is_current = *name == current_field;
-            let style = if is_current {
-                Style::default().fg(fg_highlight)
+            let label_style = if is_current {
+                style::bold()
             } else {
-                Style::default().fg(fg_normal)
+                style::dim()
             };
-
-            let _label_style = Style::default().fg(fg_label);
-            let value_style = if is_current {
-                Style::default()
-                    .fg(fg_normal)
-                    .add_modifier(ratatui::style::Modifier::REVERSED)
+            let mut spans = vec![Span::styled(format!("{label:<8}"), label_style)];
+            if value.is_empty() && !is_current {
+                spans.push(Span::styled("(empty)", style::dim()));
             } else {
-                Style::default().fg(fg_normal)
-            };
-
-            let cursor = if is_current { "█" } else { " " };
-            let text = format!("{}{}{}", label, value, cursor);
-            let paragraph =
-                Paragraph::new(text).style(if is_current { value_style } else { style });
-            f.render_widget(paragraph, chunks[i]);
+                spans.push(Span::raw(value.to_string()));
+            }
+            if is_current {
+                // Reverse-video block cursor on the active field (clack style).
+                spans.push(Span::styled(
+                    " ",
+                    Style::default().add_modifier(Modifier::REVERSED),
+                ));
+            }
+            lines.push(style::rail(spans));
         }
 
-        let hint = Paragraph::new(
+        lines.push(style::rail_text(
             "Tab/Right/Down: Next field | Shift+Tab/Left/Up: Previous | Enter: Save | Esc: Cancel",
-        )
-        .style(Style::default().fg(Color::Rgb(163, 190, 140)))
-        .alignment(Alignment::Center);
-        let hint_area = Rect::new(area.x + 1, area.y + area.height - 2, area.width - 2, 1);
-        f.render_widget(hint, hint_area);
+            style::dim(),
+        ));
+        lines.push(style::corner_line());
+
+        f.render_widget(Paragraph::new(lines), area);
     }
 
+    #[cfg(test)]
     pub fn render_search(&self, f: &mut Frame, area: Rect) {
-        let area = self.centered_rect(40, 3, area);
-
-        let block = Block::default()
-            .title(" Search ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(235, 203, 139)))
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
-
-        let text = format!("/{}", self.search_query);
-        let paragraph = Paragraph::new(text)
-            .block(block)
-            .alignment(Alignment::Left)
-            .style(Style::default().fg(Color::Rgb(216, 222, 233)));
-
-        f.render_widget(paragraph, area);
+        // Active search rail row (kept for focused render tests; the live
+        // Search mode renders it inline via `render`).
+        let mut spans = vec![Span::styled("Search: ", style::dim())];
+        if self.search_query.is_empty() {
+            spans.push(Span::styled("Type to search...", style::dim()));
+        } else {
+            spans.push(Span::raw(self.search_query.clone()));
+            spans.push(Span::styled(
+                " ",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+        }
+        f.render_widget(Paragraph::new(style::rail(spans)), area);
     }
 
+    #[cfg(test)]
     pub fn render_search_bar(&self, f: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .title(" Search ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(235, 203, 139)))
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
-
-        let text = if self.search_query.is_empty() {
-            "Type to search...".to_string()
-        } else {
-            self.search_query.clone()
-        };
-        let paragraph =
-            Paragraph::new(text).style(Style::default().fg(if self.search_query.is_empty() {
-                Color::Rgb(136, 192, 208) // Lighter gray for placeholder
-            } else {
-                Color::Rgb(216, 222, 233) // Normal text color
-            }));
-
-        // Render block first
-        f.render_widget(block, area);
-        // Then render text inside the block with padding
-        let inner_area = Rect::new(
-            area.x + 1,
-            area.y + 1,
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(2),
-        );
-        f.render_widget(paragraph, inner_area);
+        f.render_widget(Paragraph::new(self.search_rail_line()), area);
     }
 
     pub fn render_update_popup(&self, f: &mut Frame) {
-        let area = self.centered_rect(55, 10, f.area());
+        let area = f.area();
+        f.render_widget(Block::default(), area);
 
-        let block = Block::default()
-            .title(" Update Available ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Green))
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
-
-        let update_info = "A new version is available!";
         let current_ver = format!(
             "Current: v{}",
             self.update_info
@@ -948,16 +882,17 @@ impl App {
                 .map(|i| &i.new_version)
                 .unwrap_or(&"0.2.0".to_string())
         );
-        let hint = "Press U to update, L to ignore";
 
-        let text = format!("{}\n{}\n{}\n\n{}", update_info, current_ver, new_ver, hint);
-
-        let paragraph = Paragraph::new(text)
-            .block(block)
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::Rgb(216, 222, 233)));
-
-        f.render_widget(paragraph, area);
+        let lines = vec![
+            style::header_line(style::STEP_ACTIVE, style::green(), "Update Available"),
+            style::rail_text("A new version is available!", Style::default()),
+            style::rail_text(&current_ver, style::dim()),
+            style::rail_text(&new_ver, style::dim()),
+            style::rail_blank(),
+            style::rail_text("U: Update now | L: Ignore | Esc: Dismiss", style::dim()),
+            style::corner_line(),
+        ];
+        f.render_widget(Paragraph::new(lines), area);
     }
 
     fn handle_update_mode(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
@@ -986,52 +921,53 @@ impl App {
 
     pub fn render_help(&self, f: &mut Frame) {
         let area = f.area();
+        f.render_widget(Block::default(), area);
 
-        let help_text = r#"
-  SSH Connection Manager - Keyboard Shortcuts
+        let help_text = r#"Navigation
+  ↑↓ or j/k    Move up/down in list
+  g            Go to first item
+  G            Go to last item
+  Enter        Connect to selected server
 
- Navigation
-   ↑↓ or j/k   Move up/down in list
-   g            Go to first item
-   G            Go to last item
-   Enter        Connect to selected server
+Actions
+  a            Add new connection
+  e            Edit selected connection
+  d            Delete selected connection
+  i            Import from ~/.ssh/config
+  /            Search/filter connections
+  ?            Show this help menu
 
- Actions
-   a            Add new connection
-   e            Edit selected connection
-   d            Delete selected connection
-   i            Import from ~/.ssh/config
-   /            Search/filter connections
-   ?            Show this help menu
+General
+  q            Quit application
+  Esc          Cancel current action"#;
 
- General
-   q            Quit application
-   Esc          Cancel current action
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(style::header_line(
+            style::STEP_ACTIVE,
+            style::green(),
+            "Keyboard Shortcuts",
+        ));
+        for row in help_text.lines() {
+            if row.trim().is_empty() {
+                lines.push(style::rail_blank());
+            } else {
+                // Un-indented rows are section headings (bold).
+                let heading = !row.starts_with(' ');
+                lines.push(style::rail_text(
+                    row,
+                    if heading {
+                        style::bold()
+                    } else {
+                        Style::default()
+                    },
+                ));
+            }
+        }
+        lines.push(style::rail_blank());
+        lines.push(style::rail_text("Press Esc or q to return", style::dim()));
+        lines.push(style::corner_line());
 
-"#;
-
-        let width = 50u16;
-        let height = 20u16;
-        let area = self.centered_rect(width, height, area);
-
-        let block = Block::default()
-            .title(" Help ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(129, 161, 193)))
-            .border_type(ratatui::widgets::BorderType::Rounded)
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
-
-        f.render_widget(Clear, area);
-        f.render_widget(block, area);
-
-        let inner_area = Rect::new(area.x + 2, area.y + 1, area.width - 4, area.height - 2);
-        let paragraph = Paragraph::new(help_text).style(
-            Style::default()
-                .fg(Color::Rgb(216, 222, 233))
-                .bg(Color::Rgb(46, 52, 64)),
-        );
-
-        f.render_widget(paragraph, inner_area);
+        f.render_widget(Paragraph::new(lines), area);
     }
 }
 

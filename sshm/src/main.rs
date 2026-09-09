@@ -3,6 +3,7 @@ mod config;
 mod picker;
 mod runtime;
 mod ssh;
+mod style;
 mod update;
 
 use std::io;

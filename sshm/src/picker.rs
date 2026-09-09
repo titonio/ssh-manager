@@ -1,12 +1,16 @@
 use crate::config::Connection;
 use crate::ssh::build_ssh_args;
+use crate::style;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
-use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+#[cfg(test)]
+use ratatui::style::Color;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+#[cfg(test)]
+use ratatui::widgets::ListItem;
+use ratatui::widgets::Paragraph;
 use std::collections::HashSet;
 use std::io;
 
@@ -23,18 +27,28 @@ pub enum PickerOutcome {
 /// within the best-matching field).
 pub type MatchResult = (usize, i64, Vec<usize>);
 
-/// How many lines the inline picker occupies by default.
-const DEFAULT_HEIGHT: u16 = 15;
+/// Prompt message shown in the picker header (kept for the settle trace too).
+pub const PICK_MESSAGE: &str = "Pick Connection";
 
-/// Style for matched/highlighted characters in picker rows.
-const HIGHLIGHT_FG: Color = Color::Rgb(235, 203, 139); // goldenrod
-const HIGHLIGHT_MOD: Modifier = Modifier::BOLD;
+/// Key-hint line rendered dim under the search row.
+pub const PICKER_HINT: &str = "↑↓/j k: Navigate | Enter: Select | Esc/Ctrl-C: Cancel";
 
-/// Style for normal (unselected) rows.
-const NORMAL_FG: Color = Color::Rgb(216, 222, 233);
+/// Maximum number of list rows visible at once (mirrors skills' `maxVisible`).
+pub const MAX_VISIBLE: usize = 8;
 
-/// Style for the query label / no-match message.
-const MUTED_FG: Color = Color::Rgb(136, 192, 208);
+/// Height of the picker's inline frame for a list of `total` connections:
+/// header + search + hint + separator + rows + separator + corner.
+///
+/// The height is computed once before the picker starts and stays constant
+/// while it is active (matching the stable-frame behaviour of inline Clack
+/// prompts); the list window slides within `MAX_VISIBLE` rows instead.
+pub fn pick_frame_height(total: usize) -> u16 {
+    6 + total.clamp(1, MAX_VISIBLE) as u16
+}
+
+/// Style for matched/highlighted characters in picker rows (Clack accent green).
+#[cfg(test)]
+pub const HIGHLIGHT_FG: Color = Color::Green;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helpers (unit-tested, no terminal)
@@ -150,50 +164,50 @@ pub fn compute_field_offsets(conn: &Connection) -> Vec<(&str, usize, usize)> {
 ///
 /// `highlight_indices` are **absolute display positions** (as produced by
 /// `compute_matches`). No offset translation is needed here.
+///
+/// Clack-style: matched characters are bold green, the whole label is
+/// underlined on the row under the cursor, and the `[folder] ` prefix is
+/// always rendered faint (unless a matched character takes the highlight).
+/// No background colours are used.
 pub fn build_picker_row_spans<'a>(
     conn: &'a Connection,
-    highlight_indices: &'a [usize],
+    highlight_indices: &[usize],
     is_selected: bool,
 ) -> Vec<Span<'a>> {
     let text = build_row_text(conn);
     let highlight_set: HashSet<usize> = highlight_indices.iter().copied().collect();
 
-    let highlight_style = Style::default()
-        .fg(HIGHLIGHT_FG)
-        .add_modifier(HIGHLIGHT_MOD);
-
-    // Style for selected row background (used when no character-level highlights)
-    let selected_style = Style::default()
-        .bg(Color::Rgb(129, 161, 193))
-        .fg(Color::Rgb(236, 239, 244))
-        .add_modifier(Modifier::BOLD);
+    // Character width of the `[folder] ` prefix, which is de-emphasised (dim).
+    let folder_prefix = conn
+        .folder
+        .as_deref()
+        .filter(|f| !f.is_empty())
+        .map(|f| f.chars().count() + 3) // "[", folder, "]", " "
+        .unwrap_or(0);
 
     let mut spans: Vec<Span> = Vec::new();
     for (idx, ch) in text.char_indices() {
-        if highlight_set.contains(&idx) {
-            spans.push(if is_selected {
-                Span::styled(
-                    ch.to_string(),
-                    Style::default()
-                        .fg(Color::Rgb(46, 52, 64))
-                        .bg(HIGHLIGHT_FG)
-                        .add_modifier(HIGHLIGHT_MOD),
-                )
+        let style = if highlight_set.contains(&idx) {
+            style::highlight()
+        } else if idx < folder_prefix {
+            if is_selected {
+                style::dim().add_modifier(Modifier::UNDERLINED)
             } else {
-                Span::styled(ch.to_string(), highlight_style)
-            });
+                style::dim()
+            }
         } else if is_selected {
-            // Apply selected row style to non-highlighted characters
-            spans.push(Span::styled(ch.to_string(), selected_style));
+            style::underline()
         } else {
-            spans.push(Span::raw(ch.to_string()));
-        }
+            Style::default()
+        };
+        spans.push(Span::styled(ch.to_string(), style));
     }
 
     spans
 }
 
 /// Build the full list of `ListItem`s for the picker.
+#[cfg(test)]
 pub fn build_picker_rows<'a>(
     all_connections: &'a [Connection],
     matches: &'a [MatchResult],
@@ -224,84 +238,86 @@ pub fn build_picker_rows<'a>(
 // Render (uses terminal)
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Render a single inline picker frame onto `frame`.
-pub fn render_picker_frame(
-    frame: &mut ratatui::Frame,
-    connections: &[Connection],
+/// Build the Clack-style frame lines for the picker (pure; unit-tested).
+///
+/// Layout follows the inline-prompt grammar of `vercel-labs/skills`:
+///
+/// ```text
+/// ◆  Pick Connection
+/// │  Search: Type to search...
+/// │  ↑↓/j k: Navigate | Enter: Select | Esc/Ctrl-C: Cancel
+/// │
+/// │ ❯ ● [staging] web (u@h.com:22)
+/// │   ○ db (u@h2.com:22)
+/// │
+/// └
+/// ```
+pub fn build_picker_lines<'a>(
+    connections: &'a [Connection],
     matches: &[MatchResult],
     selected_index: usize,
-    query: &str,
-) {
-    let area = frame.area();
-    let block = Block::default()
-        .title(" Pick Connection ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(129, 161, 193)));
+    query: &'a str,
+) -> Vec<Line<'a>> {
+    let mut lines: Vec<Line> = Vec::new();
 
-    frame.render_widget(block, area);
+    lines.push(style::header_line(
+        style::STEP_ACTIVE,
+        style::green(),
+        PICK_MESSAGE,
+    ));
 
-    let inner = Rect::new(
-        area.x + 1,
-        area.y + 1,
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
+    // Search row: dim placeholder when empty, query text with a reverse-video
+    // block cursor while typing (like skills' `${query}${inverse(' ')}`).
+    let mut search_spans = vec![Span::raw("Search: ")];
+    if query.is_empty() {
+        search_spans.push(Span::styled("Type to search...", style::dim()));
+    } else {
+        search_spans.push(Span::raw(query));
+        search_spans.push(Span::styled(
+            " ",
+            Style::default().add_modifier(Modifier::REVERSED),
+        ));
+    }
+    lines.push(style::rail(search_spans));
+
+    // Key hints (dim) and the separator rail.
+    lines.push(style::rail_text(PICKER_HINT, style::dim()));
+    lines.push(style::rail_blank());
 
     if connections.is_empty() {
-        let empty = Paragraph::new("No Connections")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(MUTED_FG));
-        frame.render_widget(empty, inner);
-        return;
+        lines.push(style::rail_text("No Connections", style::dim()));
+    } else if matches.is_empty() {
+        lines.push(style::rail_text(
+            &format!("No matches for \"{query}\""),
+            style::dim(),
+        ));
+    } else {
+        let sel = selected_index.min(matches.len() - 1);
+        let (start, end) = style::visible_window(matches.len(), sel, MAX_VISIBLE);
+        for (i, (conn_idx, _score, highlights)) in matches[start..end].iter().enumerate() {
+            let is_current = start + i == sel;
+            let label = build_picker_row_spans(&connections[*conn_idx], highlights, is_current);
+            lines.push(style::rail(style::rail_row_spans_styled(
+                is_current, label, None,
+            )));
+        }
     }
 
-    if matches.is_empty() && !query.is_empty() {
-        let no_matches = Paragraph::new(format!("No matches for \"{}\"", query))
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(MUTED_FG));
-        frame.render_widget(no_matches, inner);
-        return;
-    }
+    lines.push(style::rail_blank());
+    lines.push(style::corner_line());
+    lines
+}
 
-    let items = build_picker_rows(connections, matches, selected_index);
-
-    let query_text = if query.is_empty() {
-        "Type to search...".to_string()
-    } else {
-        query.to_string()
-    };
-    let query_style = if query.is_empty() {
-        Style::default().fg(MUTED_FG)
-    } else {
-        Style::default().fg(NORMAL_FG)
-    };
-    let query_para = Paragraph::new(query_text).style(query_style);
-    let query_area = Rect::new(inner.x, inner.y, inner.width, 1);
-    frame.render_widget(query_para, query_area);
-
-    let list_height = inner.height.saturating_sub(1);
-    let list_area = Rect::new(inner.x, inner.y + 1, inner.width, list_height);
-    let list = List::new(items)
-        .highlight_style(
-            Style::default()
-                .bg(Color::Rgb(129, 161, 193))
-                .fg(Color::Rgb(236, 239, 244))
-                .add_modifier(Modifier::BOLD),
-        )
-        .highlight_symbol("> ");
-    frame.render_widget(list, list_area);
-
-    let footer_text = "↑↓/j k: Navigate | Enter: Select | Esc/Ctrl-C: Cancel";
-    let footer_area = Rect::new(
-        inner.x,
-        inner.y + inner.height.saturating_sub(1),
-        inner.width,
-        1,
-    );
-    let footer = Paragraph::new(footer_text)
-        .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Rgb(163, 190, 140)));
-    frame.render_widget(footer, footer_area);
+/// Render a single inline picker frame onto `frame` (Clack-style).
+pub fn render_picker_frame<'a>(
+    frame: &mut ratatui::Frame,
+    connections: &'a [Connection],
+    matches: &[MatchResult],
+    selected_index: usize,
+    query: &'a str,
+) {
+    let lines = build_picker_lines(connections, matches, selected_index, query);
+    frame.render_widget(Paragraph::new(lines), frame.area());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -484,10 +500,17 @@ pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Resu
     // With fd 1 optionally redirected to /dev/tty, the ratatui backend can
     // simply use `io::stdout()` — all draws go to the real terminal.
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
+    // Record the cursor position *before* the inline viewport is created:
+    // this is the top row of the picker frame, where the settle trace will be
+    // written on exit (erase the live frame, leave a compact summary behind —
+    // exactly what @clack/prompts does when a prompt submits).
+    let frame_top = crossterm::cursor::position().ok().map(|(_, y)| y);
+
+    let frame_height = pick_frame_height(connections.len());
     let mut terminal = ratatui::Terminal::with_options(
         backend,
         ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Inline(DEFAULT_HEIGHT),
+            viewport: ratatui::Viewport::Inline(frame_height),
         },
     )?;
 
@@ -511,6 +534,7 @@ pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Resu
                 }
             }
         }
+        write_settle_trace(frame_top, &PickerOutcome::Cancel)?;
         return Ok(PickerOutcome::Cancel);
     }
 
@@ -576,7 +600,77 @@ pub fn run_pick(connections: Vec<Connection>, initial_query: String) -> io::Resu
         }
     };
 
+    // Collapse the live frame into the compact settle trace before the
+    // ratatui/raw-mode guards drop (Clack's signature scrollback behaviour).
+    write_settle_trace(frame_top, &outcome)?;
+
     Ok(outcome)
+}
+
+/// Erase the picker's live frame and write the compact settle trace at its top
+/// row, leaving just `◇  Pick Connection` + a dim summary line in the shell
+/// scrollback (or `■  Pick Connection` / `│  Cancelled` when cancelled).
+///
+/// `frame_top` is the absolute cursor row recorded before the inline viewport
+/// was created; when the cursor position request is unavailable we fall back
+/// to printing the trace in place.
+///
+/// This writes straight to fd 1 — while [`StdoutRedirect`] is live it lands on
+/// the real terminal (`/dev/tty`); the accepted `ssh` command is still printed
+/// later to the *restored* stdout pipe for `$(sshm pick ...)` capture.
+fn write_settle_trace(frame_top: Option<u16>, outcome: &PickerOutcome) -> io::Result<()> {
+    use std::io::Write;
+
+    use crossterm::cursor::{MoveTo, MoveToColumn};
+    use crossterm::queue;
+    use crossterm::style::{Attribute, Color as CColor, SetAttribute, SetForegroundColor};
+    use crossterm::terminal::{Clear, ClearType};
+
+    let cancelled = matches!(outcome, PickerOutcome::Cancel);
+    let summary = match outcome {
+        PickerOutcome::Selected(conn) => build_row_text(conn),
+        PickerOutcome::Cancel => String::new(),
+    };
+    let lines = style::settle_plain(PICK_MESSAGE, &summary, cancelled);
+
+    let mut out = io::stdout();
+    match frame_top {
+        // Move to the frame's top row and erase the live frame (below it the
+        // inline viewport only reserved blank screen space).
+        Some(y) => queue!(out, MoveTo(0, y), Clear(ClearType::FromCursorDown))?,
+        None => queue!(out, MoveToColumn(0))?,
+    }
+
+    // Line 0: green `◇` (or red `■`) icon, then the bold message on the
+    // terminal default colour (the Reset below also drops the icon colour).
+    let icon = lines[0].chars().next().unwrap_or('◇');
+    queue!(
+        out,
+        SetAttribute(Attribute::Reset),
+        SetForegroundColor(if cancelled {
+            CColor::Red
+        } else {
+            CColor::Green
+        }),
+    )?;
+    write!(out, "{icon}")?;
+    queue!(
+        out,
+        SetAttribute(Attribute::Reset),
+        SetAttribute(Attribute::Bold)
+    )?;
+    writeln!(out, "{}", &lines[0][icon.len_utf8()..])?;
+
+    // Remaining rows: faint, struck through when cancelled.
+    queue!(out, SetAttribute(Attribute::Dim))?;
+    if cancelled {
+        queue!(out, SetAttribute(Attribute::CrossedOut))?;
+    }
+    for line in &lines[1..] {
+        writeln!(out, "{line}")?;
+    }
+    queue!(out, SetAttribute(Attribute::Reset))?;
+    out.flush()
 }
 
 /// Build the literal `ssh` command string for a Connection.
@@ -808,11 +902,20 @@ mod tests {
     }
 
     #[test]
-    fn test_build_picker_row_spans_selected_inverted() {
+    fn test_build_picker_row_spans_selected_no_bg() {
         let conn = make_conn("server", "host.com", "u", 22, None);
         let spans = build_picker_row_spans(&conn, &[0, 1, 2], true);
-        // Selected + highlighted → should have bg set (inverted style).
-        assert!(spans[0].style.bg.is_some());
+        // Clack style: no background anywhere. Highlighted chars are bold;
+        // the rest of the selected row is underlined (not inverted).
+        assert!(
+            spans.iter().all(|s| s.style.bg.is_none()),
+            "Clack rows must not use background colours"
+        );
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        // A trailing non-highlighted char on the selected row is underlined.
+        let last = spans.last().unwrap();
+        assert!(last.style.add_modifier.contains(Modifier::UNDERLINED));
+        assert!(!last.style.add_modifier.contains(Modifier::BOLD));
     }
 
     #[test]

@@ -13,7 +13,7 @@ A modern Terminal User Interface (TUI) for managing SSH connections, built with 
 - **Inline Picker**: Filter-as-you-type selector triggered from the shell (Ctrl+Alt+S or `**<TAB>`)
 - **Shell Integration**: `sshm init zsh|bash` emits ZLE/widget scripts with trigger bindings
 - **Automatic Updates**: Built-in update checker with GitHub release integration
-- **Nord Theme**: Beautiful Nordic-inspired color scheme
+- **Clack-style UI**: Inline prompt frames (◆ header, dim │ rail, ❯ cursor) modeled on @clack/prompts and vercel-labs skills — no boxes, no background colors, foreground-only palette
 
 ## Installation
 
