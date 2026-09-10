@@ -91,6 +91,35 @@ impl Default for App {
     }
 }
 
+/// What one key press means while the manager is in Normal mode.
+///
+/// Extracted from [`App::handle_normal_mode`] so key routing can be
+/// unit-tested without a terminal. The invariant that matters: every
+/// printable character that is not an *explicit* command must classify as
+/// [`NormalKey::SearchChar`]. When lowercase `a`/`e`/`d`/`i` had their own
+/// half-implemented arms (guarded on `!search_query.is_empty()`) they were
+/// swallowed outright, making it impossible to *start* a search with those
+/// letters — typing "dev" left the query as "v".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NormalKey {
+    MoveUp,
+    MoveDown,
+    Connect,
+    CtrlC,
+    Add,
+    Edit,
+    Delete,
+    Import,
+    EnterSearch,
+    Help,
+    First,
+    Last,
+    Backspace,
+    /// Append to the live inline search query.
+    SearchChar(char),
+    Ignored,
+}
+
 impl App {
     pub fn new() -> Self {
         Self::default()
@@ -174,32 +203,55 @@ impl App {
         f.render_widget(Paragraph::new(lines), f.area());
     }
 
+    /// Pure Normal-mode key routing (no I/O, no state).
+    ///
+    /// See [`NormalKey`] for why every printable character that is not an
+    /// explicit command must classify as [`NormalKey::SearchChar`].
+    pub fn classify_normal_key(key: crossterm::event::KeyEvent) -> NormalKey {
+        use crossterm::event::{KeyCode, KeyModifiers};
+        match key.code {
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => NormalKey::CtrlC,
+            KeyCode::Up | KeyCode::Char('k') => NormalKey::MoveUp,
+            KeyCode::Down | KeyCode::Char('j') => NormalKey::MoveDown,
+            KeyCode::Enter => NormalKey::Connect,
+            KeyCode::Char('A') => NormalKey::Add,
+            KeyCode::Char('E') => NormalKey::Edit,
+            KeyCode::Char('D') => NormalKey::Delete,
+            KeyCode::Char('I') => NormalKey::Import,
+            KeyCode::Char('/') => NormalKey::EnterSearch,
+            KeyCode::Char('?') => NormalKey::Help,
+            KeyCode::Home => NormalKey::First,
+            KeyCode::End => NormalKey::Last,
+            KeyCode::Char('g') => NormalKey::First,
+            KeyCode::Char('G') => NormalKey::Last,
+            KeyCode::Backspace => NormalKey::Backspace,
+            KeyCode::Char(c) => NormalKey::SearchChar(c),
+            _ => NormalKey::Ignored,
+        }
+    }
+
     fn handle_normal_mode(&mut self, _terminal: &mut DefaultTerminal) -> io::Result<Option<bool>> {
         if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-            match key.code {
-                crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Char('k') => {
+            match Self::classify_normal_key(key) {
+                NormalKey::MoveUp => {
                     if self.selected_index > 0 {
                         self.selected_index -= 1;
                     }
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Down | crossterm::event::KeyCode::Char('j') => {
+                NormalKey::MoveDown => {
                     let len = self.filtered_indices.len();
                     if self.selected_index < len.saturating_sub(1) {
                         self.selected_index += 1;
                     }
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Enter => {
+                NormalKey::Connect => {
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                     self.connect();
                     return Ok(Some(true));
                 }
-                crossterm::event::KeyCode::Char('c')
-                    if key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL) =>
-                {
+                NormalKey::CtrlC => {
                     // Handle Ctrl+C for quit (need to press twice)
                     self.ctrl_c_count += 1;
                     if self.ctrl_c_count >= 2 {
@@ -209,41 +261,13 @@ impl App {
                         self.message = Some("Press Ctrl+C again to exit".to_string());
                     }
                 }
-                crossterm::event::KeyCode::Char('a') => {
-                    if !self.search_query.is_empty() {
-                        self.search_query.push('a');
-                        self.update_filter();
-                    }
-                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
-                }
-                crossterm::event::KeyCode::Char('e') => {
-                    if !self.search_query.is_empty() {
-                        self.search_query.push('e');
-                        self.update_filter();
-                    }
-                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
-                }
-                crossterm::event::KeyCode::Char('d') => {
-                    if !self.search_query.is_empty() {
-                        self.search_query.push('d');
-                        self.update_filter();
-                    }
-                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
-                }
-                crossterm::event::KeyCode::Char('i') => {
-                    if !self.search_query.is_empty() {
-                        self.search_query.push('i');
-                        self.update_filter();
-                    }
-                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
-                }
-                crossterm::event::KeyCode::Char('A') => {
+                NormalKey::Add => {
                     self.mode = AppMode::Add;
                     self.input_buffer.clear();
                     self.input_field = 0;
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char('E') => {
+                NormalKey::Edit => {
                     if let Some(&idx) = self.filtered_indices.get(self.selected_index) {
                         if let Some(conn) = self.config.connections.get(idx) {
                             self.input_buffer = InputBuffer::from_connection(conn);
@@ -253,52 +277,44 @@ impl App {
                     }
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char('D') => {
+                NormalKey::Delete => {
                     self.delete_connection();
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char('I') => {
+                NormalKey::Import => {
                     self.import_connections();
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char('/') => {
+                NormalKey::EnterSearch => {
                     self.mode = AppMode::Search;
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char('?') => {
+                NormalKey::Help => {
                     self.mode = AppMode::Help;
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Home => {
+                NormalKey::First => {
                     self.selected_index = 0;
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::End => {
+                NormalKey::Last => {
                     self.selected_index = self.filtered_indices.len().saturating_sub(1);
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char('g') => {
-                    self.selected_index = 0;
-                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
-                }
-                crossterm::event::KeyCode::Char('G') => {
-                    self.selected_index = self.filtered_indices.len().saturating_sub(1);
-                    self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
-                }
-                crossterm::event::KeyCode::Backspace => {
+                NormalKey::Backspace => {
                     if !self.search_query.is_empty() {
                         self.search_query.pop();
                         self.update_filter();
                     }
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                crossterm::event::KeyCode::Char(c) => {
+                NormalKey::SearchChar(c) => {
                     // Handle printable characters for search
                     self.search_query.push(c);
                     self.update_filter();
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
-                _ => {
+                NormalKey::Ignored => {
                     self.ctrl_c_count = 0; // Reset Ctrl+C counter on other key press
                 }
             }
@@ -930,16 +946,17 @@ impl App {
   Enter        Connect to selected server
 
 Actions
-  a            Add new connection
-  e            Edit selected connection
-  d            Delete selected connection
-  i            Import from ~/.ssh/config
+  A            Add new connection
+  E            Edit selected connection
+  D            Delete selected connection
+  I            Import from ~/.ssh/config
   /            Search/filter connections
   ?            Show this help menu
 
 General
   q            Quit application
-  Esc          Cancel current action"#;
+  Esc          Cancel current action
+  a-z          Any other letter filters the list"#;
 
         let mut lines: Vec<Line> = Vec::new();
         lines.push(style::header_line(
@@ -2246,6 +2263,84 @@ mod tests {
         app.ctrl_c_count = 2;
         app.ctrl_c_count = 0;
         assert_eq!(app.ctrl_c_count, 0);
+    }
+
+    fn key(c: char) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        )
+    }
+
+    /// Regression: lowercase `a`/`e`/`d`/`i` used to have their own arms in
+    /// Normal mode guarded on `!search_query.is_empty()`, so with an empty
+    /// query they were swallowed and you could never *start* a search with
+    /// those letters. They must reach the search query like any other letter.
+    #[test]
+    fn normal_mode_lowercase_aedi_are_search_chars_not_swallowed() {
+        for c in ['a', 'd', 'e', 'i'] {
+            assert_eq!(
+                App::classify_normal_key(key(c)),
+                NormalKey::SearchChar(c),
+                "lowercase {c} must be searchable from an empty query"
+            );
+        }
+    }
+
+    /// Every printable ASCII letter that is not an explicit command must be a
+    /// search character, so no letter can silently disappear from a query.
+    #[test]
+    fn normal_mode_no_printable_letter_is_silently_dropped() {
+        let commands = ['A', 'E', 'D', 'I', '/', '?', 'g', 'G', 'j', 'k'];
+        for byte in b'a'..=b'z' {
+            let c = byte as char;
+            if commands.contains(&c) {
+                continue;
+            }
+            assert!(
+                matches!(App::classify_normal_key(key(c)), NormalKey::SearchChar(x) if x == c),
+                "{c} should append to the search query"
+            );
+        }
+    }
+
+    /// The commands themselves still live on the uppercase keys.
+    #[test]
+    fn normal_mode_uppercase_actions_are_preserved() {
+        assert_eq!(App::classify_normal_key(key('A')), NormalKey::Add);
+        assert_eq!(App::classify_normal_key(key('E')), NormalKey::Edit);
+        assert_eq!(App::classify_normal_key(key('D')), NormalKey::Delete);
+        assert_eq!(App::classify_normal_key(key('I')), NormalKey::Import);
+        assert_eq!(App::classify_normal_key(key('/')), NormalKey::EnterSearch);
+        assert_eq!(App::classify_normal_key(key('?')), NormalKey::Help);
+    }
+
+    /// Typing a whole word starting with a previously-broken letter must
+    /// filter the list instead of collapsing the query.
+    #[test]
+    fn normal_mode_query_starting_with_d_filters_correctly() {
+        let mut app = create_test_app();
+        assert!(app.search_query.is_empty());
+
+        for c in "dev".chars() {
+            if let NormalKey::SearchChar(c) = App::classify_normal_key(key(c)) {
+                app.search_query.push(c);
+                app.update_filter();
+            } else {
+                panic!("'dev' must be typed as search characters");
+            }
+        }
+
+        assert_eq!(app.search_query, "dev");
+        let aliases: Vec<&str> = app
+            .filtered_indices
+            .iter()
+            .map(|&i| app.config.connections[i].alias.as_str())
+            .collect();
+        assert!(
+            aliases.contains(&"dev-server"),
+            "dev-server must survive a 'dev' filter, got {aliases:?}"
+        );
     }
 
     #[test]
