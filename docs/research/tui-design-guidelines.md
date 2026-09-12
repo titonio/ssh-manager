@@ -1,5 +1,16 @@
 # Terminal UI (TUI) Design Guidelines & Best Practices
 
+> **Status: superseded research input.** This document was the raw survey that fed
+> the live design skills. It is kept for provenance, not as authority — it has no
+> frontmatter, no routing, and roughly 40% of it covers Go, Python and Node
+> frameworks this project does not use.
+>
+> For actual guidance:
+> - **`tui-design`** skill — general terminal design craft and the reference library
+> - **`sshm-design`** skill — this repo's tokens, surfaces, and verification loop
+>
+> Both live in `.dsh/skills/` and load on trigger. This file loads into nothing.
+
 **Date:** March 2026  
 **Purpose:** Foundation document for creating an AI agent skill for TUI development  
 **Focus:** Usability, speed, visual appeal
