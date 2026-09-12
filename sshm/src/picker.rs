@@ -244,10 +244,16 @@ pub fn render_picker_frame(
 ) {
     let t = crate::theme::active();
     let area = frame.area();
+    // The picker draws inside someone else's live terminal, so it may not inherit
+    // the background: `fg` on a white terminal is 1.35:1, effectively invisible.
+    // Paint an opaque `t.bg` over the whole frame — the same thing every
+    // fullscreen panel does — so the dark-background contrast ratios actually
+    // apply instead of depending on whatever theme the user happens to run.
     let block = Block::default()
         .title(" Pick Connection ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(t.accent));
+        .border_style(Style::default().fg(t.accent))
+        .style(Style::default().bg(t.bg));
 
     frame.render_widget(block, area);
 
@@ -261,7 +267,7 @@ pub fn render_picker_frame(
     if connections.is_empty() {
         let empty = Paragraph::new("No Connections")
             .alignment(Alignment::Center)
-            .style(Style::default().fg(t.fg_muted));
+            .style(Style::default().fg(t.fg_muted).bg(t.bg));
         frame.render_widget(empty, inner);
         return;
     }
@@ -269,7 +275,7 @@ pub fn render_picker_frame(
     if matches.is_empty() && !query.is_empty() {
         let no_matches = Paragraph::new(format!("No matches for \"{}\"", query))
             .alignment(Alignment::Center)
-            .style(Style::default().fg(t.fg_muted));
+            .style(Style::default().fg(t.fg_muted).bg(t.bg));
         frame.render_widget(no_matches, inner);
         return;
     }
@@ -282,9 +288,9 @@ pub fn render_picker_frame(
         query.to_string()
     };
     let query_style = if query.is_empty() {
-        Style::default().fg(t.fg_muted)
+        Style::default().fg(t.fg_muted).bg(t.bg)
     } else {
-        Style::default().fg(t.fg)
+        Style::default().fg(t.fg).bg(t.bg)
     };
     let query_para = Paragraph::new(query_text).style(query_style);
     let query_area = Rect::new(inner.x, inner.y, inner.width, 1);
@@ -299,6 +305,13 @@ pub fn render_picker_frame(
     // future stateful migration inherits the correct palette instead of a
     // low-contrast accident.
     let list = List::new(items)
+        // The base style is what an unstyled row cell actually paints with.
+        // Plain rows are built from `Span::raw`, so without this they inherit
+        // the terminal's default fg *and* bg — and once the frame goes opaque a
+        // light terminal would put its dark default text on our dark panel.
+        // Naming both roles here keeps every row deterministic, not just the
+        // background.
+        .style(Style::default().fg(t.fg).bg(t.bg))
         .highlight_style(
             Style::default()
                 .bg(t.selection_bg)
@@ -317,7 +330,7 @@ pub fn render_picker_frame(
     );
     let footer = Paragraph::new(footer_text)
         .alignment(Alignment::Center)
-        .style(Style::default().fg(t.success));
+        .style(Style::default().fg(t.success).bg(t.bg));
     frame.render_widget(footer, footer_area);
 }
 
