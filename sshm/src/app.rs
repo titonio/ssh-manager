@@ -84,6 +84,32 @@ impl InputBuffer {
     }
 }
 
+/// Join hint labels with ` | `, dropping the ones that do not fit.
+///
+/// Hints are dropped from the **end**, so a caller controls exactly what survives
+/// in a narrow terminal purely by ordering them by importance. Without this the
+/// footer was one long string that ratatui clipped mid-word at whatever width the
+/// terminal happened to have.
+pub fn fit_hints(hints: &[&str], width: usize) -> String {
+    const SEP: &str = " | ";
+    let sep_len = SEP.chars().count();
+    let mut out = String::new();
+    let mut out_len = 0usize;
+    for hint in hints {
+        let hint_len = hint.chars().count();
+        let extra = if out.is_empty() { 0 } else { sep_len };
+        if out_len + extra + hint_len > width {
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str(SEP);
+        }
+        out.push_str(hint);
+        out_len += extra + hint_len;
+    }
+    out
+}
+
 impl Default for App {
     fn default() -> Self {
         let config = Config::load();
@@ -688,14 +714,9 @@ impl App {
             .border_style(Style::default().fg(t.accent))
             .style(Style::default().bg(t.bg));
 
-        let title_style = Style::default()
-            .fg(t.fg_bright)
-            .bg(t.bg);
+        let title_style = Style::default().fg(t.fg_bright).bg(t.bg);
 
-        f.render_widget(
-            block.style(Style::default().bg(t.bg)),
-            area,
-        );
+        f.render_widget(block.style(Style::default().bg(t.bg)), area);
 
         let title_area = Rect::new(area.x + 1, area.y, area.width - 2, 1);
         f.render_widget(Paragraph::new(title).style(title_style), title_area);
@@ -776,13 +797,36 @@ impl App {
 
     fn render_footer(&self, f: &mut Frame, area: Rect) {
         let t = crate::theme::active();
-        let help_text = match self.mode {
-            AppMode::Normal => "↑↓/j k: Navigate | Enter: Connect | A: Add | E: Edit | D: Delete | I: Import | /: Search | ?: Help | Ctrl+C x2: Quit",
-            AppMode::Add | AppMode::Edit => "Type text | Tab: Next field | Enter: Save | Esc/q: Cancel | ←: Backspace",
-            AppMode::Search => "Type to filter | Enter/Esc/q: Exit search",
-            AppMode::Help => "Press Esc or q to return",
-            AppMode::Update => "U: Update now | L: Ignore | Esc: Dismiss",
+        // Ordered by how badly you need them in a narrow terminal: movement and
+        // the escape hatches first, authoring actions last. The old single string
+        // was 116 chars against a 78-char interior at 80 columns, so Search,
+        // Help and Quit were silently clipped off every default-sized terminal.
+        let hints: &[&str] = match self.mode {
+            AppMode::Normal => &[
+                "↑↓/j k: Navigate",
+                "Enter: Connect",
+                "/: Search",
+                "?: Help",
+                "q: Quit",
+                "a: Add",
+                "e: Edit",
+                "d: Delete",
+                "i: Import",
+            ],
+            AppMode::Add | AppMode::Edit => &[
+                "Type text",
+                "Tab: Next field",
+                "Enter: Save",
+                "Esc/q: Cancel",
+                "←: Backspace",
+            ],
+            AppMode::Search => &["Type to filter", "Enter/Esc/q: Exit search"],
+            AppMode::Help => &["Press Esc or q to return"],
+            AppMode::Update => &["U: Update now", "L: Ignore", "Esc: Dismiss"],
         };
+
+        let interior = usize::from(area.width).saturating_sub(2);
+        let help_text = fit_hints(hints, interior);
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1034,11 +1078,7 @@ impl App {
         f.render_widget(block, area);
 
         let inner_area = Rect::new(area.x + 2, area.y + 1, area.width - 4, area.height - 2);
-        let paragraph = Paragraph::new(help_text).style(
-            Style::default()
-                .fg(t.fg)
-                .bg(t.bg),
-        );
+        let paragraph = Paragraph::new(help_text).style(Style::default().fg(t.fg).bg(t.bg));
 
         f.render_widget(paragraph, inner_area);
     }

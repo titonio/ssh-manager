@@ -152,24 +152,40 @@ pub fn build_picker_row_spans<'a>(
     let text = build_row_text(conn);
     let highlight_set: HashSet<usize> = highlight_indices.iter().copied().collect();
 
-    let highlight_style = Style::default()
-        .fg(t.highlight)
-        .add_modifier(HIGHLIGHT_MOD);
+    let highlight_style = Style::default().fg(t.highlight).add_modifier(HIGHLIGHT_MOD);
 
-    // Style for selected row background (used when no character-level highlights)
+    // Selected row. Uses the dedicated selection roles rather than accent +
+    // fg_bright, which measured 2.34:1 and failed WCAG AA.
     let selected_style = Style::default()
-        .bg(t.accent)
-        .fg(t.fg_bright)
+        .bg(t.selection_bg)
+        .fg(t.selection_fg)
         .add_modifier(Modifier::BOLD);
 
     let mut spans: Vec<Span> = Vec::new();
+
+    // Explicit selection marker. `List::highlight_symbol` only paints when the
+    // list is rendered statefully (`render_stateful_widget` + `ListState`); this
+    // picker renders stateless, so the symbol never appeared and selection was
+    // carried by background color alone — at 2.34:1, effectively invisible.
+    // A glyph marker means the selection survives color-blindness, NO_COLOR and
+    // a 16-color terminal alike.
+    if is_selected {
+        spans.push(Span::styled(
+            "> ",
+            Style::default()
+                .fg(t.selection_fg)
+                .bg(t.selection_bg)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
     for (idx, ch) in text.char_indices() {
         if highlight_set.contains(&idx) {
             spans.push(if is_selected {
                 Span::styled(
                     ch.to_string(),
                     Style::default()
-                        .fg(t.bg)
+                        .fg(t.selection_fg)
                         .bg(t.highlight)
                         .add_modifier(HIGHLIGHT_MOD),
                 )
@@ -276,14 +292,20 @@ pub fn render_picker_frame(
 
     let list_height = inner.height.saturating_sub(1);
     let list_area = Rect::new(inner.x, inner.y + 1, inner.width, list_height);
+    // NOTE: `highlight_style`/`highlight_symbol` are inert under a stateless
+    // `render_widget` — they only apply via `render_stateful_widget` + `ListState`.
+    // The visible selection marker is the ">" span built in
+    // `build_picker_row_spans`. These are kept on the selection roles so that a
+    // future stateful migration inherits the correct palette instead of a
+    // low-contrast accident.
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(t.accent)
-                .fg(t.fg_bright)
+                .bg(t.selection_bg)
+                .fg(t.selection_fg)
                 .add_modifier(Modifier::BOLD),
         )
-        .highlight_symbol("> ");
+        .highlight_symbol("  ");
     frame.render_widget(list, list_area);
 
     let footer_text = "↑↓/j k: Navigate | Enter: Select | Esc/Ctrl-C: Cancel";

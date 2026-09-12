@@ -1,6 +1,5 @@
 ---
 source: src/picker.rs
-assertion_line: 1022
 expression: content
 ---
 ┌ Pick Connection ─────────────────────────────────────────────────────────────┐│                       No matches for "zzzznonexistent"                       ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              ││                                                                              │└──────────────────────────────────────────────────────────────────────────────┘

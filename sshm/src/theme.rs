@@ -30,16 +30,16 @@ pub mod nord {
     pub const NORD1: Color = Color::Rgb(59, 66, 82); // #3B4252
     pub const NORD2: Color = Color::Rgb(67, 76, 94); // #434C5E
     pub const NORD3: Color = Color::Rgb(76, 86, 106); // #4C566A
-    // Snow Storm
+                                                      // Snow Storm
     pub const NORD4: Color = Color::Rgb(216, 222, 233); // #D8DEE9
     pub const NORD5: Color = Color::Rgb(229, 233, 240); // #E5E9F0
     pub const NORD6: Color = Color::Rgb(236, 239, 244); // #ECEFF4
-    // Frost
+                                                        // Frost
     pub const NORD7: Color = Color::Rgb(143, 188, 187); // #8FBCBB
     pub const NORD8: Color = Color::Rgb(136, 192, 208); // #88C0D0
     pub const NORD9: Color = Color::Rgb(129, 161, 193); // #81A1C1
     pub const NORD10: Color = Color::Rgb(94, 129, 172); // #5E81AC
-    // Aurora
+                                                        // Aurora
     pub const NORD11: Color = Color::Rgb(191, 97, 106); // #BF616A
     pub const NORD12: Color = Color::Rgb(208, 135, 112); // #D08770
     pub const NORD13: Color = Color::Rgb(235, 203, 139); // #EBCB8B
@@ -67,30 +67,31 @@ pub mod contrast {
     /// Needed so contrast can be evaluated when the app is running in a
     /// reduced-color terminal, where a `Color::Named` is all we have.
     const ANSI16_RGB: [(u8, u8, u8); 16] = [
-        (0, 0, 0),     // 0  Black
-        (135, 0, 0),   // 1  DarkRed
-        (0, 135, 0),   // 2  DarkGreen
-        (175, 175, 0), // 3  DarkYellow
-        (0, 0, 135),   // 4  DarkBlue
-        (135, 0, 135), // 5  DarkMagenta
-        (0, 175, 175), // 6  DarkCyan
+        (0, 0, 0),       // 0  Black
+        (135, 0, 0),     // 1  DarkRed
+        (0, 135, 0),     // 2  DarkGreen
+        (175, 175, 0),   // 3  DarkYellow
+        (0, 0, 135),     // 4  DarkBlue
+        (135, 0, 135),   // 5  DarkMagenta
+        (0, 175, 175),   // 6  DarkCyan
         (192, 192, 192), // 7  Gray
         (128, 128, 128), // 8  DarkGray
-        (255, 0, 0),   // 9  Red
-        (0, 255, 0),   // 10 Green
-        (255, 255, 0), // 11 Yellow
-        (0, 0, 255),   // 12 Blue
-        (255, 0, 255), // 13 Magenta
-        (0, 255, 255), // 14 Cyan
+        (255, 0, 0),     // 9  Red
+        (0, 255, 0),     // 10 Green
+        (255, 255, 0),   // 11 Yellow
+        (0, 0, 255),     // 12 Blue
+        (255, 0, 255),   // 13 Magenta
+        (0, 255, 255),   // 14 Cyan
         (255, 255, 255), // 15 White
     ];
 
     /// Resolve a `Color` to an sRGB triple.
     ///
-    /// `Reset`/`Default` have no fixed RGB and return `None`.
+    /// `Reset` has no fixed RGB and returns `None`.
     pub fn to_rgb(color: Color) -> Option<(u8, u8, u8)> {
         match color {
             Color::Rgb(r, g, b) => Some((r, g, b)),
+            Color::Indexed(n) => Some(indexed_to_rgb(n)),
             Color::Black => Some(ANSI16_RGB[0]),
             Color::Red => Some(ANSI16_RGB[1]),
             Color::Green => Some(ANSI16_RGB[2]),
@@ -108,6 +109,24 @@ pub mod contrast {
             Color::LightCyan => Some(ANSI16_RGB[14]),
             Color::White => Some(ANSI16_RGB[15]),
             _ => None,
+        }
+    }
+
+    /// Inverse of the xterm 256-color encoding.
+    ///
+    /// 0..=15 are the base ANSI colors, 16..=231 a 6×6×6 RGB cube, and
+    /// 232..=255 a 24-step grayscale ramp. Needed so contrast can be measured
+    /// after a color has been downgraded for a reduced-color terminal.
+    fn indexed_to_rgb(n: u8) -> (u8, u8, u8) {
+        const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
+        if n < 16 {
+            ANSI16_RGB[n as usize]
+        } else if n <= 231 {
+            let i = (n - 16) as usize;
+            (CUBE[i / 36], CUBE[(i / 6) % 6], CUBE[i % 6])
+        } else {
+            let g = 8 + (n - 232) * 10;
+            (g, g, g)
         }
     }
 
@@ -233,7 +252,11 @@ impl Theme {
             success: nord::NORD14,
             warning: nord::NORD12,
             selection_bg: nord::NORD9,
-            selection_fg: nord::NORD6,
+            // Dark-on-blue rather than white-on-blue: the previous NORD6 pairing
+            // measured 2.34:1, well under WCAG AA. NORD0 on NORD9 is 4.64:1 and
+            // matches how the picker already styles a matched character inside a
+            // selected row, so the two states agree instead of fighting.
+            selection_fg: nord::NORD0,
         }
     }
 
