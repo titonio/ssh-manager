@@ -20,12 +20,13 @@
 //! | non-color signaling | meaning carried by color alone (colour-blind users) |
 //! | footer width | key hints clipped off an 80-column terminal |
 //! | degradation | the UI collapsing in 16-colour / `NO_COLOR` terminals |
+//! | minimum size gate | a four-chunk layout collapsing below 60x14 |
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
-use sshm::app::{App, AppMode, InputBuffer};
+use sshm::app::{App, AppMode, InputBuffer, MIN_TUI_HEIGHT, MIN_TUI_WIDTH};
 use sshm::config::Config;
 use sshm::picker::{compute_matches, render_picker_frame};
 use sshm::theme::{contrast, nord, ColorSupport, Theme};
@@ -775,4 +776,133 @@ fn tui_paints_its_panel_background() {
         bare.len(),
         bare[0]
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule I — the minimum size gate
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Flatten a rendered buffer to text so a test can ask whether a string was drawn.
+///
+/// Every other assertion here works cell-by-cell because it is about colour. This
+/// rule is about *content* — what words reached the screen — so it needs the
+/// whole frame as one string.
+fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+    let w = usize::from(buffer.area().width);
+    (0..usize::from(buffer.area().height))
+        .map(|y| {
+            buffer.content[y * w..(y + 1) * w]
+                .iter()
+                .map(|c| c.symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Below the declared minimum the gate *replaces* the layout rather than adding
+/// a message on top of a broken one.
+///
+/// The normal layout is four bordered chunks — 3 + 3 + flex + 3 — so twelve rows
+/// are spent before the list gets a single cell. At 40x8 that renders borders
+/// stacked on borders and passes for a UI. The gate has to suppress it, which is
+/// why this asserts the header title is *absent* and not merely that the message
+/// is present.
+#[test]
+fn below_the_minimum_the_gate_replaces_the_layout() {
+    let app = test_app(AppMode::Normal);
+    let backend = TestBackend::new(40, 8);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(terminal.backend().buffer());
+
+    assert!(
+        text.contains("Resize to at least") && text.contains("60x14"),
+        "the too-small message did not render at 40x8:\n{text}"
+    );
+    assert!(
+        text.contains("40x8"),
+        "the message did not name the size it was actually given:\n{text}"
+    );
+    assert!(
+        !text.contains("SSH Connection Manager"),
+        "the normal header rendered below the minimum — the gate replaced nothing:\n{text}"
+    );
+}
+
+/// Nothing in the gate may panic, whatever size it is handed.
+///
+/// The guard fires on geometries the layout was never designed for, down to a
+/// single cell with no room for a border, a line, or a whole word. Every
+/// computation in `render_too_small` saturates for exactly this reason. A panic
+/// here is worse than a bad frame: inside a real fullscreen session it leaves the
+/// user's terminal with no echo and no cursor.
+#[test]
+fn the_gate_does_not_panic_at_any_size() {
+    for (w, h) in [(1u16, 1u16), (20u16, 5u16), (40u16, 8u16)] {
+        let app = test_app(AppMode::Normal);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            !text.contains("SSH Connection Manager"),
+            "{w}x{h}: the normal layout rendered below the minimum"
+        );
+    }
+}
+
+/// At exactly the minimum, and above it, the normal layout comes back.
+///
+/// The boundary is inclusive: 60x14 is supported, not merely not-rejected. This
+/// is the half of the gate a too-generous minimum would break, and the reason
+/// every existing 80x24 / 80x20 / 100x30 frame is unaffected.
+#[test]
+fn at_or_above_the_minimum_the_normal_layout_renders() {
+    for (w, h) in [
+        (MIN_TUI_WIDTH, MIN_TUI_HEIGHT),
+        (80u16, 24u16),
+        (100u16, 30u16),
+    ] {
+        let app = test_app(AppMode::Normal);
+        let backend = TestBackend::new(w, h);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("SSH Connection Manager"),
+            "{w}x{h}: the header did not render at or above the minimum"
+        );
+        assert!(
+            !text.contains("Resize to at least"),
+            "{w}x{h}: the too-small message fired at or above the minimum"
+        );
+    }
+}
+
+/// The guard sits above the Help and Update checks, so no mode can bypass it.
+///
+/// Help and the update popup lay out their own centered boxes and would each need
+/// a separate gate if this check came after them. One check at the top of
+/// `render` covers every surface that passes through it — including the message
+/// popup, which draws the normal frame underneath.
+#[test]
+fn the_gate_covers_every_mode_including_the_popups() {
+    for mode in [
+        AppMode::Normal,
+        AppMode::Add,
+        AppMode::Search,
+        AppMode::Help,
+        AppMode::Update,
+    ] {
+        let app = test_app(mode);
+        let backend = TestBackend::new(30, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(
+            text.contains("Resize to at least"),
+            "{mode:?}: the gate did not fire below the minimum"
+        );
+    }
 }

@@ -2,12 +2,21 @@ use crate::config::{import_from_ssh_config, Config, Connection};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::{
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::Style,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     DefaultTerminal, Frame,
 };
 use std::io;
+
+/// Smallest terminal the fullscreen TUI will lay out in.
+///
+/// The normal layout is four bordered chunks — header 3, search bar 3, list
+/// (flex), footer 3 — so 12 rows are gone before the list gets a single cell.
+/// Below this the chunks collapse and the UI degrades silently instead of
+/// saying so.
+pub const MIN_TUI_WIDTH: u16 = 60;
+pub const MIN_TUI_HEIGHT: u16 = 14;
 
 #[allow(dead_code)]
 mod nord {
@@ -106,6 +115,37 @@ pub fn fit_hints(hints: &[&str], width: usize) -> String {
         }
         out.push_str(hint);
         out_len += extra + hint_len;
+    }
+    out
+}
+
+/// Word-wrap `text` to `width` cells, one entry per display line.
+///
+/// Centering the too-small message means knowing how many lines it will occupy
+/// before drawing it, and ratatui's own `Paragraph::line_count` is an unstable
+/// API. Wrapping here keeps the count and the render in step. A word wider than
+/// `width` is emitted whole and left for the renderer to clip, never split
+/// mid-word.
+fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out: Vec<String> = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        let mut len = 0usize;
+        for word in paragraph.split_whitespace() {
+            let word_len = word.chars().count();
+            if len != 0 && len + 1 + word_len > width {
+                out.push(std::mem::take(&mut line));
+                len = 0;
+            }
+            if len != 0 {
+                line.push(' ');
+                len += 1;
+            }
+            line.push_str(word);
+            len += word_len;
+        }
+        out.push(line);
     }
     out
 }
@@ -671,6 +711,12 @@ impl App {
     }
 
     pub fn render(&self, f: &mut Frame) {
+        let area = f.area();
+        if area.width < MIN_TUI_WIDTH || area.height < MIN_TUI_HEIGHT {
+            self.render_too_small(f, area);
+            return;
+        }
+
         if self.mode == AppMode::Help {
             self.render_help(f);
             return;
@@ -695,6 +741,81 @@ impl App {
         self.render_search_bar(f, chunks[1]);
         self.render_list(f, chunks[2]);
         self.render_footer(f, chunks[3]);
+    }
+
+    /// Rendered in place of the normal layout when the terminal is too small.
+    ///
+    /// The alternative is four collapsed chunks: borders stacked on borders, the
+    /// list at zero cells, and no indication anything is wrong. This names the
+    /// requirement and the size actually found instead.
+    ///
+    /// Safe at any size. `Rect::inner` saturates rather than underflowing, the
+    /// border is skipped entirely when it would leave no interior to draw into,
+    /// and the message is wrapped by hand so it can be centred without ratatui's
+    /// unstable line-counting API.
+    fn render_too_small(&self, f: &mut Frame, area: Rect) {
+        let t = crate::theme::active();
+
+        // Paint the whole area first. This can fire over a frame laid out at a
+        // larger size, and the old chunks must not show through the message.
+        f.render_widget(Block::default().style(Style::default().bg(t.bg)), area);
+
+        // A border spends one cell on every side, so below 5x5 it leaves nothing
+        // to put text in. Draw the message bare rather than boxing an emptiness.
+        let boxed = area.width >= 5 && area.height >= 5;
+        if boxed {
+            f.render_widget(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(t.warning)),
+                area,
+            );
+        }
+        let inner = if boxed {
+            area.inner(Margin::new(1, 1))
+        } else {
+            area
+        };
+
+        let width = usize::from(inner.width);
+        let instruction = wrap_to_width(
+            &format!(
+                "Resize to at least {}x{} (currently {}x{}).",
+                MIN_TUI_WIDTH, MIN_TUI_HEIGHT, area.width, area.height
+            ),
+            width,
+        );
+        let full = std::iter::once("Terminal too small.".to_string())
+            .chain(std::iter::once(String::new()))
+            .chain(instruction.iter().cloned())
+            .collect::<Vec<_>>();
+
+        // When even that will not fit, the instruction is the part worth keeping.
+        let lines = if full.len() <= usize::from(inner.height) {
+            &full
+        } else {
+            &instruction
+        };
+
+        // Centre the message vertically instead of pinning it to the top of
+        // whatever room is left.
+        let count = u16::try_from(lines.len())
+            .unwrap_or(inner.height)
+            .min(inner.height);
+        let top = inner.height.saturating_sub(count) / 2;
+        let text_area = Rect::new(
+            inner.x,
+            inner.y.saturating_add(top),
+            inner.width,
+            inner.height.saturating_sub(top),
+        );
+
+        f.render_widget(
+            Paragraph::new(lines.join("\n"))
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(t.fg).bg(t.bg)),
+            text_area,
+        );
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect) {
