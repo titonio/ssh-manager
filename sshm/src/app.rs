@@ -3,7 +3,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
+    style::Style,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     DefaultTerminal, Frame,
 };
@@ -192,11 +192,12 @@ impl App {
     }
 
     pub fn render_popup(&self, f: &mut Frame, message: &str) {
+        let t = crate::theme::active();
         let area = self.centered_rect(40, 5, f.area());
         let block = Block::default()
             .title(" Message ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow));
+            .border_style(Style::default().fg(t.warning));
 
         let paragraph = Paragraph::new(message)
             .block(block)
@@ -671,6 +672,7 @@ impl App {
     }
 
     fn render_header(&self, f: &mut Frame, area: Rect) {
+        let t = crate::theme::active();
         let title = match self.mode {
             AppMode::Normal => " SSH Connection Manager ",
             AppMode::Add => " Add Connection ",
@@ -683,15 +685,15 @@ impl App {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::LightCyan))
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
+            .border_style(Style::default().fg(t.accent))
+            .style(Style::default().bg(t.bg));
 
         let title_style = Style::default()
-            .fg(Color::Rgb(236, 239, 244))
-            .bg(Color::Rgb(46, 52, 64));
+            .fg(t.fg_bright)
+            .bg(t.bg);
 
         f.render_widget(
-            block.style(Style::default().bg(Color::Rgb(46, 52, 64))),
+            block.style(Style::default().bg(t.bg)),
             area,
         );
 
@@ -700,11 +702,12 @@ impl App {
     }
 
     fn render_list(&self, f: &mut Frame, area: Rect) {
-        let bg_color = Color::Rgb(46, 52, 64);
+        let t = crate::theme::active();
+        let bg_color = t.bg;
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(76, 86, 106)))
+            .border_style(Style::default().fg(t.border))
             .style(Style::default().bg(bg_color));
 
         f.render_widget(block, area);
@@ -718,7 +721,7 @@ impl App {
                 "No connections match your search."
             };
             let paragraph = Paragraph::new(empty_msg)
-                .style(Style::default().fg(Color::Rgb(136, 192, 208)))
+                .style(Style::default().fg(t.fg_muted))
                 .alignment(Alignment::Center);
             f.render_widget(paragraph, inner_area);
             return;
@@ -756,10 +759,10 @@ impl App {
 
                 let style = if is_selected {
                     Style::default()
-                        .fg(Color::Rgb(235, 203, 139))
+                        .fg(t.highlight)
                         .add_modifier(ratatui::style::Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::Rgb(216, 222, 233))
+                    Style::default().fg(t.fg)
                 };
 
                 ListItem::new(content).style(style)
@@ -772,6 +775,7 @@ impl App {
     }
 
     fn render_footer(&self, f: &mut Frame, area: Rect) {
+        let t = crate::theme::active();
         let help_text = match self.mode {
             AppMode::Normal => "↑↓/j k: Navigate | Enter: Connect | A: Add | E: Edit | D: Delete | I: Import | /: Search | ?: Help | Ctrl+C x2: Quit",
             AppMode::Add | AppMode::Edit => "Type text | Tab: Next field | Enter: Save | Esc/q: Cancel | ←: Backspace",
@@ -782,24 +786,25 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(76, 86, 106)))
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
+            .border_style(Style::default().fg(t.border))
+            .style(Style::default().bg(t.bg));
 
         let paragraph = Paragraph::new(help_text)
             .block(block)
             .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::Rgb(163, 190, 140)));
+            .style(Style::default().fg(t.success));
 
         f.render_widget(paragraph, area);
     }
 
     pub fn render_input(&self, f: &mut Frame) {
+        let t = crate::theme::active();
         let area = self.centered_rect(60, 12, f.area());
 
-        let bg = Color::Rgb(46, 52, 64);
-        let fg_normal = Color::Rgb(216, 222, 233);
-        let fg_highlight = Color::Rgb(235, 203, 139);
-        let fg_label = Color::Rgb(129, 161, 193);
+        let bg = t.bg;
+        let fg_normal = t.fg;
+        let fg_highlight = t.highlight;
+        let fg_label = t.accent;
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -826,7 +831,7 @@ impl App {
             .title(title)
             .borders(Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Rgb(129, 161, 193)))
+            .border_style(Style::default().fg(t.accent))
             .style(Style::default().bg(bg));
 
         f.render_widget(block, area);
@@ -867,37 +872,39 @@ impl App {
         let hint = Paragraph::new(
             "Tab/Right/Down: Next field | Shift+Tab/Left/Up: Previous | Enter: Save | Esc: Cancel",
         )
-        .style(Style::default().fg(Color::Rgb(163, 190, 140)))
+        .style(Style::default().fg(t.success))
         .alignment(Alignment::Center);
         let hint_area = Rect::new(area.x + 1, area.y + area.height - 2, area.width - 2, 1);
         f.render_widget(hint, hint_area);
     }
 
     pub fn render_search(&self, f: &mut Frame, area: Rect) {
+        let t = crate::theme::active();
         let area = self.centered_rect(40, 3, area);
 
         let block = Block::default()
             .title(" Search ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(235, 203, 139)))
+            .border_style(Style::default().fg(t.highlight))
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
+            .style(Style::default().bg(t.bg));
 
         let text = format!("/{}", self.search_query);
         let paragraph = Paragraph::new(text)
             .block(block)
             .alignment(Alignment::Left)
-            .style(Style::default().fg(Color::Rgb(216, 222, 233)));
+            .style(Style::default().fg(t.fg));
 
         f.render_widget(paragraph, area);
     }
 
     pub fn render_search_bar(&self, f: &mut Frame, area: Rect) {
+        let t = crate::theme::active();
         let block = Block::default()
             .title(" Search ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(235, 203, 139)))
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
+            .border_style(Style::default().fg(t.highlight))
+            .style(Style::default().bg(t.bg));
 
         let text = if self.search_query.is_empty() {
             "Type to search...".to_string()
@@ -906,9 +913,9 @@ impl App {
         };
         let paragraph =
             Paragraph::new(text).style(Style::default().fg(if self.search_query.is_empty() {
-                Color::Rgb(136, 192, 208) // Lighter gray for placeholder
+                t.fg_muted // Lighter gray for placeholder
             } else {
-                Color::Rgb(216, 222, 233) // Normal text color
+                t.fg // Normal text color
             }));
 
         // Render block first
@@ -924,14 +931,15 @@ impl App {
     }
 
     pub fn render_update_popup(&self, f: &mut Frame) {
+        let t = crate::theme::active();
         let area = self.centered_rect(55, 10, f.area());
 
         let block = Block::default()
             .title(" Update Available ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Green))
+            .border_style(Style::default().fg(t.success))
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
+            .style(Style::default().bg(t.bg));
 
         let update_info = "A new version is available!";
         let current_ver = format!(
@@ -955,7 +963,7 @@ impl App {
         let paragraph = Paragraph::new(text)
             .block(block)
             .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::Rgb(216, 222, 233)));
+            .style(Style::default().fg(t.fg));
 
         f.render_widget(paragraph, area);
     }
@@ -985,6 +993,7 @@ impl App {
     }
 
     pub fn render_help(&self, f: &mut Frame) {
+        let t = crate::theme::active();
         let area = f.area();
 
         let help_text = r#"
@@ -1017,9 +1026,9 @@ impl App {
         let block = Block::default()
             .title(" Help ")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(129, 161, 193)))
+            .border_style(Style::default().fg(t.accent))
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .style(Style::default().bg(Color::Rgb(46, 52, 64)));
+            .style(Style::default().bg(t.bg));
 
         f.render_widget(Clear, area);
         f.render_widget(block, area);
@@ -1027,8 +1036,8 @@ impl App {
         let inner_area = Rect::new(area.x + 2, area.y + 1, area.width - 4, area.height - 2);
         let paragraph = Paragraph::new(help_text).style(
             Style::default()
-                .fg(Color::Rgb(216, 222, 233))
-                .bg(Color::Rgb(46, 52, 64)),
+                .fg(t.fg)
+                .bg(t.bg),
         );
 
         f.render_widget(paragraph, inner_area);

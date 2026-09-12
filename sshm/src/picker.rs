@@ -4,7 +4,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::layout::{Alignment, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use std::collections::HashSet;
@@ -26,15 +26,8 @@ pub type MatchResult = (usize, i64, Vec<usize>);
 /// How many lines the inline picker occupies by default.
 const DEFAULT_HEIGHT: u16 = 15;
 
-/// Style for matched/highlighted characters in picker rows.
-const HIGHLIGHT_FG: Color = Color::Rgb(235, 203, 139); // goldenrod
+/// Emphasis applied to matched characters and the active row.
 const HIGHLIGHT_MOD: Modifier = Modifier::BOLD;
-
-/// Style for normal (unselected) rows.
-const NORMAL_FG: Color = Color::Rgb(216, 222, 233);
-
-/// Style for the query label / no-match message.
-const MUTED_FG: Color = Color::Rgb(136, 192, 208);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pure helpers (unit-tested, no terminal)
@@ -155,17 +148,18 @@ pub fn build_picker_row_spans<'a>(
     highlight_indices: &'a [usize],
     is_selected: bool,
 ) -> Vec<Span<'a>> {
+    let t = crate::theme::active();
     let text = build_row_text(conn);
     let highlight_set: HashSet<usize> = highlight_indices.iter().copied().collect();
 
     let highlight_style = Style::default()
-        .fg(HIGHLIGHT_FG)
+        .fg(t.highlight)
         .add_modifier(HIGHLIGHT_MOD);
 
     // Style for selected row background (used when no character-level highlights)
     let selected_style = Style::default()
-        .bg(Color::Rgb(129, 161, 193))
-        .fg(Color::Rgb(236, 239, 244))
+        .bg(t.accent)
+        .fg(t.fg_bright)
         .add_modifier(Modifier::BOLD);
 
     let mut spans: Vec<Span> = Vec::new();
@@ -175,8 +169,8 @@ pub fn build_picker_row_spans<'a>(
                 Span::styled(
                     ch.to_string(),
                     Style::default()
-                        .fg(Color::Rgb(46, 52, 64))
-                        .bg(HIGHLIGHT_FG)
+                        .fg(t.bg)
+                        .bg(t.highlight)
                         .add_modifier(HIGHLIGHT_MOD),
                 )
             } else {
@@ -232,11 +226,12 @@ pub fn render_picker_frame(
     selected_index: usize,
     query: &str,
 ) {
+    let t = crate::theme::active();
     let area = frame.area();
     let block = Block::default()
         .title(" Pick Connection ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(129, 161, 193)));
+        .border_style(Style::default().fg(t.accent));
 
     frame.render_widget(block, area);
 
@@ -250,7 +245,7 @@ pub fn render_picker_frame(
     if connections.is_empty() {
         let empty = Paragraph::new("No Connections")
             .alignment(Alignment::Center)
-            .style(Style::default().fg(MUTED_FG));
+            .style(Style::default().fg(t.fg_muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -258,7 +253,7 @@ pub fn render_picker_frame(
     if matches.is_empty() && !query.is_empty() {
         let no_matches = Paragraph::new(format!("No matches for \"{}\"", query))
             .alignment(Alignment::Center)
-            .style(Style::default().fg(MUTED_FG));
+            .style(Style::default().fg(t.fg_muted));
         frame.render_widget(no_matches, inner);
         return;
     }
@@ -271,9 +266,9 @@ pub fn render_picker_frame(
         query.to_string()
     };
     let query_style = if query.is_empty() {
-        Style::default().fg(MUTED_FG)
+        Style::default().fg(t.fg_muted)
     } else {
-        Style::default().fg(NORMAL_FG)
+        Style::default().fg(t.fg)
     };
     let query_para = Paragraph::new(query_text).style(query_style);
     let query_area = Rect::new(inner.x, inner.y, inner.width, 1);
@@ -284,8 +279,8 @@ pub fn render_picker_frame(
     let list = List::new(items)
         .highlight_style(
             Style::default()
-                .bg(Color::Rgb(129, 161, 193))
-                .fg(Color::Rgb(236, 239, 244))
+                .bg(t.accent)
+                .fg(t.fg_bright)
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("> ");
@@ -300,7 +295,7 @@ pub fn render_picker_frame(
     );
     let footer = Paragraph::new(footer_text)
         .alignment(Alignment::Center)
-        .style(Style::default().fg(Color::Rgb(163, 190, 140)));
+        .style(Style::default().fg(t.success));
     frame.render_widget(footer, footer_area);
 }
 
@@ -967,6 +962,7 @@ mod tests {
 
     #[test]
     fn test_render_match_highlight_present() {
+        let t = crate::theme::Theme::nord();
         let conns = vec![make_conn("server", "host.com", "u", 22, None)];
         let matcher = SkimMatcherV2::default();
         let matches = compute_matches(&conns, &matcher, "ser");
@@ -978,7 +974,7 @@ mod tests {
         let buf = terminal.backend().buffer();
         // Check that some cells have the highlight style applied.
         let has_highlight = buf.content.iter().any(|c| {
-            c.style().fg == Some(HIGHLIGHT_FG) || c.style().add_modifier.contains(Modifier::BOLD)
+            c.style().fg == Some(t.highlight) || c.style().add_modifier.contains(Modifier::BOLD)
         });
         assert!(has_highlight, "Expected highlighted characters in output");
     }

@@ -3,6 +3,8 @@ mod config;
 mod picker;
 mod runtime;
 mod ssh;
+#[allow(dead_code)] // full palette + a11y math live here; the bin uses only roles
+mod theme;
 mod update;
 
 use std::io;
