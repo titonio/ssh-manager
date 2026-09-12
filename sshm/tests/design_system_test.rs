@@ -654,3 +654,125 @@ fn write_frame(dir: &str, mode: &str, surface: &str, buffer: &ratatui::buffer::B
         .unwrap_or_else(|e| panic!("write {path}: {e}"));
     eprintln!("wrote {path}");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule H — a surface must paint its own background
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The inline picker paints an opaque frame rather than overlaying the shell.
+///
+/// The picker draws inside someone else's live terminal, so it may not inherit a
+/// background it has not measured — `fg` on a white terminal is 1.35:1. The
+/// block's `.bg(t.bg)` is the one call that makes every dark-background ratio in
+/// Rule B actually apply on this surface. When that call was added the snapshot
+/// diff was *empty*: `TestBackend` writes glyphs and drops SGR, so the suite was
+/// blind to the fix and would be equally blind to its removal.
+///
+/// The border ring is deliberately included rather than excluded. `border_style`
+/// names a foreground only, so the ring is the one region whose background the
+/// block is solely responsible for — it is where a dropped `.bg(t.bg)` shows
+/// first, while every interior row is also painted by the list and paragraph
+/// base styles. Excluding it would leave this test unable to fail.
+#[test]
+fn picker_paints_an_opaque_background() {
+    let t = sshm::theme::active();
+    if t.bg == Color::Reset {
+        return; // NO_COLOR / dumb terminal: there is no background to paint.
+    }
+    let c = conns();
+    let matcher = SkimMatcherV2::default();
+    let matches = compute_matches(&c, &matcher, "");
+    let backend = TestBackend::new(80, 15);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_picker_frame(f, &c, &matches, 0, ""))
+        .unwrap();
+    let bare: Vec<usize> = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| cell.bg == Color::Reset)
+        .map(|(i, _)| i)
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "picker frame left {} cell(s) unpainted (first: #{}) — the frame must carry \
+         an explicit t.bg everywhere, including its border ring",
+        bare.len(),
+        bare[0]
+    );
+}
+
+/// The selected row paints `selection_bg` onto the buffer.
+///
+/// Rule B proves the selection pair is readable and Rule D proves the `>` marker
+/// moves; neither proves the background reaches the screen. `List::highlight_style`
+/// is inert under a stateless `render_widget`, so the only thing that paints a
+/// selection is the explicit `.bg(t.selection_bg)` in `build_picker_row_spans`.
+/// Drop it and the selection degrades to a lone `>` on the page background, and
+/// no glyph snapshot would notice. Index 1 is used so this covers a row other
+/// than the one Rule G checks.
+#[test]
+fn selected_row_paints_selection_bg() {
+    let t = sshm::theme::active();
+    if t.selection_bg == Color::Reset {
+        // NO_COLOR: nothing to paint with. The '>' marker asserted in Rule D is
+        // what carries the selection there.
+        return;
+    }
+    let c = conns();
+    let matcher = SkimMatcherV2::default();
+    let matches = compute_matches(&c, &matcher, "");
+    let backend = TestBackend::new(80, 15);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_picker_frame(f, &c, &matches, 1, ""))
+        .unwrap();
+    let painted = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .filter(|cell| cell.bg == t.selection_bg)
+        .count();
+    assert!(
+        painted > 0,
+        "no cell was painted with selection_bg ({:?}) — the selected row renders \
+         without its background",
+        t.selection_bg
+    );
+}
+
+/// The fullscreen TUI paints a background inside every panel it draws.
+///
+/// Same defect class as the picker, opposite constraint: here the TUI owns the
+/// whole terminal, so an unpainted cell lets the user's own background show
+/// through the layout and a panel visibly floats. Every block in `App::render`
+/// sets `.bg(t.bg)`; this asserts a real 80x24 frame comes back fully painted
+/// rather than trusting four separate call sites.
+#[test]
+fn tui_paints_its_panel_background() {
+    let t = sshm::theme::active();
+    if t.bg == Color::Reset {
+        return; // NO_COLOR: nothing to paint with.
+    }
+    let app = test_app(AppMode::Normal);
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let buf = terminal.backend().buffer();
+    let w = usize::from(buf.area().width);
+    let bare: Vec<usize> = (1..usize::from(buf.area().height) - 1)
+        .flat_map(|y| (1..w - 1).map(move |x| y * w + x))
+        .filter(|&i| buf.content[i].bg == Color::Reset)
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "TUI interior left {} cell(s) with no explicit background (first: #{}) — \
+         a panel that does not paint t.bg lets the user's terminal show through",
+        bare.len(),
+        bare[0]
+    );
+}
