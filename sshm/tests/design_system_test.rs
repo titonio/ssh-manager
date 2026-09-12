@@ -314,6 +314,13 @@ fn scan_buffer(buffer: &ratatui::buffer::Buffer, where_: &str, offenders: &mut V
         if cell.fg == Color::Reset || cell.bg == Color::Reset {
             continue;
         }
+        // Box-drawing and block elements are chrome, not text. This rule's 4.5:1
+        // floor is the WCAG *text* threshold; applying it to borders contradicts
+        // the exemption Rule B documents. `border` on `bg` is 1.69:1 by design
+        // and is surfaced by decorative_border_contrast_is_reported instead.
+        if is_chrome(cell.symbol()) {
+            continue;
+        }
         let ratio = contrast::ratio(cell.fg, cell.bg);
         if ratio < TEXT {
             offenders.push(format!(
@@ -325,6 +332,15 @@ fn scan_buffer(buffer: &ratatui::buffer::Buffer, where_: &str, offenders: &mut V
             ));
         }
     }
+}
+
+/// True for glyphs that draw structure rather than carry readable content.
+fn is_chrome(symbol: &str) -> bool {
+    let first = match symbol.chars().next() {
+        Some(c) => c,
+        None => return true,
+    };
+    matches!(first as u32, 0x2500..=0x259F) || matches!(first, '+' | '-' | '|')
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -525,11 +541,116 @@ fn resolved_palette_stays_within_nord_for_truecolor() {
 #[test]
 fn active_theme_resolves_lazily() {
     let t: &Theme = sshm::theme::active();
-    // Whatever the ambient terminal is, the roles must be populated.
+    // Whatever the ambient terminal is, the roles must be populated with
+    // something we can reason about. Asserted by property rather than by Color
+    // variant, because a 16-colour downgrade hands back named colors and a
+    // 256-colour one hands back Indexed — all of them legitimate.
     assert_ne!(t.fg, Color::Rgb(0, 0, 0), "fg resolved to unset black");
-    assert!(
-        matches!(t.bg, Color::Rgb(..) | Color::Indexed(_) | Color::Reset),
-        "unexpected bg: {:?}",
-        t.bg
+    match contrast::to_rgb(t.bg) {
+        Some(rgb) => assert!(
+            contrast::luminance(rgb) < 0.2,
+            "background drifted light in this colour mode: {:?}",
+            t.bg
+        ),
+        None => assert_eq!(
+            t.bg,
+            Color::Reset,
+            "an unresolvable background should only ever be Reset"
+        ),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule G — the frame as it really rendered, in this process's colour mode
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The selection must still be visibly distinct in whatever mode this process
+/// actually resolved.
+///
+/// `every_color_mode_stays_readable` checks the palette arithmetic for all four
+/// modes up front. This checks the frame that really rendered, so a downgrade
+/// that collapsed two roles onto the same terminal colour is caught at the cell
+/// level rather than in the table. Driven by the environment, which is exactly
+/// what `ColorSupport::detect` reads — that is what makes the CI matrix work
+/// without any injection.
+#[test]
+fn rendered_selection_is_distinct_in_this_mode() {
+    let t = sshm::theme::active();
+    let mode = format!("{:?}", ColorSupport::detect());
+
+    if t.selection_bg == Color::Reset {
+        // NO_COLOR / dumb terminal: no colour to be distinct with. The '>' marker
+        // asserted in Rule D is what carries selection here.
+        return;
+    }
+
+    assert_ne!(
+        t.selection_bg, t.bg,
+        "{mode}: selection background collapsed onto the page background"
     );
+
+    let c = conns();
+    let matcher = SkimMatcherV2::default();
+    let matches = compute_matches(&c, &matcher, "");
+    let backend = TestBackend::new(80, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_picker_frame(f, &c, &matches, 0, ""))
+        .unwrap();
+
+    let painted = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .filter(|cell| cell.bg == t.selection_bg)
+        .count();
+
+    assert!(
+        painted > 0,
+        "{mode}: no cell was painted with the selection background — the selection \
+         does not render at all in this colour mode"
+    );
+}
+
+/// Dump real ANSI frames for human review.
+///
+/// Gated on `SSHM_DUMP_FRAMES=1` so an ordinary test run writes nothing. This is
+/// what makes "looked at" a step we can actually perform without a PTY, a browser
+/// or a screen recorder: `cat target/design-frames/*.ansi` renders with true
+/// colour in any modern terminal, and the frames are diffable between runs.
+#[test]
+fn dump_frames_for_review() {
+    if std::env::var("SSHM_DUMP_FRAMES").is_err() {
+        eprintln!("SSHM_DUMP_FRAMES unset — skipping frame dump");
+        return;
+    }
+
+    let dir = format!("{}/target/design-frames", env!("CARGO_MANIFEST_DIR"));
+    std::fs::create_dir_all(&dir).expect("create frame dir");
+    let mode = format!("{:?}", ColorSupport::detect());
+
+    let c = conns();
+    let matcher = SkimMatcherV2::default();
+
+    let matches = compute_matches(&c, &matcher, "prod");
+    let backend = TestBackend::new(80, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|f| render_picker_frame(f, &c, &matches, 0, "prod"))
+        .unwrap();
+    write_frame(&dir, &mode, "picker", terminal.backend().buffer());
+
+    let app = test_app(AppMode::Normal);
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    write_frame(&dir, &mode, "tui", terminal.backend().buffer());
+}
+
+fn write_frame(dir: &str, mode: &str, surface: &str, buffer: &ratatui::buffer::Buffer) {
+    let path = format!("{dir}/{surface}-{mode}.ansi");
+    std::fs::write(&path, sshm::theme::ansi::buffer_to_ansi(buffer))
+        .unwrap_or_else(|e| panic!("write {path}: {e}"));
+    eprintln!("wrote {path}");
 }
