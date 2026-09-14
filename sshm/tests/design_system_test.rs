@@ -29,6 +29,7 @@ use ratatui::Terminal;
 use sshm::app::{App, AppMode, MIN_TUI_HEIGHT, MIN_TUI_WIDTH};
 use sshm::config::Config;
 use sshm::connections::ConnectionDraft;
+use sshm::frame::{build_frame, FrameMode};
 use sshm::picker::{compute_matches, render_picker_frame};
 use sshm::theme::{contrast, nord, ColorSupport, Theme};
 
@@ -99,6 +100,7 @@ fn no_color_literals_outside_the_theme_module() {
     let sources = [
         "src/app.rs",
         "src/connections.rs",
+        "src/frame.rs",
         "src/picker.rs",
         "src/main.rs",
         "src/runtime.rs",
@@ -146,6 +148,75 @@ fn no_color_literals_outside_the_theme_module() {
         offenders.is_empty(),
         "colors must be named by role via theme::, not by literal.\n{}",
         offenders.join("\n")
+    );
+}
+
+/// The Clack palette carries no fixed RGB.
+///
+/// The transparent inline frame (#33) borrows the user's terminal background, so
+/// it cannot contrast-check a hue of its own against a surface it cannot see.
+/// Every role is therefore a **named ANSI colour** — which the terminal maps to
+/// *its* palette, at the user's chosen values — or `Reset`, meaning "whatever
+/// the terminal is already using". A `Rgb(..)` or `Indexed(..)` here would pin a
+/// colour the frame has no business choosing, and would break the degrade to 16
+/// colours by skipping the terminal's own mapping.
+#[test]
+fn the_clack_palette_is_named_ansi_only() {
+    let t = Theme::clack();
+    let fixed = |c: Color| matches!(c, Color::Rgb(..) | Color::Indexed(..));
+
+    for (role, color) in [
+        ("bg", t.bg),
+        ("fg", t.fg),
+        ("fg_bright", t.fg_bright),
+        ("fg_muted", t.fg_muted),
+        ("accent", t.accent),
+        ("border", t.border),
+        ("highlight", t.highlight),
+        ("success", t.success),
+        ("warning", t.warning),
+        ("selection_bg", t.selection_bg),
+        ("selection_fg", t.selection_fg),
+    ] {
+        assert!(
+            !fixed(color),
+            "clack role `{role}` is a fixed colour ({color:?}) — the transparent \
+             frame's palette must be named ANSI colours or Reset only"
+        );
+    }
+}
+
+/// The hues the Clack palette is allowed to have, pinned to the spec's words:
+/// cyan for the active step, green for a match. Everything else is the terminal's.
+#[test]
+fn the_clack_palette_hues_are_cyan_and_green() {
+    let t = Theme::clack();
+
+    assert_eq!(t.accent, Color::Cyan, "the ◆ step icon is Clack cyan");
+    assert_eq!(t.highlight, Color::Green, "a fuzzy hit is Clack green");
+    assert_eq!(t.border, Color::DarkGray, "the │ rail is bright black");
+    assert_eq!(t.fg_muted, Color::DarkGray, "the dim meta is bright black");
+}
+
+/// A transparent frame has no background of its own, so the WCAG table that
+/// governs Nord cannot govern it. What replaces that check is the structural
+/// claim: the frame owns no background, body text is the terminal's own
+/// foreground, and selection is a glyph rather than a fill.
+#[test]
+fn the_clack_palette_leaves_the_surface_to_the_terminal() {
+    let t = Theme::clack();
+
+    assert_eq!(t.bg, Color::Reset, "the frame must not own a background");
+    assert_eq!(
+        t.fg,
+        Color::Reset,
+        "body text is the terminal's own foreground, so it is readable on the \
+         terminal's own background by construction"
+    );
+    assert_eq!(
+        t.selection_bg,
+        Color::Reset,
+        "selection is carried by the ❯ glyph plus a bold alias, never by a filled row"
     );
 }
 
@@ -649,6 +720,21 @@ fn dump_frames_for_review() {
     let mut terminal = Terminal::new(backend).unwrap();
     terminal.draw(|f| app.render(f)).unwrap();
     write_frame(&dir, &mode, "tui", terminal.backend().buffer());
+
+    // The inline frame seam (#33). These need no terminal at all: a Frame is a
+    // value, and `to_ansi` turns it into bytes a human can look at. This is the
+    // step that makes "verified" mean something for a transparent frame — the
+    // WCAG table cannot govern it, so the eyeball has to.
+    for (name, frame) in [
+        ("frame-pick", build_frame(&c, "prod", 0, FrameMode::Pick)),
+        ("frame-manage", build_frame(&c, "", 1, FrameMode::Manage)),
+        ("frame-empty", build_frame(&[], "", 0, FrameMode::Pick)),
+        ("frame-no-match", build_frame(&c, "zzz", 0, FrameMode::Pick)),
+    ] {
+        let path = format!("{dir}/{name}-{mode}.ansi");
+        std::fs::write(&path, frame.to_ansi()).unwrap_or_else(|e| panic!("write {path}: {e}"));
+        eprintln!("wrote {path}");
+    }
 }
 
 fn write_frame(dir: &str, mode: &str, surface: &str, buffer: &ratatui::buffer::Buffer) {

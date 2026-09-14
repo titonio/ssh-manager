@@ -260,6 +260,40 @@ impl Theme {
         }
     }
 
+    /// The Clack palette: named ANSI colours and modifiers, **no fixed RGB**.
+    ///
+    /// This is the palette the transparent inline frame (#33) draws with, and it
+    /// is built differently from Nord on purpose. A transparent frame borrows the
+    /// user's terminal background, which it cannot measure — so a body-text hue
+    /// of its own is a liability: `White` on a white terminal is 1.35:1, the
+    /// exact defect Rule H was written for. Instead:
+    ///
+    /// * **Body text is `Reset`** — the terminal's own foreground, which is by
+    ///   construction readable on the terminal's own background.
+    /// * **Emphasis is a modifier, not a hue** — `BOLD`/`DIM` survive a light
+    ///   terminal, `NO_COLOR`, and colour-blindness alike.
+    /// * **Only state gets a hue**, and only from the two named colours Clack
+    ///   uses: `Cyan` for the active step, `Green` for a match.
+    ///
+    /// `bg`, `selection_bg` and `selection_fg` are `Reset` because the frame
+    /// never paints a background. Selection is carried by the `❯` glyph plus a
+    /// bold alias, not by a filled row.
+    pub const fn clack() -> Self {
+        Self {
+            bg: Color::Reset,
+            fg: Color::Reset,
+            fg_bright: Color::Reset,
+            fg_muted: Color::DarkGray,
+            accent: Color::Cyan,
+            border: Color::DarkGray,
+            highlight: Color::Green,
+            success: Color::Green,
+            warning: Color::Yellow,
+            selection_bg: Color::Reset,
+            selection_fg: Color::Reset,
+        }
+    }
+
     /// A theme that emits no color at all.
     ///
     /// Structure has to survive on glyphs and layout alone here — which is the
@@ -418,7 +452,7 @@ pub fn active() -> &'static Theme {
 /// or a reviewer with a real terminal — sees what the user sees.
 pub mod ansi {
     use ratatui::buffer::Buffer;
-    use ratatui::style::{Color, Modifier};
+    use ratatui::style::{Color, Modifier, Style};
 
     /// Named ANSI colors as their 0..=15 index, for SGR emission.
     fn ansi_index(color: Color) -> Option<u8> {
@@ -496,6 +530,28 @@ pub mod ansi {
         codes
     }
 
+    /// The full SGR escape sequence that puts the terminal into `style`.
+    ///
+    /// Shared by the buffer serializer below and by the inline frame's own
+    /// serializer, so there is exactly one place that turns a `Style` into
+    /// bytes. A second hand-rolled emitter would be a palette fork in escape
+    /// code form.
+    pub fn style_to_ansi(style: Style) -> String {
+        sgr_codes(style.add_modifier, style.fg, style.bg)
+    }
+
+    /// Assemble one SGR sequence from its parts.
+    ///
+    /// An unset colour becomes the terminal's default (`39`/`49`) rather than a
+    /// colour of our choosing — which is what keeps a transparent frame
+    /// transparent all the way down to the bytes it emits.
+    fn sgr_codes(modifier: Modifier, fg: Option<Color>, bg: Option<Color>) -> String {
+        let mut codes = modifier_codes(modifier);
+        codes.push(fg_code(fg.unwrap_or(Color::Reset)));
+        codes.push(bg_code(bg.unwrap_or(Color::Reset)));
+        format!("\x1b[{}m", codes.join(";"))
+    }
+
     /// Render a buffer as an ANSI string, one line per terminal row.
     ///
     /// Style is emitted only when it changes, so the output stays readable and
@@ -517,10 +573,7 @@ pub mod ansi {
                 if current != Some(style) {
                     // Reset first so removed attributes actually disappear.
                     out.push_str("\x1b[0m");
-                    let mut codes = modifier_codes(style.2);
-                    codes.push(fg_code(style.0));
-                    codes.push(bg_code(style.1));
-                    out.push_str(&format!("\x1b[{}m", codes.join(";")));
+                    out.push_str(&sgr_codes(style.2, Some(style.0), Some(style.1)));
                     current = Some(style);
                 }
                 out.push_str(cell.symbol());
