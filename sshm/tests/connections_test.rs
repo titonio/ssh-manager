@@ -9,7 +9,6 @@ use std::ffi::OsString;
 
 use sshm::config::Config;
 use sshm::connections::{self, ConnectionDraft};
-use sshm::update::UpdateResult;
 
 /// Point `HOME` at a throwaway directory so a test never touches the real
 /// `~/.ssh/connections.json`, and put it back on the way out.
@@ -100,12 +99,18 @@ fn editing_an_unknown_id_changes_no_connection() {
     let mut config = Config::new();
     let kept = connections::add(&mut config, &draft("web-01", "10.0.0.4", "deploy", "22")).unwrap();
 
-    let _ = connections::edit(
+    let edited = connections::edit(
         &mut config,
         "no-such-connection",
         &draft("ghost", "10.9.9.9", "x", "22"),
-    );
+    )
+    .expect("an unknown id is not a failure, there was just nothing to edit");
 
+    assert!(
+        edited.is_none(),
+        "an unknown id reports that no Connection was edited, so a surface cannot \
+         trace an edit that never happened"
+    );
     assert_eq!(
         config.connections.len(),
         1,
@@ -114,6 +119,28 @@ fn editing_an_unknown_id_changes_no_connection() {
     assert_eq!(
         config.connections[0].host, kept.host,
         "the Connection that was not targeted stays as it was"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn editing_an_unknown_id_writes_nothing() {
+    let home = TempHome::new();
+    let mut config = Config::new();
+    connections::add(&mut config, &draft("web-01", "10.0.0.4", "deploy", "22")).unwrap();
+    let stored = home.path().join(".ssh").join("connections.json");
+    std::fs::remove_file(&stored).expect("the add should have written the set");
+
+    connections::edit(
+        &mut config,
+        "no-such-connection",
+        &draft("ghost", "10.9.9.9", "x", "22"),
+    )
+    .expect("an unknown id is not a failure");
+
+    assert!(
+        !stored.exists(),
+        "nothing matched, so the set must not be written at all"
     );
 }
 
@@ -130,7 +157,8 @@ fn user_can_edit_a_connection_in_place() {
         &original.id,
         &draft("web-01", "10.0.0.99", "deploy", "2222"),
     )
-    .expect("editing a known Connection should succeed");
+    .expect("editing a known Connection should succeed")
+    .expect("the Connection was there to be edited");
 
     assert_eq!(
         config.connections.len(),
@@ -216,7 +244,7 @@ fn user_can_import_connections_from_the_ssh_config() {
 
     let imported = connections::import(&mut config).expect("import should succeed");
 
-    assert_eq!(imported, 2, "both Host entries came across");
+    assert_eq!(imported, 2, "both Connections came across");
     assert_eq!(config.connections.len(), 2);
     assert_eq!(config.connections[0].alias, "web-01");
     assert_eq!(config.connections[0].host, "10.0.0.4");
@@ -226,55 +254,4 @@ fn user_can_import_connections_from_the_ssh_config() {
         config.connections[1].port, 22,
         "a Host with no Port line lands on the SSH default"
     );
-}
-
-#[test]
-fn the_update_read_stays_quiet_inside_a_source_checkout() {
-    // `cargo test` always sets CARGO_MANIFEST_DIR. A frame must never reach the
-    // network for its update note from a checkout, so the read comes back empty.
-    assert!(
-        std::env::var_os("CARGO_MANIFEST_DIR").is_some(),
-        "this test only means something under cargo"
-    );
-
-    assert!(
-        matches!(
-            connections::read_update_note(),
-            connections::UpdateNote::None
-        ),
-        "a source checkout should produce no update note at all"
-    );
-}
-
-#[test]
-fn an_available_update_becomes_a_note_naming_both_versions() {
-    let note = connections::update_note_from(UpdateResult::UpdateAvailable {
-        version: "9.9.9".to_string(),
-    });
-
-    match note {
-        connections::UpdateNote::Available(info) => {
-            assert_eq!(info.new_version, "9.9.9");
-            assert_eq!(info.current_version, env!("CARGO_PKG_VERSION"));
-        }
-        other => panic!("expected an available-update note, got {other:?}"),
-    }
-}
-
-#[test]
-fn a_failed_update_check_becomes_a_note_carrying_the_reason() {
-    let note = connections::update_note_from(UpdateResult::Error("network down".to_string()));
-
-    match note {
-        connections::UpdateNote::Failed(reason) => assert_eq!(reason, "network down"),
-        other => panic!("expected a failed-update note, got {other:?}"),
-    }
-}
-
-#[test]
-fn no_update_means_no_note() {
-    assert!(matches!(
-        connections::update_note_from(UpdateResult::NoUpdate),
-        connections::UpdateNote::None
-    ));
 }

@@ -1,9 +1,9 @@
 //! The Connection manager.
 //!
-//! Every change to the Connection set lives here: add, edit, delete, the
-//! `~/.ssh/config` import, and the update-note read. Each operation mutates the
-//! set, persists it, and reports what came back, so a surface can render its own
-//! trace without re-implementing the rules.
+//! Every change to the Connection set lives here: add, edit, delete and the
+//! `~/.ssh/config` import. Each operation mutates the set, persists it when
+//! something actually changed, and reports what came back, so a surface can
+//! render its own trace without re-implementing the rules.
 //!
 //! This is business logic only. Nothing here knows how a Connection is drawn,
 //! filtered or selected — a caller passes the draft it collected and the id it
@@ -85,19 +85,24 @@ pub fn add(config: &mut Config, draft: &ConnectionDraft) -> Result<Connection, S
 ///
 /// The id is the caller's answer to "which Connection is selected" — this module
 /// deliberately knows nothing about lists, filters or cursors. An id that is not
-/// in the set changes nothing, which is how the store has always treated one.
+/// in the set is `Ok(None)`: nothing changed, so nothing is written, and a caller
+/// never reports an edit to a Connection that does not exist.
 pub fn edit(
     config: &mut Config,
     existing_id: &str,
     draft: &ConnectionDraft,
-) -> Result<Connection, String> {
+) -> Result<Option<Connection>, String> {
+    if !config.connections.iter().any(|c| c.id == existing_id) {
+        return Ok(None);
+    }
+
     let conn = Connection {
         id: existing_id.to_string(),
         ..connection_from(draft)
     };
     config.update_connection(conn.clone());
     config.save()?;
-    Ok(conn)
+    Ok(Some(conn))
 }
 
 /// Delete the Connection with `id`, persist the set, and return what was
@@ -115,52 +120,16 @@ pub fn remove(config: &mut Config, id: &str) -> Result<Option<Connection>, Strin
 }
 
 /// Import Connections from the user's `~/.ssh/config`, persist the set, and
-/// return how many Connections were added. Entries already in the set are left
-/// alone, so importing twice adds nothing the second time.
+/// return how many Connections were added. Connections already in the set are
+/// left alone, so importing twice adds nothing the second time — and when
+/// nothing is added, nothing is written.
+///
+/// A home directory that cannot be resolved is an `Err`, not a panic: a surface
+/// shows the string it is given, it has no crash to recover from.
 pub fn import(config: &mut Config) -> Result<usize, String> {
-    let imported = crate::config::import_from_ssh_config(config);
-    config.save()?;
+    let imported = crate::config::import_from_ssh_config(config)?;
+    if imported > 0 {
+        config.save()?;
+    }
     Ok(imported)
-}
-
-/// What an update check leaves a surface to show.
-///
-/// The check itself belongs to `update.rs`; this is only the shape both the
-/// fullscreen TUI and the inline frames want: a note carrying versions, nothing
-/// at all, or the reason the check failed.
-#[derive(Debug, Clone)]
-pub enum UpdateNote {
-    /// A newer release exists, with the versions to name in the note.
-    Available(crate::update::UpdateInfo),
-    /// Nothing to show.
-    None,
-    /// The check failed; the string is what the surface shows.
-    Failed(String),
-}
-
-/// Read the update note a frame shows above itself.
-///
-/// Inside a source checkout this returns `UpdateNote::None` without going near
-/// the network: running the tool from a checkout should not block a first paint
-/// on GitHub, nor nag about a version that is already local.
-pub fn read_update_note() -> UpdateNote {
-    if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
-        return UpdateNote::None;
-    }
-
-    update_note_from(crate::update::check_for_update())
-}
-
-/// Turn the outcome of an update check into the note a surface shows.
-pub fn update_note_from(result: crate::update::UpdateResult) -> UpdateNote {
-    match result {
-        crate::update::UpdateResult::UpdateAvailable { version } => {
-            UpdateNote::Available(crate::update::UpdateInfo {
-                current_version: env!("CARGO_PKG_VERSION").to_string(),
-                new_version: version,
-            })
-        }
-        crate::update::UpdateResult::NoUpdate => UpdateNote::None,
-        crate::update::UpdateResult::Error(message) => UpdateNote::Failed(message),
-    }
 }

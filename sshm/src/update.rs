@@ -210,6 +210,35 @@ pub fn force_check_for_update() -> UpdateResult {
     check_for_update_inner()
 }
 
+/// The update note a frame shows above itself.
+///
+/// `Ok(Some(info))` names both versions of a newer release, `Ok(None)` means
+/// there is nothing to show, and `Err` carries the reason the check failed —
+/// which each surface words in its own way.
+///
+/// Inside a source checkout this returns `Ok(None)` without going near the
+/// network: running the tool from a checkout should not block a first paint on
+/// GitHub, nor nag about a version that is already local.
+pub fn read_note() -> Result<Option<UpdateInfo>, String> {
+    if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
+        return Ok(None);
+    }
+
+    note_from(check_for_update())
+}
+
+/// Turn the outcome of an update check into the note a surface shows.
+pub fn note_from(result: UpdateResult) -> Result<Option<UpdateInfo>, String> {
+    match result {
+        UpdateResult::UpdateAvailable { version } => Ok(Some(UpdateInfo {
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            new_version: version,
+        })),
+        UpdateResult::NoUpdate => Ok(None),
+        UpdateResult::Error(message) => Err(message),
+    }
+}
+
 fn check_for_update_inner() -> UpdateResult {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
 
@@ -1753,5 +1782,56 @@ mod tests {
 
         assert!(cache_file.starts_with(&cache_dir));
         assert_eq!(cache_file.file_name().unwrap(), "update_cache.json");
+    }
+
+    // The update note a frame reads. These live with the note itself, not with
+    // the Connection set that has nothing to do with versions.
+
+    #[test]
+    #[serial]
+    fn the_update_read_stays_quiet_inside_a_source_checkout() {
+        // Sibling tests here clear CARGO_MANIFEST_DIR to pose as an installed
+        // binary and leave it cleared, so pin it back rather than trust what is
+        // ambient. A checkout must never reach the network for its update note.
+        let previous = std::env::var_os("CARGO_MANIFEST_DIR");
+        std::env::set_var("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"));
+
+        let note = read_note();
+
+        match previous {
+            Some(value) => std::env::set_var("CARGO_MANIFEST_DIR", value),
+            None => std::env::remove_var("CARGO_MANIFEST_DIR"),
+        }
+
+        assert!(
+            matches!(note, Ok(None)),
+            "a source checkout should produce no update note at all"
+        );
+    }
+
+    #[test]
+    fn an_available_update_becomes_a_note_naming_both_versions() {
+        match note_from(UpdateResult::UpdateAvailable {
+            version: "9.9.9".to_string(),
+        }) {
+            Ok(Some(info)) => {
+                assert_eq!(info.new_version, "9.9.9");
+                assert_eq!(info.current_version, env!("CARGO_PKG_VERSION"));
+            }
+            other => panic!("expected an available-update note, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_update_check_becomes_the_reason_it_failed() {
+        match note_from(UpdateResult::Error("network down".to_string())) {
+            Err(reason) => assert_eq!(reason, "network down"),
+            other => panic!("expected a failed-update note, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_update_means_no_note() {
+        assert!(matches!(note_from(UpdateResult::NoUpdate), Ok(None)));
     }
 }

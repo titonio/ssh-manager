@@ -151,10 +151,16 @@ pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
     entries
 }
 
-pub fn import_from_ssh_config(config: &mut Config) -> usize {
+/// Fold the `~/.ssh/config` Host stanzas into `config` and report how many
+/// Connections were added.
+///
+/// A home directory that cannot be resolved is an `Err`, not a panic, so a
+/// caller advertising a `Result` never panics on the way through.
+pub fn import_from_ssh_config(config: &mut Config) -> Result<usize, String> {
     let ssh_dir = dirs::home_dir()
-        .map(|h| h.join(".ssh").join("config"))
-        .expect("Could not find home directory");
+        .ok_or_else(|| "Could not find home directory".to_string())?
+        .join(".ssh")
+        .join("config");
 
     let entries = parse_ssh_config(ssh_dir.to_str().unwrap_or(""));
     let mut imported = 0;
@@ -176,7 +182,7 @@ pub fn import_from_ssh_config(config: &mut Config) -> usize {
         }
     }
 
-    imported
+    Ok(imported)
 }
 
 #[cfg(test)]

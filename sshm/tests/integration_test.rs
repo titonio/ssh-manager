@@ -1,8 +1,9 @@
 use insta::assert_snapshot;
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
-use sshm::app::{App, AppMode, InputBuffer};
+use sshm::app::{App, AppMode};
 use sshm::config::{Config, Connection};
+use sshm::connections::ConnectionDraft;
 
 fn create_test_app() -> App {
     let mut config = Config::new();
@@ -42,7 +43,7 @@ fn create_test_app() -> App {
         matcher: fuzzy_matcher::skim::SkimMatcherV2::default(),
         filtered_indices: vec![0, 1, 2],
         message: None,
-        input_buffer: InputBuffer::default(),
+        input_buffer: ConnectionDraft::default(),
         input_field: 0,
         should_connect: None,
         ctrl_c_count: 0,
@@ -153,7 +154,7 @@ fn test_edit_connection_popup() {
     let mut app = create_test_app();
     app.mode = AppMode::Edit;
     app.selected_index = 0;
-    app.input_buffer = InputBuffer::from_connection(app.config.connections.first().unwrap());
+    app.input_buffer = ConnectionDraft::from_connection(app.config.connections.first().unwrap());
 
     let backend = TestBackend::new(80, 24);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -175,7 +176,7 @@ fn test_empty_connections_message() {
         matcher: fuzzy_matcher::skim::SkimMatcherV2::default(),
         filtered_indices: vec![],
         message: None,
-        input_buffer: InputBuffer::default(),
+        input_buffer: ConnectionDraft::default(),
         input_field: 0,
         should_connect: None,
         ctrl_c_count: 0,
@@ -308,7 +309,7 @@ fn test_connection_with_custom_port() {
         matcher: fuzzy_matcher::skim::SkimMatcherV2::default(),
         filtered_indices: vec![0],
         message: None,
-        input_buffer: InputBuffer::default(),
+        input_buffer: ConnectionDraft::default(),
         input_field: 0,
         should_connect: None,
         ctrl_c_count: 0,
@@ -363,7 +364,7 @@ fn test_folder_grouping_display() {
         matcher: fuzzy_matcher::skim::SkimMatcherV2::default(),
         filtered_indices: vec![0, 1, 2],
         message: None,
-        input_buffer: InputBuffer::default(),
+        input_buffer: ConnectionDraft::default(),
         input_field: 0,
         should_connect: None,
         ctrl_c_count: 0,

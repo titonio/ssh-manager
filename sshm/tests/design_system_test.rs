@@ -26,8 +26,9 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::backend::TestBackend;
 use ratatui::style::{Color, Modifier};
 use ratatui::Terminal;
-use sshm::app::{App, AppMode, InputBuffer, MIN_TUI_HEIGHT, MIN_TUI_WIDTH};
+use sshm::app::{App, AppMode, MIN_TUI_HEIGHT, MIN_TUI_WIDTH};
 use sshm::config::Config;
+use sshm::connections::ConnectionDraft;
 use sshm::picker::{compute_matches, render_picker_frame};
 use sshm::theme::{contrast, nord, ColorSupport, Theme};
 
@@ -75,7 +76,7 @@ fn test_app(mode: AppMode) -> App {
         matcher: SkimMatcherV2::default(),
         filtered_indices: vec![],
         message: None,
-        input_buffer: InputBuffer::default(),
+        input_buffer: ConnectionDraft::default(),
         input_field: 0,
         should_connect: None,
         ctrl_c_count: 0,

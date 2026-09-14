@@ -1,6 +1,5 @@
 use crate::config::{Config, Connection};
-use crate::connections;
-pub use crate::connections::ConnectionDraft as InputBuffer;
+use crate::connections::{self, ConnectionDraft};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::{
@@ -56,7 +55,7 @@ pub struct App {
     pub matcher: SkimMatcherV2,
     pub filtered_indices: Vec<usize>,
     pub message: Option<String>,
-    pub input_buffer: InputBuffer,
+    pub input_buffer: ConnectionDraft,
     pub input_field: usize,
     pub should_connect: Option<Connection>,
     pub ctrl_c_count: usize,
@@ -133,7 +132,7 @@ impl Default for App {
             matcher: SkimMatcherV2::default(),
             filtered_indices,
             message: None,
-            input_buffer: InputBuffer::default(),
+            input_buffer: ConnectionDraft::default(),
             input_field: 0,
             should_connect: None,
             ctrl_c_count: 0,
@@ -314,7 +313,7 @@ impl App {
                 crossterm::event::KeyCode::Char('E') => {
                     if let Some(&idx) = self.filtered_indices.get(self.selected_index) {
                         if let Some(conn) = self.config.connections.get(idx) {
-                            self.input_buffer = InputBuffer::from_connection(conn);
+                            self.input_buffer = ConnectionDraft::from_connection(conn);
                             self.mode = AppMode::Edit;
                             self.input_field = 0;
                         }
@@ -548,24 +547,37 @@ impl App {
         }
     }
 
+    /// The id of the Connection under the cursor, if the cursor is on one.
+    ///
+    /// The cursor indexes the *filtered* list, so this is the one place that
+    /// knows how a selection maps back to the Connection set. A surface hands
+    /// that id to the Connection manager and never indexes the set itself.
+    fn selected_connection_id(&self) -> Option<String> {
+        self.filtered_indices
+            .get(self.selected_index)
+            .and_then(|&i| self.config.connections.get(i))
+            .map(|c| c.id.clone())
+    }
+
     fn save_connection(&mut self) {
-        let result = if self.mode == AppMode::Edit {
-            let editing = self
-                .filtered_indices
-                .get(self.selected_index)
-                .and_then(|&i| self.config.connections.get(i))
-                .map(|c| c.id.clone())
-                .unwrap_or_default();
-            connections::edit(&mut self.config, &editing, &self.input_buffer)
+        // Both branches come back in the same shape as the manager's delete:
+        // the Connection that changed, or `None` when there was nothing here
+        // to change. Only a real change gets the "saved" words.
+        let saved: Result<Option<Connection>, String> = if self.mode == AppMode::Edit {
+            match self.selected_connection_id() {
+                Some(id) => connections::edit(&mut self.config, &id, &self.input_buffer),
+                None => Ok(None),
+            }
         } else {
-            connections::add(&mut self.config, &self.input_buffer)
+            connections::add(&mut self.config, &self.input_buffer).map(Some)
         };
 
-        match result {
-            Ok(_) => {
+        match saved {
+            Ok(Some(_)) => {
                 self.update_filter();
                 self.message = Some("Connection saved!".to_string());
             }
+            Ok(None) => self.message = Some("No Connection selected to edit".to_string()),
             Err(e) => self.message = Some(format!("Error saving: {}", e)),
         }
 
@@ -573,13 +585,7 @@ impl App {
     }
 
     fn delete_connection(&mut self) {
-        let selected = self
-            .filtered_indices
-            .get(self.selected_index)
-            .and_then(|&i| self.config.connections.get(i))
-            .map(|c| c.id.clone());
-
-        if let Some(id) = selected {
+        if let Some(id) = self.selected_connection_id() {
             match connections::remove(&mut self.config, &id) {
                 Ok(Some(_)) => {
                     self.update_filter();
@@ -614,13 +620,13 @@ impl App {
     }
 
     fn check_for_update(&mut self) {
-        match connections::read_update_note() {
-            connections::UpdateNote::Available(info) => {
+        match crate::update::read_note() {
+            Ok(Some(info)) => {
                 self.update_info = Some(info);
                 self.mode = AppMode::Update;
             }
-            connections::UpdateNote::None => {}
-            connections::UpdateNote::Failed(e) => {
+            Ok(None) => {}
+            Err(e) => {
                 self.message = Some(format!("Update check failed: {}", e));
             }
         }
@@ -1193,7 +1199,7 @@ mod tests {
             matcher: SkimMatcherV2::default(),
             filtered_indices: vec![0, 1, 2],
             message: None,
-            input_buffer: InputBuffer::default(),
+            input_buffer: ConnectionDraft::default(),
             input_field: 0,
             should_connect: None,
             ctrl_c_count: 0,
@@ -1212,7 +1218,7 @@ mod tests {
 
     #[test]
     fn test_input_buffer_clear() {
-        let mut buf = InputBuffer {
+        let mut buf = ConnectionDraft {
             alias: "test".to_string(),
             host: "192.168.1.1".to_string(),
             user: "user".to_string(),
@@ -1243,7 +1249,7 @@ mod tests {
             folder: Some("production".to_string()),
         };
 
-        let buf = InputBuffer::from_connection(&conn);
+        let buf = ConnectionDraft::from_connection(&conn);
 
         assert_eq!(buf.alias, "my-server");
         assert_eq!(buf.host, "192.168.1.100");
@@ -1265,7 +1271,7 @@ mod tests {
             folder: None,
         };
 
-        let buf = InputBuffer::from_connection(&conn);
+        let buf = ConnectionDraft::from_connection(&conn);
 
         assert_eq!(buf.alias, "server");
         assert_eq!(buf.host, "192.168.1.1");
@@ -1453,7 +1459,7 @@ mod tests {
     #[test]
     fn test_add_connection() {
         let mut app = create_test_app();
-        app.input_buffer = InputBuffer {
+        app.input_buffer = ConnectionDraft {
             alias: "new-server".to_string(),
             host: "192.168.1.50".to_string(),
             user: "newuser".to_string(),
@@ -1664,7 +1670,7 @@ mod tests {
         let initial_count = app.config.connections.len();
 
         app.mode = AppMode::Add;
-        app.input_buffer = InputBuffer {
+        app.input_buffer = ConnectionDraft {
             alias: "new".to_string(),
             host: "newhost".to_string(),
             user: "newuser".to_string(),
@@ -1685,7 +1691,7 @@ mod tests {
 
         app.mode = AppMode::Edit;
         app.selected_index = 0;
-        app.input_buffer = InputBuffer {
+        app.input_buffer = ConnectionDraft {
             alias: "updated".to_string(),
             host: "newhost".to_string(),
             user: "newuser".to_string(),
@@ -1743,7 +1749,7 @@ mod tests {
 
     #[test]
     fn test_input_buffer_all_fields() {
-        let buf = InputBuffer {
+        let buf = ConnectionDraft {
             alias: "alias1".to_string(),
             host: "host1".to_string(),
             user: "user1".to_string(),
@@ -1792,7 +1798,7 @@ mod tests {
 
     #[test]
     fn test_input_buffer_clone() {
-        let buf1 = InputBuffer {
+        let buf1 = ConnectionDraft {
             alias: "test".to_string(),
             ..Default::default()
         };
@@ -1843,7 +1849,7 @@ mod tests {
         let mut app = create_test_app();
 
         app.mode = AppMode::Add;
-        app.input_buffer = InputBuffer {
+        app.input_buffer = ConnectionDraft {
             alias: "full".to_string(),
             host: "fullhost".to_string(),
             user: "fulluser".to_string(),
@@ -1868,7 +1874,7 @@ mod tests {
         let mut app = create_test_app();
 
         app.mode = AppMode::Add;
-        app.input_buffer = InputBuffer {
+        app.input_buffer = ConnectionDraft {
             alias: "test".to_string(),
             host: "testhost".to_string(),
             user: "testuser".to_string(),
@@ -2035,7 +2041,7 @@ mod tests {
 
     #[test]
     fn test_input_buffer_default() {
-        let buf = InputBuffer::default();
+        let buf = ConnectionDraft::default();
 
         assert!(buf.alias.is_empty());
         assert!(buf.host.is_empty());
@@ -2657,7 +2663,7 @@ mod tests {
         let initial_count = app.config.connections.len();
 
         app.mode = AppMode::Add;
-        app.input_buffer = InputBuffer {
+        app.input_buffer = ConnectionDraft {
             alias: "new-server".to_string(),
             host: "newhost".to_string(),
             user: "newuser".to_string(),
@@ -2720,7 +2726,7 @@ mod tests {
     #[test]
     fn test_input_buffer_clear_with_test_backend() {
         let mut app = create_test_app();
-        app.input_buffer = InputBuffer {
+        app.input_buffer = ConnectionDraft {
             alias: "test".to_string(),
             host: "192.168.1.1".to_string(),
             user: "user".to_string(),
@@ -2916,7 +2922,7 @@ mod tests {
 
     #[test]
     fn test_input_buffer_fields_are_string() {
-        let buf = InputBuffer {
+        let buf = ConnectionDraft {
             alias: String::new(),
             host: String::new(),
             user: String::new(),
@@ -3071,15 +3077,55 @@ mod tests {
             .unwrap();
     }
 
+    /// Point `HOME` at a throwaway directory so a test never touches the real
+    /// `~/.ssh/connections.json` or reads the developer's real `~/.ssh/config`,
+    /// and put it back on the way out. Same guard the Connection-manager seam
+    /// tests use; these pins call straight through to those writes.
+    struct TempHome {
+        dir: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TempHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp home");
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", dir.path());
+            Self { dir, previous }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            self.dir.path()
+        }
+
+        /// Lay down a `~/.ssh/config` inside the throwaway home.
+        fn write_ssh_config(&self, content: &str) {
+            let ssh_dir = self.path().join(".ssh");
+            std::fs::create_dir_all(&ssh_dir).expect("create .ssh");
+            std::fs::write(ssh_dir.join("config"), content).expect("write ~/.ssh/config");
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
     // Characterization pins: what a Connection-manager result turns into on this
     // surface. Written against the pre-extraction code so the move cannot quietly
     // change the words a user reads.
 
     #[test]
+    #[serial_test::serial]
     fn saving_a_connection_says_so_and_returns_to_normal_mode() {
+        let _home = TempHome::new();
         let mut app = create_test_app();
         app.mode = AppMode::Add;
-        app.input_buffer = InputBuffer {
+        app.input_buffer = ConnectionDraft {
             alias: "pin-server".to_string(),
             host: "10.0.0.7".to_string(),
             user: "deploy".to_string(),
@@ -3095,7 +3141,35 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn saving_an_edit_with_nothing_selected_says_so_instead_of_claiming_a_save() {
+        let _home = TempHome::new();
+        let mut app = create_test_app();
+        app.mode = AppMode::Edit;
+        app.filtered_indices = Vec::new();
+        app.input_buffer = ConnectionDraft {
+            alias: "ghost".to_string(),
+            host: "10.9.9.9".to_string(),
+            user: "x".to_string(),
+            port: "22".to_string(),
+            key_path: String::new(),
+            folder: String::new(),
+        };
+
+        app.save_connection();
+
+        assert_eq!(
+            app.message,
+            Some("No Connection selected to edit".to_string())
+        );
+        assert_eq!(app.config.connections.len(), 3, "nothing was added");
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn deleting_a_connection_says_so() {
+        let _home = TempHome::new();
         let mut app = create_test_app();
         app.selected_index = 0;
 
@@ -3105,15 +3179,17 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn importing_says_how_many_connections_came_across() {
+        let home = TempHome::new();
+        home.write_ssh_config(
+            "Host web-01\n  HostName 10.0.0.4\n  User deploy\n\
+             \nHost db-01\n  HostName 10.0.0.9\n  User dba\n",
+        );
         let mut app = create_test_app();
 
         app.import_connections();
 
-        let message = app.message.expect("an import always reports a count");
-        assert!(
-            message.starts_with("Imported ") && message.ends_with(" connections"),
-            "unexpected import message: {message}"
-        );
+        assert_eq!(app.message, Some("Imported 2 connections".to_string()));
     }
 }
