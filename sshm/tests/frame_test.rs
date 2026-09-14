@@ -8,16 +8,27 @@
 //! `◆ Delete [prod] web-01? (y/N)` both name these Connections, so the
 //! expectations below come from the spec rather than from the code under test.
 
-use ratatui::style::Modifier;
+use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 use sshm::config::Connection;
-use sshm::frame::{build_frame, FrameMode, FrameState};
-use sshm::theme::Theme;
+use sshm::frame::{build_frame, Canvas, FrameMode, FrameState};
+use sshm::theme::{ColorSupport, Theme};
 
 /// The palette the frame draws with. Tests name the *role*, never the hue; the
 /// hue itself is pinned by the palette tests in `design_system_test.rs`.
 fn t() -> Theme {
     Theme::clack()
+}
+
+/// A truecolour canvas `width` columns wide.
+fn canvas(width: usize) -> Canvas {
+    Canvas::new(width, ColorSupport::Truecolor)
+}
+
+/// Wide enough that nothing is fitted away, for tests about content rather than
+/// about width.
+fn wide() -> Canvas {
+    canvas(120)
 }
 
 /// The Connections every test filters over.
@@ -49,9 +60,14 @@ fn line_text(line: &Line<'static>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-/// Flatten the whole frame to plain text, one entry per line.
+/// Flatten the whole frame to plain text, one string per line.
 fn frame_text(frame: &sshm::frame::Frame) -> Vec<String> {
     frame.lines().iter().map(line_text).collect()
+}
+
+/// Display width of a rendered line, in terminal columns.
+fn line_width(line: &Line<'static>) -> usize {
+    line.spans.iter().map(|s| s.content.chars().count()).sum()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -62,7 +78,7 @@ fn frame_text(frame: &sshm::frame::Frame) -> Vec<String> {
 /// role — the grammar is `◆ <question>`, not a bordered title bar.
 #[test]
 fn pick_frame_opens_with_the_clack_step_icon() {
-    let frame = build_frame(&conns(), "", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "", 0, FrameMode::Pick, canvas(80));
     let header = &frame.lines()[0];
 
     assert_eq!(line_text(header), "◆ Select a Connection");
@@ -81,7 +97,7 @@ fn pick_frame_opens_with_the_clack_step_icon() {
 /// folder prefix is there only when the Connection has one (user stories 7 and 8).
 #[test]
 fn rows_render_the_folder_alias_and_host_shape_behind_the_rail() {
-    let frame = build_frame(&conns(), "", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "", 0, FrameMode::Pick, canvas(80));
 
     assert_eq!(
         line_text(&frame.lines()[1]),
@@ -98,7 +114,7 @@ fn rows_render_the_folder_alias_and_host_shape_behind_the_rail() {
 /// is bold.
 #[test]
 fn folder_and_host_meta_recede_while_the_alias_is_bold() {
-    let frame = build_frame(&conns(), "", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "", 0, FrameMode::Pick, canvas(80));
     let spans = &frame.lines()[1].spans;
 
     assert_eq!(
@@ -118,6 +134,65 @@ fn folder_and_host_meta_recede_while_the_alias_is_bold() {
             .contains(Modifier::BOLD),
         "the alias must be bold so the row's subject is unmistakable"
     );
+}
+
+/// "Dim meta" has to mean the `DIM` attribute, not merely a dark colour.
+///
+/// The ticket asks for dim meta and the hint rail already spells dim as
+/// `Modifier::DIM`. A muted-but-not-dim span emits `90;49` with no `2`, and on
+/// a terminal whose bright-black is bright it does not recede at all — so the
+/// same word was being rendered two ways in one frame.
+#[test]
+fn the_row_meta_is_actually_dim_not_just_muted() {
+    let frame = build_frame(&conns(), "", 0, FrameMode::Pick, canvas(80));
+    let spans = &frame.lines()[1].spans;
+
+    for text in ["[prod]", "(deploy@10.0.0.4:22)"] {
+        let span = span_with(spans, text);
+        assert!(
+            span.style.add_modifier.contains(Modifier::DIM),
+            "meta {text:?} is muted but not DIM — it will not recede on a terminal \
+             with a bright bright-black: {:?}",
+            span.style
+        );
+    }
+}
+
+/// The rail, the state copy and the hint rail all put their content in the same
+/// column.
+///
+/// Rows spend four columns before their text (`│ ` + cursor + ` `). When the
+/// state and hint lines spent only two, the copy sat two columns left of the
+/// rows it belonged to and the frame read as two misaligned blocks.
+#[test]
+fn every_rail_line_puts_its_content_in_the_same_column() {
+    let cases = [
+        (conns(), "", FrameMode::Pick),
+        (conns(), "web", FrameMode::Manage),
+        (vec![], "", FrameMode::Pick),
+        (conns(), "zzz", FrameMode::Manage),
+    ];
+
+    for (connections, query, mode) in cases {
+        let frame = build_frame(&connections, query, 0, mode, canvas(80));
+        for line in frame.lines() {
+            let text = line_text(line);
+            if !text.starts_with('│') {
+                continue;
+            }
+            // Display columns, not bytes: `│` is three bytes wide.
+            let column = 1 + text
+                .chars()
+                .skip(1)
+                .take_while(|c| *c == ' ' || *c == '❯')
+                .count();
+            assert_eq!(
+                column, 4,
+                "{mode:?} query={query:?}: rail content starts at column {column}, \
+                 not 4 — the gutters are misaligned: {text:?}"
+            );
+        }
+    }
 }
 
 /// Look up the span carrying exactly `text`.
@@ -140,7 +215,7 @@ fn span_with<'a>(
 /// Typing narrows the frame to the Connections that match (user story 5).
 #[test]
 fn the_frame_shows_only_the_connections_matching_the_query() {
-    let frame = build_frame(&conns(), "db", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "db", 0, FrameMode::Pick, canvas(80));
     let rows = data_rows(&frame);
 
     assert_eq!(rows.len(), 1, "only db-01 matches \"db\": {rows:?}");
@@ -161,8 +236,8 @@ fn data_rows(frame: &sshm::frame::Frame) -> Vec<String> {
 /// selection does — so selection is legible with the colour turned off.
 #[test]
 fn the_cursor_moves_with_the_selection() {
-    let first = build_frame(&conns(), "", 0, FrameMode::Pick);
-    let second = build_frame(&conns(), "", 1, FrameMode::Pick);
+    let first = build_frame(&conns(), "", 0, FrameMode::Pick, canvas(80));
+    let second = build_frame(&conns(), "", 1, FrameMode::Pick, canvas(80));
 
     assert_eq!(cursor_row(&first), Some(0));
     assert_eq!(cursor_row(&second), Some(1));
@@ -186,7 +261,7 @@ fn cursor_row(frame: &sshm::frame::Frame) -> Option<usize> {
 /// contents, not on colour: the test says which characters got the attribute.
 #[test]
 fn a_match_in_the_alias_highlights_exactly_the_matched_characters() {
-    let frame = build_frame(&conns(), "web", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "web", 0, FrameMode::Pick, canvas(80));
 
     assert_eq!(
         highlighted_text(&frame),
@@ -205,7 +280,7 @@ fn a_match_in_the_alias_highlights_exactly_the_matched_characters() {
 /// replacing it — the brackets stay, the matched name lights up.
 #[test]
 fn a_match_in_the_folder_highlights_the_name_inside_the_brackets() {
-    let frame = build_frame(&conns(), "prod", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "prod", 0, FrameMode::Pick, canvas(80));
 
     assert_eq!(
         highlighted_text(&frame),
@@ -244,12 +319,12 @@ fn highlighted_text(frame: &sshm::frame::Frame) -> Vec<String> {
 /// escape hatch → Enter → movement → management (user stories 23 and 47-50).
 #[test]
 fn manage_frame_hints_lead_with_the_escape_hatch_and_end_with_the_chords() {
-    let frame = build_frame(&conns(), "", 0, FrameMode::Manage);
+    let frame = build_frame(&conns(), "", 0, FrameMode::Manage, wide());
 
     assert_eq!(line_text(&frame.lines()[0]), "◆ Manage Connections");
     assert_eq!(
         hint_rail(&frame),
-        "│ Esc cancel · Enter edit · ↑↓ navigate · Ctrl+A add · Ctrl+E edit · Ctrl+X delete"
+        "│   Esc cancel · Enter edit · ↑↓ navigate · Ctrl+A add · Ctrl+E edit · Ctrl+X delete"
     );
 }
 
@@ -258,18 +333,18 @@ fn manage_frame_hints_lead_with_the_escape_hatch_and_end_with_the_chords() {
 /// edit` is a dim line in the picker's hint rail").
 #[test]
 fn pick_frame_hints_lead_with_the_escape_hatch_and_point_at_manage() {
-    let frame = build_frame(&conns(), "", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "", 0, FrameMode::Pick, wide());
 
     assert_eq!(
         hint_rail(&frame),
-        "│ Esc cancel · Enter select · ↑↓ navigate · sshm manage to add or edit"
+        "│   Esc cancel · Enter select · ↑↓ navigate · sshm manage to add or edit"
     );
 }
 
 /// The hint rail is a dim line: it must never out-shout the rows above it.
 #[test]
 fn the_hint_rail_is_dim() {
-    let frame = build_frame(&conns(), "", 0, FrameMode::Manage);
+    let frame = build_frame(&conns(), "", 0, FrameMode::Manage, wide());
     let rail = hint_spans(&frame);
 
     assert!(
@@ -283,29 +358,257 @@ fn the_hint_rail_is_dim() {
     );
 }
 
-/// The hint rail's text, or a panic if the frame has none.
-fn hint_rail(frame: &sshm::frame::Frame) -> String {
-    line_text(
+/// The full Manage rail is 84 columns and cannot fit an 80-column terminal.
+///
+/// Before the rail was fitted it was emitted whole and the terminal clipped the
+/// tail mid-word, so `Ctrl+X delete` arrived as `Ctrl+X dele`. Fitted, the
+/// least-needed segment goes and every surviving segment arrives intact.
+#[test]
+fn the_hint_rail_never_overflows_the_canvas() {
+    for width in [40usize, 60, 80, 100, 120] {
+        for mode in [FrameMode::Pick, FrameMode::Manage] {
+            let frame = build_frame(&conns(), "", 0, mode, canvas(width));
+            let rail = frame
+                .lines()
+                .iter()
+                .find(|l| line_text(l).contains("Esc cancel"))
+                .expect("frame has a hint rail");
+            assert!(
+                line_width(rail) <= width,
+                "{mode:?} at {width} columns: hint rail is {} wide and would be clipped: {:?}",
+                line_width(rail),
+                line_text(rail)
+            );
+        }
+    }
+}
+
+/// A narrow terminal keeps the escape hatch and loses the tail — on a segment
+/// boundary, never mid-word.
+#[test]
+fn a_narrow_canvas_keeps_the_escape_hatch_and_drops_the_tail_whole() {
+    let frame = build_frame(&conns(), "", 0, FrameMode::Manage, canvas(60));
+    let rail = line_text(
         frame
             .lines()
             .iter()
             .find(|l| line_text(l).contains("Esc cancel"))
             .expect("frame has a hint rail"),
-    )
+    );
+
+    assert!(
+        rail.starts_with("│   Esc cancel"),
+        "the escape hatch must survive a narrow terminal, got {rail:?}"
+    );
+    assert!(
+        rail.contains("Enter edit"),
+        "Enter is the primary action and must survive: {rail:?}"
+    );
+    assert!(
+        !rail.contains("Ctrl+X delete"),
+        "the least-needed segment should have been dropped at 60 columns: {rail:?}"
+    );
+    assert!(
+        !rail.ends_with('·') && !rail.ends_with(' ') && !rail.ends_with("dele"),
+        "the rail must end on a segment boundary, not mid-word or with a dangling \
+         separator: {rail:?}"
+    );
 }
 
-fn hint_spans(frame: &sshm::frame::Frame) -> Vec<&ratatui::text::Span<'static>> {
+/// The `sshm manage to add or edit` pointer is the first thing a narrow pick
+/// frame gives up — the user's own movement and cancel matter more than the
+/// discovery line (#39 owns the ordering rule; this pins that the frame
+/// already honours it).
+#[test]
+fn a_narrow_pick_canvas_drops_the_manage_discovery_line_first() {
+    let roomy = build_frame(&conns(), "", 0, FrameMode::Pick, wide());
+    let roomy = hint_rail(&roomy);
+    assert!(
+        roomy.contains("sshm manage to add or edit"),
+        "the discovery line is shown when there is room: {roomy:?}"
+    );
+
+    let tight = build_frame(&conns(), "", 0, FrameMode::Pick, canvas(60));
+    let tight = hint_rail(&tight);
+    assert!(
+        !tight.contains("sshm manage to add or edit"),
+        "the discovery line must be the first thing dropped: {tight:?}"
+    );
+    assert!(
+        tight.contains("Esc cancel") && tight.contains("↑↓ navigate"),
+        "cancel and movement out-rank discovery and must survive: {tight:?}"
+    );
+}
+
+/// The hint rail's text, or a panic if the frame has none.
+fn hint_rail(frame: &sshm::frame::Frame) -> String {
+    line_text(find_rail(frame))
+}
+
+fn find_rail(frame: &sshm::frame::Frame) -> &ratatui::text::Line<'static> {
     frame
         .lines()
         .iter()
         .find(|l| line_text(l).contains("Esc cancel"))
         .expect("frame has a hint rail")
-        .spans
-        .iter()
-        .skip(1) // the │ rail glyph itself is structural, not a hint
-        .collect()
 }
 
+fn hint_spans(frame: &sshm::frame::Frame) -> Vec<&ratatui::text::Span<'static>> {
+    find_rail(frame).spans.iter().skip(1).collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Colour degradation through the seam
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The seam resolves the palette against the canvas, so `NO_COLOR` reaches the
+/// bytes.
+///
+/// This is the shape #34 depends on: the colour decision is an *input*, so
+/// honouring `NO_COLOR` is a matter of passing a different `Canvas` rather
+/// than changing `build_frame`'s signature.
+#[test]
+fn a_monochrome_canvas_emits_no_colour_at_all() {
+    let mono = Canvas::new(80, ColorSupport::Monochrome);
+
+    for (connections, query, mode) in [
+        (conns(), "", FrameMode::Pick),
+        (conns(), "web", FrameMode::Manage),
+        (vec![], "", FrameMode::Pick),
+        (conns(), "zzz", FrameMode::Manage),
+    ] {
+        let ansi = build_frame(&connections, query, 0, mode, mono).to_ansi();
+        let colours: Vec<String> = sgr_params(&ansi)
+            .into_iter()
+            .filter(|p| !matches!(p.as_str(), "0" | "1" | "2" | "39" | "49"))
+            .collect();
+        assert!(
+            colours.is_empty(),
+            "{mode:?} query={query:?} under Monochrome emitted colour parameters \
+             {colours:?} — the whole palette must downgrade (user story 9)"
+        );
+    }
+}
+
+/// Degradation is not deletion: the monochrome frame still says everything the
+/// colour frame says.
+#[test]
+fn the_monochrome_frame_keeps_every_glyph_and_modifier_that_carries_state() {
+    let mono = build_frame(
+        &conns(),
+        "web",
+        0,
+        FrameMode::Pick,
+        Canvas::new(80, ColorSupport::Monochrome),
+    )
+    .to_ansi();
+
+    assert!(mono.contains('◆'), "the step icon vanished under NO_COLOR");
+    assert!(mono.contains('│'), "the rail vanished under NO_COLOR");
+    assert!(mono.contains('❯'), "the cursor vanished under NO_COLOR");
+    assert!(mono.contains('└'), "the corner vanished under NO_COLOR");
+    assert!(mono.contains("Esc cancel"), "the escape hatch vanished");
+    assert!(
+        mono.contains("\x1b[1;"),
+        "bold (the alias, the cursor) vanished under NO_COLOR: {mono:?}"
+    );
+    assert!(
+        mono.contains("\x1b[2;") || mono.contains(";2;"),
+        "DIM (the meta, the hint rail) vanished under NO_COLOR: {mono:?}"
+    );
+}
+
+/// `NO_COLOR` and `TERM=dumb` both mean "suppress colour", and both are the
+/// canvas the frame is handed.
+///
+/// Asserted against the pure env mapping rather than the live environment:
+/// mutating a process-global that every other test in this binary reads would
+/// make the suite flaky, and the rule needs to be provable, not hopeful.
+#[test]
+fn no_color_and_dumb_terminals_both_resolve_to_monochrome() {
+    use std::ffi::OsStr;
+
+    assert_eq!(
+        ColorSupport::from_env_vars(Some(OsStr::new("1")), "xterm-256color", "truecolor"),
+        ColorSupport::Monochrome,
+        "NO_COLOR set must win over every other capability signal"
+    );
+    assert_eq!(
+        ColorSupport::from_env_vars(None, "dumb", "truecolor"),
+        ColorSupport::Monochrome,
+        "TERM=dumb must suppress colour even if COLORTERM claims truecolour"
+    );
+    assert_eq!(
+        ColorSupport::from_env_vars(Some(OsStr::new("")), "xterm-256color", "truecolor"),
+        ColorSupport::Truecolor,
+        "an empty NO_COLOR is not a request to suppress colour (no-color.org)"
+    );
+    assert_eq!(
+        ColorSupport::from_env_vars(None, "xterm-256color", ""),
+        ColorSupport::Ansi256
+    );
+    assert_eq!(
+        ColorSupport::from_env_vars(None, "xterm", ""),
+        ColorSupport::Ansi16
+    );
+}
+
+/// The Clack palette survives the 16-colour downgrade without collapsing the
+/// roles that carry state.
+///
+/// `fg_muted` and `border` are the same colour in Clack by design — the rail
+/// and the meta are meant to recede together — but the accent that marks the
+/// cursor and the green that marks a hit must stay distinct from each other and
+/// from the rail, or selection and matching become invisible.
+#[test]
+fn clack_degrades_to_16_colours_without_losing_the_state_carrying_roles() {
+    let resolved = Theme::clack().resolve(ColorSupport::Ansi16);
+
+    assert_eq!(resolved.accent, Color::Cyan, "accent drifted off cyan");
+    assert_eq!(
+        resolved.highlight,
+        Color::Green,
+        "highlight drifted off green"
+    );
+    assert_ne!(
+        resolved.accent, resolved.highlight,
+        "the cursor marker and the match marker collapsed onto one colour"
+    );
+    assert_ne!(
+        resolved.accent, resolved.border,
+        "the cursor collapsed onto the rail — selection is invisible"
+    );
+    assert_ne!(
+        resolved.highlight, resolved.border,
+        "the match highlight collapsed onto the rail"
+    );
+}
+
+/// Every colour mode the canvas can name produces a frame that still renders.
+#[test]
+fn every_canvas_colour_mode_still_renders_the_grammar() {
+    for support in [
+        ColorSupport::Truecolor,
+        ColorSupport::Ansi256,
+        ColorSupport::Ansi16,
+        ColorSupport::Monochrome,
+    ] {
+        let ansi = build_frame(
+            &conns(),
+            "web",
+            0,
+            FrameMode::Manage,
+            Canvas::new(80, support),
+        )
+        .to_ansi();
+        for glyph in ['◆', '│', '❯', '└'] {
+            assert!(
+                ansi.contains(glyph),
+                "{support:?}: glyph {glyph:?} missing from the rendered frame"
+            );
+        }
+    }
+}
 // ─────────────────────────────────────────────────────────────────────────────
 // The empty state
 // ─────────────────────────────────────────────────────────────────────────────
@@ -314,12 +617,12 @@ fn hint_spans(frame: &sshm::frame::Frame) -> Vec<&ratatui::text::Span<'static>> 
 /// and gives the user a call to action instead of a blank box (user story 29).
 #[test]
 fn an_empty_connection_set_renders_a_call_to_action_behind_the_rail() {
-    let frame = build_frame(&[], "", 0, FrameMode::Pick);
+    let frame = build_frame(&[], "", 0, FrameMode::Pick, canvas(80));
 
     assert_eq!(frame.state(), FrameState::Empty);
     assert_eq!(
         line_text(&frame.lines()[1]),
-        "│ No Connections yet — run sshm manage to add one"
+        "│   No Connections yet — run sshm manage to add one"
     );
     assert_eq!(
         frame.lines().len(),
@@ -333,12 +636,12 @@ fn an_empty_connection_set_renders_a_call_to_action_behind_the_rail() {
 /// frame, a pick user does not.
 #[test]
 fn the_manage_empty_state_points_at_the_add_chord() {
-    let frame = build_frame(&[], "", 0, FrameMode::Manage);
+    let frame = build_frame(&[], "", 0, FrameMode::Manage, canvas(80));
 
     assert_eq!(frame.state(), FrameState::Empty);
     assert_eq!(
         line_text(&frame.lines()[1]),
-        "│ No Connections yet — Ctrl+A to add one"
+        "│   No Connections yet — Ctrl+A to add one"
     );
 }
 
@@ -346,7 +649,7 @@ fn the_manage_empty_state_points_at_the_add_chord() {
 /// the words that carry the state, not a colour.
 #[test]
 fn the_empty_message_is_muted() {
-    let frame = build_frame(&[], "", 0, FrameMode::Pick);
+    let frame = build_frame(&[], "", 0, FrameMode::Pick, canvas(80));
     let message = &frame.lines()[1].spans[1];
 
     assert_eq!(message.style.fg, Some(t().fg_muted));
@@ -360,10 +663,10 @@ fn the_empty_message_is_muted() {
 /// see what they typed, and keeps the rail and the escape hatch.
 #[test]
 fn a_query_matching_nothing_names_the_query_it_could_not_match() {
-    let frame = build_frame(&conns(), "zzz", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "zzz", 0, FrameMode::Pick, canvas(80));
 
     assert_eq!(frame.state(), FrameState::NoMatch);
-    assert_eq!(line_text(&frame.lines()[1]), "│ No matches for \"zzz\"");
+    assert_eq!(line_text(&frame.lines()[1]), "│   No matches for \"zzz\"");
     assert_eq!(
         frame.lines().len(),
         4,
@@ -376,7 +679,7 @@ fn a_query_matching_nothing_names_the_query_it_could_not_match() {
 /// would promise a selectable row that does not exist.
 #[test]
 fn the_no_match_state_shows_no_cursor() {
-    let frame = build_frame(&conns(), "zzz", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "zzz", 0, FrameMode::Pick, canvas(80));
 
     assert!(
         !frame_text(&frame).iter().any(|l| l.contains('❯')),
@@ -402,7 +705,7 @@ fn every_frame_has_the_same_skeleton() {
     ];
 
     for (connections, query, mode) in cases {
-        let frame = build_frame(&connections, query, 0, mode);
+        let frame = build_frame(&connections, query, 0, mode, canvas(80));
         let lines = frame_text(&frame);
         let label = format!("{mode:?} query={query:?}");
 
@@ -423,7 +726,7 @@ fn every_frame_has_the_same_skeleton() {
 /// content or as state.
 #[test]
 fn the_corner_is_chrome() {
-    let frame = build_frame(&conns(), "", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "", 0, FrameMode::Pick, canvas(80));
     let corner = frame.lines().last().expect("frame has a corner");
 
     assert_eq!(corner.spans.len(), 1);
@@ -451,7 +754,7 @@ fn no_span_in_any_frame_sets_a_background() {
     ];
 
     for (connections, query, mode) in cases {
-        let frame = build_frame(&connections, query, 0, mode);
+        let frame = build_frame(&connections, query, 0, mode, canvas(80));
         for line in frame.lines() {
             for span in &line.spans {
                 assert_eq!(
@@ -469,7 +772,7 @@ fn no_span_in_any_frame_sets_a_background() {
 /// terminal for a background colour.
 #[test]
 fn the_serialized_frame_asks_for_no_background_colour() {
-    let ansi = build_frame(&conns(), "web", 0, FrameMode::Pick).to_ansi();
+    let ansi = build_frame(&conns(), "web", 0, FrameMode::Pick, canvas(80)).to_ansi();
 
     for param in sgr_params(&ansi) {
         let paints_background = ("40"..="47").contains(&param.as_str()) || param.starts_with("48;");
@@ -489,7 +792,7 @@ fn the_serialized_frame_asks_for_no_background_colour() {
 /// is supposed to draw with.
 #[test]
 fn a_frame_serializes_to_ansi_carrying_its_palette() {
-    let ansi = build_frame(&conns(), "web", 0, FrameMode::Pick).to_ansi();
+    let ansi = build_frame(&conns(), "web", 0, FrameMode::Pick, canvas(80)).to_ansi();
     let params: Vec<String> = sgr_params(&ansi);
 
     assert!(
@@ -556,7 +859,7 @@ fn sgr_params(ansi: &str) -> Vec<String> {
 /// through the frame rather than by re-running the filter and hoping to agree.
 #[test]
 fn the_frame_reports_which_connections_it_is_showing() {
-    let frame = build_frame(&conns(), "db", 0, FrameMode::Pick);
+    let frame = build_frame(&conns(), "db", 0, FrameMode::Pick, canvas(80));
 
     assert_eq!(frame.matched(), &[1], "db-01 is connections[1]");
     assert_eq!(frame.selection(), 0);
@@ -567,7 +870,7 @@ fn the_frame_reports_which_connections_it_is_showing() {
 /// nothing — the frame always has a target while it has rows.
 #[test]
 fn the_selection_is_clamped_to_the_rows_that_exist() {
-    let frame = build_frame(&conns(), "db", 7, FrameMode::Pick);
+    let frame = build_frame(&conns(), "db", 7, FrameMode::Pick, canvas(80));
 
     assert_eq!(
         frame.selection(),
@@ -582,11 +885,11 @@ fn the_selection_is_clamped_to_the_rows_that_exist() {
 #[test]
 fn a_frame_with_no_rows_selects_nothing() {
     assert_eq!(
-        build_frame(&[], "", 0, FrameMode::Pick).selected_connection_index(),
+        build_frame(&[], "", 0, FrameMode::Pick, canvas(80)).selected_connection_index(),
         None
     );
     assert_eq!(
-        build_frame(&conns(), "zzz", 0, FrameMode::Manage).selected_connection_index(),
+        build_frame(&conns(), "zzz", 0, FrameMode::Manage, canvas(80)).selected_connection_index(),
         None
     );
 }
@@ -612,7 +915,7 @@ fn the_frame_uses_only_the_allowed_modifiers() {
     ];
 
     for (connections, query, mode) in cases {
-        let frame = build_frame(&connections, query, 0, mode);
+        let frame = build_frame(&connections, query, 0, mode, canvas(80));
         for line in frame.lines() {
             for span in &line.spans {
                 let extra = span.style.add_modifier.difference(allowed);

@@ -1,36 +1,96 @@
 //! The inline frame's pure view-model (#33).
 //!
-//! `build_frame` turns `(connections, query, selection, mode)` into a `Frame`:
-//! a concrete list of styled lines carrying the Clack grammar — a `◆` step
-//! icon, a `│` left rail, a `❯` cursor, rows as `[folder] alias
+//! `build_frame` turns `(connections, query, selection, mode, canvas)` into a
+//! `Frame`: a concrete list of styled lines carrying the Clack grammar — a
+//! `◆` step icon, a `│` left rail, a `❯` cursor, rows as `[folder] alias
 //! (user@host:port)`, and the empty / no-match / hint-rail states.
 //!
-//! It is a value, not a terminal session. Nothing here opens a terminal, reads
-//! the environment, or touches ratatui's render loop, which is what makes the
-//! whole inline surface testable by asserting on spans, and demoable by
-//! serializing a frame to ANSI and `cat`-ing it. The inline renderer (#34) and
-//! the command cut-over (#35) are consumers of this value; neither is built
-//! here.
+//! It is a value, not a terminal session. Nothing in the frame itself opens a
+//! terminal or touches ratatui's render loop, which is what makes the whole
+//! inline surface testable by asserting on spans, and demoable by serializing a
+//! frame to ANSI and `cat`-ing it. The inline renderer (#34) and the command
+//! cut-over (#35) are consumers of this value; neither is built here.
 //!
-//! Two rules bind every span produced here:
+//! The frame cannot see the terminal it is being drawn into, so the terminal is
+//! an argument. [`Canvas`] carries the two facts about it that change what the
+//! frame emits: how wide the hint rail has to fit inside, and how much colour
+//! the palette has to degrade to. Both are inputs rather than constants baked
+//! into `build_frame` because a seam that hardcodes them cannot honour
+//! `NO_COLOR` or a 60-column terminal later without breaking its own signature
+//! — and #34 has to do exactly that.
 //!
-//! 1. **Colour comes from a `theme.rs` role, never a literal.** The frame draws
-//!    with [`Theme::clack`], the named-ANSI palette.
+//! Three rules bind every span produced here:
+//!
+//! 1. **Colour comes from a `theme.rs` role, never a literal.** The frame
+//!    draws with [`Theme::clack`], downgraded through
+//!    [`Theme::resolve`](crate::theme::Theme::resolve) by the canvas's
+//!    [`ColorSupport`].
 //! 2. **The frame is transparent.** It borrows the terminal background and never
 //!    paints one — no span here sets a background. Selection is carried by the
 //!    `❯` glyph and a bold alias, not by a filled row.
+//! 3. **Glyphs and modifiers carry meaning, not hue.** Every state the frame can
+//!    be in says the same thing with the colour turned off.
 
 use crate::config::Connection;
 use crate::picker::compute_matches;
+use crate::theme::{ColorSupport, Theme};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
+/// The `│` rail glyph that every body line hangs off.
+const RAIL: &str = "│";
+
+/// The blank that pads a rail line out to the column row content starts at.
+///
+/// A row spends `│ ` + cursor + ` ` — four columns — before its first real
+/// character. A line with no cursor has to spend the same four, or the state
+/// copy sits two columns left of the rows it belongs to.
+const GUTTER_PAD: &str = "   ";
+
+/// Columns from the start of a rail line to where its content begins.
+const GUTTER: usize = 1 + GUTTER_PAD.len();
+
+/// What separates two hints in the hint rail.
+const HINT_SEP: &str = " · ";
+
+/// The terminal the frame is being drawn into.
+///
+/// The frame is pure, so the terminal arrives as data. `width` decides which
+/// hint segments survive; `support` decides whether any of them arrive in
+/// colour at all. Grouped into one argument rather than two loose parameters
+/// because they are one fact — *this is the terminal* — and because #34 will
+/// add to it (height, for the sliding window) without reshaping `build_frame`
+/// again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Canvas {
+    /// Columns available to the frame.
+    pub width: usize,
+    /// How much colour this terminal can actually render.
+    pub support: ColorSupport,
+}
+
+impl Canvas {
+    /// A canvas `width` columns wide with the given colour capability.
+    pub const fn new(width: usize, support: ColorSupport) -> Self {
+        Self { width, support }
+    }
+
+    /// A canvas `width` columns wide whose colour capability is whatever this
+    /// terminal reports — the constructor a live caller uses.
+    ///
+    /// This is the one place in the inline path that reads the environment, and
+    /// it reads it once, at the edge. `build_frame` stays pure.
+    pub fn detect(width: usize) -> Self {
+        Self::new(width, ColorSupport::detect())
+    }
+}
+
 /// What the frame is being used for.
 ///
 /// The three commands of the redesign share one frame and differ by what Enter
-/// does, so the difference has to be a domain concept on the seam rather than a
-/// boolean a caller has to remember the polarity of. `Pick` is the
+/// does, so the difference has to be a domain concept on the seam rather than
+/// a boolean a caller has to remember the polarity of. `Pick` is the
 /// choose-a-Connection frame (bare `sshm` and `sshm pick`); `Manage` is
 /// `sshm manage`, where Enter edits and the Ctrl chords add and delete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,8 +139,8 @@ impl Frame {
         self.state
     }
 
-    /// Which entries of the caller's `connections` slice the frame is showing,
-    /// in display order.
+    /// Which Connections of the caller's `connections` slice the frame is
+    /// showing, in display order.
     ///
     /// The frame does the filtering, so it is the only thing that knows what a
     /// visible row actually is. Without this, a consumer acting on the cursor
@@ -107,37 +167,41 @@ impl Frame {
     /// user would see. Because no span carries a background, `cat`-ing the
     /// result leaves the terminal's own background untouched — the frame stays
     /// transparent all the way to the bytes.
+    ///
+    /// The escape codes come from the same [`RunWriter`] the fullscreen
+    /// serializer uses, so the same `Style` produces the same bytes on both
+    /// surfaces.
     pub fn to_ansi(&self) -> String {
         let mut out = String::new();
+        let mut runs = crate::theme::ansi::RunWriter::new(&mut out);
 
         for line in &self.lines {
-            let mut current: Option<Style> = None;
             for span in &line.spans {
-                if current != Some(span.style) {
-                    // Reset first so an attribute dropped between spans
-                    // actually disappears rather than bleeding into the next run.
-                    out.push_str("\x1b[0m");
-                    out.push_str(&crate::theme::ansi::style_to_ansi(span.style));
-                    current = Some(span.style);
-                }
-                out.push_str(&span.content);
+                runs.push(span.style, &span.content);
             }
-            out.push_str("\x1b[0m\n");
+            runs.end_line();
         }
 
         out
     }
 }
 
-/// Build the frame for a set of Connections, a live query, a selected row and a
-/// mode.
+/// Build the frame for a set of Connections, a live query, a selected row, a
+/// mode, and the terminal it is being drawn into.
+///
+/// The palette is the Clack palette *resolved against the canvas*: under
+/// `NO_COLOR` or `TERM=dumb` every role collapses to `Reset` before a span is
+/// built, so the frame emits no colour rather than emitting cyan and hoping.
+/// The hint rail is fitted to `canvas.width`, dropping whole segments from the
+/// least-needed end rather than letting the terminal clip mid-word.
 pub fn build_frame(
     connections: &[Connection],
     query: &str,
     selection: usize,
     mode: FrameMode,
+    canvas: Canvas,
 ) -> Frame {
-    let t = crate::theme::Theme::clack();
+    let t = Theme::clack().resolve(canvas.support);
     let matcher = SkimMatcherV2::default();
     let matches = compute_matches(connections, &matcher, query);
 
@@ -164,7 +228,7 @@ pub fn build_frame(
         }
     }
 
-    lines.push(hint_rail_line(mode, &t));
+    lines.push(hint_rail_line(mode, canvas.width, &t));
     lines.push(corner_line(&t));
 
     Frame {
@@ -179,9 +243,12 @@ pub fn build_frame(
 ///
 /// Chrome, not content: it is drawn with the border role so it reads as
 /// structure and carries no state.
-fn corner_line(t: &crate::theme::Theme) -> Line<'static> {
-    Line::from(vec![Span::styled("└", Style::default().fg(t.border))])
+fn corner_line(t: &Theme) -> Line<'static> {
+    Line::from(vec![Span::styled(CORNER, Style::default().fg(t.border))])
 }
+
+/// The `└` that closes the rail at the bottom left.
+const CORNER: &str = "└";
 
 /// What the empty frame tells the user to do next.
 fn empty_message(mode: FrameMode) -> &'static str {
@@ -191,11 +258,14 @@ fn empty_message(mode: FrameMode) -> &'static str {
     }
 }
 
-/// A state line: the `│` rail plus muted copy.
-fn state_line(text: &str, t: &crate::theme::Theme) -> Line<'static> {
+/// A state line: the `│` rail plus muted copy, lined up with row content.
+fn state_line(text: &str, t: &Theme) -> Line<'static> {
     Line::from(vec![
-        Span::styled("│", Style::default().fg(t.border)),
-        Span::styled(format!(" {text}"), Style::default().fg(t.fg_muted)),
+        Span::styled(RAIL, Style::default().fg(t.border)),
+        Span::styled(
+            format!("{GUTTER_PAD}{text}"),
+            Style::default().fg(t.fg_muted),
+        ),
     ])
 }
 
@@ -206,12 +276,20 @@ fn state_line(text: &str, t: &crate::theme::Theme) -> Line<'static> {
 /// tail gets dropped, so what is listed first is what survives (user story 23).
 /// The chords only appear in `Manage`; a pick frame points at the command
 /// instead, because its Enter chooses rather than edits.
-fn hint_rail_line(mode: FrameMode, t: &crate::theme::Theme) -> Line<'static> {
+///
+/// The rail is fitted with the same drop-from-the-end rule the fullscreen footer
+/// uses ([`crate::app::fit_hints_with`]), against the width left after the
+/// gutter. That is what turns "82 columns of hints in an 80-column terminal"
+/// from a mid-word clip into a clean loss of the least-needed segment.
+fn hint_rail_line(mode: FrameMode, width: usize, t: &Theme) -> Line<'static> {
     let hints: &[&str] = match mode {
         FrameMode::Pick => &[
             "Esc cancel",
             "Enter select",
             "↑↓ navigate",
+            // Already last, which under drop-from-the-end ordering means it is
+            // the first thing a narrow terminal loses — the ordering #39 asks
+            // for, free here because the line was written in that order.
             "sshm manage to add or edit",
         ],
         FrameMode::Manage => &[
@@ -225,24 +303,16 @@ fn hint_rail_line(mode: FrameMode, t: &crate::theme::Theme) -> Line<'static> {
     };
 
     let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let fitted = crate::app::fit_hints_with(hints, width.saturating_sub(GUTTER), HINT_SEP);
 
-    let mut spans = vec![
-        Span::styled("│", Style::default().fg(t.border)),
-        Span::styled(" ", dim),
-    ];
-
-    for (i, hint) in hints.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(" · ", dim));
-        }
-        spans.push(Span::styled(*hint, dim));
-    }
-
-    Line::from(spans)
+    Line::from(vec![
+        Span::styled(RAIL, Style::default().fg(t.border)),
+        Span::styled(format!("{GUTTER_PAD}{fitted}"), dim),
+    ])
 }
 
 /// The `◆ <question>` line that opens every frame.
-fn header_line(mode: FrameMode, t: &crate::theme::Theme) -> Line<'static> {
+fn header_line(mode: FrameMode, t: &Theme) -> Line<'static> {
     let title = match mode {
         FrameMode::Pick => "Select a Connection",
         FrameMode::Manage => "Manage Connections",
@@ -261,7 +331,7 @@ fn header_line(mode: FrameMode, t: &crate::theme::Theme) -> Line<'static> {
 /// The glyph is what carries selection. A transparent frame has no background to
 /// fill, so a hue alone could not mark the target of the next action — and a
 /// hue would vanish under `NO_COLOR` anyway (user story 9).
-fn cursor_span(selected: bool, t: &crate::theme::Theme) -> Span<'static> {
+fn cursor_span(selected: bool, t: &Theme) -> Span<'static> {
     if selected {
         Span::styled(
             "❯",
@@ -277,20 +347,19 @@ fn cursor_span(selected: bool, t: &crate::theme::Theme) -> Span<'static> {
 ///
 /// The folder segment is emitted only when the Connection has one, so rows
 /// without a folder start at the alias and stay compact.
-fn row_line(
-    conn: &Connection,
-    selected: bool,
-    hits: &[usize],
-    t: &crate::theme::Theme,
-) -> Line<'static> {
-    let meta = Style::default().fg(t.fg_muted);
+fn row_line(conn: &Connection, selected: bool, hits: &[usize], t: &Theme) -> Line<'static> {
+    // The ticket asks for *dim* meta, and the hint rail already spells "dim" as
+    // `DIM` on `fg_muted`. Muted-without-`DIM` is a different claim — it is
+    // just a darker colour, and on a terminal with a bright bright-black it
+    // does not recede at all. One word, one spelling.
+    let meta = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
     let alias = Style::default().add_modifier(Modifier::BOLD);
     let hit = Style::default()
         .fg(t.highlight)
         .add_modifier(Modifier::BOLD);
 
     let mut spans = vec![
-        Span::styled("│", Style::default().fg(t.border)),
+        Span::styled(RAIL, Style::default().fg(t.border)),
         Span::raw(" "),
         cursor_span(selected, t),
         Span::raw(" "),

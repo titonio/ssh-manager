@@ -56,3 +56,68 @@ not the bar.
 in every mode the background stays dark, body text stays readable, and the
 selection stays distinct from the background. A new role must hold that line too —
 a role that collapses into `bg` after downgrade makes selection invisible.
+
+The transparent inline frame routes through the same call: `build_frame` takes a
+`Canvas { width, support }` and draws with `Theme::clack().resolve(support)`.
+Under `NO_COLOR` or `TERM=dumb` every role becomes `Reset` before a span is
+built, so the frame emits no hue rather than emitting cyan and hoping the
+terminal ignores it. Colour support is an *input* to that seam for exactly this
+reason — a caller must be able to change it without reshaping `build_frame`.
+
+## The Clack palette (transparent inline frame)
+
+`Theme::clack()` is built differently from Nord and deliberately has no RGB at
+all. A transparent frame borrows a background it cannot measure, so it owns only
+two hues and lets the terminal supply the rest:
+
+| Role | Clack | Drawn as |
+|---|---|---|
+| `bg`, `fg`, `fg_bright`, `selection_bg`, `selection_fg` | `Reset` | The terminal's own colours — the frame never paints a background |
+| `fg_muted` | `DarkGray` + `DIM` | Folder prefix, `user@host:port` meta, hint rail |
+| `border` | `DarkGray` | The `│` rail and `└` corner — chrome, no state |
+| `accent` | `Cyan` | The `◆` step icon and the `❯` cursor |
+| `highlight` | `Green` | Fuzzy-matched characters |
+| `warning` | `Yellow` | Reserved; not drawn by the frame |
+
+Two role pairs share a value on purpose, and both are separated by *modifier*
+rather than by hue:
+
+- **`fg_muted` and `border` are both `DarkGray`.** In Clack the rail and the meta
+  are meant to recede together. What tells them apart is that meta carries `DIM`
+  and the rail does not. There is no second mid-tone in the 16-colour palette
+  that survives both a black and a white terminal — `Gray` (#C0C0C0) is 1.2:1 on
+  white — so a hue split would break one of the two backgrounds the frame has to
+  live on.
+- **`highlight` and `success` are both `Green`.** Clack's vocabulary is cyan for
+  the active step and green for a good outcome; the frame draws `highlight` and
+  never draws `success`. If a surface ever draws both at once and needs them
+  told apart, give `success` its own value then — do not invent one now to satisfy
+  the table.
+
+The rule that keeps this honest is the rendered one, not the table: under
+`NO_COLOR` the frame must still show every state. `the_monochrome_frame_keeps_every_glyph_and_modifier_that_carries_state`
+and `a_monochrome_canvas_emits_no_colour_at_all` enforce it.
+
+## Clack grammar glyphs
+
+The inline frame's glyphs, their role, and what state each carries. These are
+load-bearing: a glyph that stops rendering is a lost state, not a cosmetic
+regression.
+
+| Glyph | Role | Carries | Notes |
+|---|---|---|---|
+| `◆` | `accent` | The open step of the flow | Opens every frame: `◆ <question>` |
+| `│` | `border` | The rail every body line hangs off | Chrome; never carries state |
+| `❯` | `accent` + `BOLD` | **Selection** | Blank (same width) on unselected rows |
+| `└` | `border` | Closes the rail | Chrome; the frame's last line |
+| `·` | `fg_muted` + `DIM` | Separates hint segments | Dropped with its segment, never stranded |
+
+Selection on this surface is the `❯` glyph plus a bold alias — never a filled
+row, because a transparent frame has no background to fill and a hue alone
+vanishes under `NO_COLOR`.
+
+**The inline picker's `> ` marker is a different marker for the same state, and
+stays.** It is prepended in `build_picker_row_spans` on the current opaque
+picker. The two surfaces are not yet the same surface; #35's cut-over is what
+reconciles them. Do not "unify" the markers before then — changing `> ` breaks
+the picker's selection signalling, which is a separately-gated rule.

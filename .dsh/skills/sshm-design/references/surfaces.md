@@ -46,6 +46,34 @@ recover.
   `List::highlight_symbol` is inert here because the list renders statelessly —
   that is how the marker silently vanished for the life of the project.
 
+### The incoming transparent frame (#33 seam)
+
+The redesign replaces this surface's opaque panel with a transparent Clack-grammar
+frame built by `build_frame` in `sshm/src/frame.rs`. It is a pure value — no
+terminal, no render loop — and takes a `Canvas { width, support }` describing the
+terminal it will be drawn into.
+
+- **It owns no background at all.** Not "sets a dark one" — none. Body text is
+  `Reset`, so the terminal's own foreground is what makes the frame readable on
+  the terminal's own background. The WCAG table that governs Nord cannot govern
+  this surface; the structural rules replace it.
+- **Selection is `❯` plus a bold alias**, never a filled row. There is nothing
+  to fill.
+- **The hint rail must be width-fitted.** `build_frame` runs it through
+  `fit_hints_with` against `width - gutter`, dropping whole segments from the
+  least-needed end. The full Manage rail is 84 columns and cannot fit an 80-column
+  terminal; unfitted it clipped mid-word (`Ctrl+X dele`). Order is the contract:
+  escape hatch → Enter → movement → chords → discovery.
+- **Colour is an input, not a constant.** The frame draws
+  `Theme::clack().resolve(canvas.support)`. Under `NO_COLOR` or `TERM=dumb` the
+  whole palette becomes `Reset` before a span exists. Glyphs and `BOLD`/`DIM`
+  carry every state, so the frame says the same thing with no colour at all.
+- **Gutters are shared.** Rows spend four columns before their text
+  (`│ ` + cursor + ` `); state and hint lines spend the same four. A line that
+  spends two sits visibly left of the rows it belongs to.
+
+Glyph inventory and role mapping: `tokens.md` → "Clack grammar glyphs".
+
 ## 3. Shell Widget — `sshm init zsh|bash`
 
 Not a UI. It is emitted shell code that binds a key and splices the picker's

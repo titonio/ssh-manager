@@ -185,18 +185,30 @@ pub enum ColorSupport {
 
 impl ColorSupport {
     /// Detect capability from the environment.
-    ///
-    /// Honours the <https://no-color.org> convention and treats `TERM=dumb` as
-    /// "no color, and don't try".
     pub fn detect() -> Self {
-        if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+        Self::from_env_vars(
+            std::env::var_os("NO_COLOR").as_deref(),
+            &std::env::var("TERM").unwrap_or_default(),
+            &std::env::var("COLORTERM").unwrap_or_default(),
+        )
+    }
+
+    /// The capability implied by a given set of environment values.
+    ///
+    /// Honours the <https://no-color.org> convention — `NO_COLOR` set to
+    /// anything non-empty — and treats `TERM=dumb` as "no color, and don't
+    /// try". Split out from [`ColorSupport::detect`] because the whole point of
+    /// those two rules is that they must hold; testing them against the real
+    /// process environment would mean mutating a global that every other test
+    /// in the binary is reading concurrently. Taking the values as arguments
+    /// makes the rule assertable without that hazard.
+    pub fn from_env_vars(no_color: Option<&std::ffi::OsStr>, term: &str, colorterm: &str) -> Self {
+        if no_color.is_some_and(|v| !v.is_empty()) {
             return Self::Monochrome;
         }
-        let term = std::env::var("TERM").unwrap_or_default();
         if term == "dumb" || term.is_empty() {
             return Self::Monochrome;
         }
-        let colorterm = std::env::var("COLORTERM").unwrap_or_default();
         if colorterm == "truecolor" || colorterm == "24bit" {
             return Self::Truecolor;
         }
@@ -454,6 +466,50 @@ pub mod ansi {
     use ratatui::buffer::Buffer;
     use ratatui::style::{Color, Modifier, Style};
 
+    /// The SGR full reset.
+    ///
+    /// Every emitter in this module ends a style run with it, so an attribute
+    /// dropped between runs actually disappears instead of bleeding into the
+    /// next one. Named once because two hand-written copies of `"\x1b[0m"` is
+    /// how the two serializers would drift apart.
+    pub const RESET: &str = "\x1b[0m";
+
+    /// Writes styled runs to a `String`, emitting SGR only when the style changes.
+    ///
+    /// Both serializers here — the fullscreen buffer walk and the inline frame's
+    /// own `to_ansi` — need the same thing: one escape-code emitter, a reset
+    /// before every change of style, and silence while the style holds. Sharing
+    /// the writer is what keeps the two surfaces byte-identical for the same
+    /// `Style`, which is the promise a theme is worth making.
+    pub struct RunWriter<'a> {
+        out: &'a mut String,
+        current: Option<Style>,
+    }
+
+    impl<'a> RunWriter<'a> {
+        /// Write into `out`.
+        pub fn new(out: &'a mut String) -> Self {
+            Self { out, current: None }
+        }
+
+        /// Append `text` drawn with `style`.
+        pub fn push(&mut self, style: Style, text: &str) {
+            if self.current != Some(style) {
+                self.out.push_str(RESET);
+                self.out.push_str(&style_to_ansi(style));
+                self.current = Some(style);
+            }
+            self.out.push_str(text);
+        }
+
+        /// Close the line: reset so nothing bleeds into the next one, then a newline.
+        pub fn end_line(&mut self) {
+            self.out.push_str(RESET);
+            self.out.push('\n');
+            self.current = None;
+        }
+    }
+
     /// Named ANSI colors as their 0..=15 index, for SGR emission.
     fn ansi_index(color: Color) -> Option<u8> {
         Some(match color {
@@ -562,24 +618,20 @@ pub mod ansi {
         let content = buffer.content();
 
         let mut out = String::new();
-        let mut current: Option<(Color, Color, Modifier)> = None;
+        let mut runs = RunWriter::new(&mut out);
 
         for y in 0..height {
             for x in 0..width {
                 let Some(cell) = content.get(y * width + x) else {
                     continue;
                 };
-                let style = (cell.fg, cell.bg, cell.modifier);
-                if current != Some(style) {
-                    // Reset first so removed attributes actually disappear.
-                    out.push_str("\x1b[0m");
-                    out.push_str(&sgr_codes(style.2, Some(style.0), Some(style.1)));
-                    current = Some(style);
-                }
-                out.push_str(cell.symbol());
+                let style = Style::default()
+                    .fg(cell.fg)
+                    .bg(cell.bg)
+                    .add_modifier(cell.modifier);
+                runs.push(style, cell.symbol());
             }
-            out.push_str("\x1b[0m\n");
-            current = None;
+            runs.end_line();
         }
         out
     }

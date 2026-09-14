@@ -69,8 +69,17 @@ pub struct App {
 /// footer was one long string that ratatui clipped mid-word at whatever width the
 /// terminal happened to have.
 pub fn fit_hints(hints: &[&str], width: usize) -> String {
-    const SEP: &str = " | ";
-    let sep_len = SEP.chars().count();
+    fit_hints_with(hints, width, " | ")
+}
+
+/// [`fit_hints`] with the separator chosen by the caller.
+///
+/// The drop-from-the-end rule is the useful part, not the pipe: the inline
+/// frame's hint rail separates its segments with ` · ` and has to fit inside a
+/// gutter as well as a width. Sharing the rule is what stops the two surfaces
+/// inventing two different answers to "what survives a narrow terminal".
+pub fn fit_hints_with(hints: &[&str], width: usize, sep: &str) -> String {
+    let sep_len = sep.chars().count();
     let mut out = String::new();
     let mut out_len = 0usize;
     for hint in hints {
@@ -80,7 +89,7 @@ pub fn fit_hints(hints: &[&str], width: usize) -> String {
             break;
         }
         if !out.is_empty() {
-            out.push_str(SEP);
+            out.push_str(sep);
         }
         out.push_str(hint);
         out_len += extra + hint_len;

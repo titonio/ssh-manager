@@ -29,7 +29,7 @@ use ratatui::Terminal;
 use sshm::app::{App, AppMode, MIN_TUI_HEIGHT, MIN_TUI_WIDTH};
 use sshm::config::Config;
 use sshm::connections::ConnectionDraft;
-use sshm::frame::{build_frame, FrameMode};
+use sshm::frame::{build_frame, Canvas, FrameMode};
 use sshm::picker::{compute_matches, render_picker_frame};
 use sshm::theme::{contrast, nord, ColorSupport, Theme};
 
@@ -725,13 +725,51 @@ fn dump_frames_for_review() {
     // value, and `to_ansi` turns it into bytes a human can look at. This is the
     // step that makes "verified" mean something for a transparent frame — the
     // WCAG table cannot govern it, so the eyeball has to.
+    //
+    // Dumped at two widths and two colour modes on purpose. The rail fitting and
+    // the `NO_COLOR` downgrade are invisible to every other gate in this file:
+    // one is about what happens at a width nobody is looking at, the other is
+    // about bytes no contrast table can measure.
+    let truecolor = ColorSupport::Truecolor;
+    let mono = ColorSupport::Monochrome;
     for (name, frame) in [
-        ("frame-pick", build_frame(&c, "prod", 0, FrameMode::Pick)),
-        ("frame-manage", build_frame(&c, "", 1, FrameMode::Manage)),
-        ("frame-empty", build_frame(&[], "", 0, FrameMode::Pick)),
-        ("frame-no-match", build_frame(&c, "zzz", 0, FrameMode::Pick)),
+        (
+            "frame-pick-80",
+            build_frame(&c, "prod", 0, FrameMode::Pick, Canvas::new(80, truecolor)),
+        ),
+        (
+            "frame-manage-80",
+            build_frame(&c, "", 1, FrameMode::Manage, Canvas::new(80, truecolor)),
+        ),
+        (
+            "frame-pick-60",
+            build_frame(&c, "prod", 0, FrameMode::Pick, Canvas::new(60, truecolor)),
+        ),
+        (
+            "frame-manage-60",
+            build_frame(&c, "", 1, FrameMode::Manage, Canvas::new(60, truecolor)),
+        ),
+        (
+            "frame-pick-80-mono",
+            build_frame(&c, "prod", 0, FrameMode::Pick, Canvas::new(80, mono)),
+        ),
+        (
+            "frame-manage-80-mono",
+            build_frame(&c, "", 1, FrameMode::Manage, Canvas::new(80, mono)),
+        ),
+        (
+            "frame-empty",
+            build_frame(&[], "", 0, FrameMode::Pick, Canvas::new(80, truecolor)),
+        ),
+        (
+            "frame-no-match",
+            build_frame(&c, "zzz", 0, FrameMode::Pick, Canvas::new(80, truecolor)),
+        ),
     ] {
-        let path = format!("{dir}/{name}-{mode}.ansi");
+        // The frame's own name already carries the support it was built with;
+        // appending the *detected* mode here would mislabel a truecolour frame
+        // as "Monochrome" on a CI box that has no TERM.
+        let path = format!("{dir}/{name}.ansi");
         std::fs::write(&path, frame.to_ansi()).unwrap_or_else(|e| panic!("write {path}: {e}"));
         eprintln!("wrote {path}");
     }
