@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod connections;
 mod picker;
 mod runtime;
 mod ssh;

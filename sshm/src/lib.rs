@@ -1,5 +1,6 @@
 pub mod app;
 pub mod config;
+pub mod connections;
 pub mod picker;
 pub mod ssh;
 pub mod theme;

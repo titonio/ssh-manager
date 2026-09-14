@@ -1,4 +1,6 @@
-use crate::config::{import_from_ssh_config, Config, Connection};
+use crate::config::{Config, Connection};
+use crate::connections;
+pub use crate::connections::ConnectionDraft as InputBuffer;
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::{
@@ -59,38 +61,6 @@ pub struct App {
     pub should_connect: Option<Connection>,
     pub ctrl_c_count: usize,
     pub update_info: Option<crate::update::UpdateInfo>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct InputBuffer {
-    pub alias: String,
-    pub host: String,
-    pub user: String,
-    pub port: String,
-    pub key_path: String,
-    pub folder: String,
-}
-
-impl InputBuffer {
-    pub fn clear(&mut self) {
-        self.alias.clear();
-        self.host.clear();
-        self.user.clear();
-        self.port = "22".to_string();
-        self.key_path.clear();
-        self.folder.clear();
-    }
-
-    pub fn from_connection(conn: &Connection) -> Self {
-        Self {
-            alias: conn.alias.clone(),
-            host: conn.host.clone(),
-            user: conn.user.clone(),
-            port: conn.port.to_string(),
-            key_path: conn.key_path.clone().unwrap_or_default(),
-            folder: conn.folder.clone().unwrap_or_default(),
-        }
-    }
 }
 
 /// Join hint labels with ` | `, dropping the ones that do not fit.
@@ -579,78 +549,59 @@ impl App {
     }
 
     fn save_connection(&mut self) {
-        let port: u16 = self.input_buffer.port.parse().unwrap_or(22);
-
-        let conn = Connection {
-            id: if self.mode == AppMode::Edit {
-                self.filtered_indices
-                    .get(self.selected_index)
-                    .and_then(|&i| self.config.connections.get(i))
-                    .map(|c| c.id.clone())
-                    .unwrap_or_default()
-            } else {
-                uuid::Uuid::new_v4().to_string()
-            },
-            alias: self.input_buffer.alias.clone(),
-            host: self.input_buffer.host.clone(),
-            user: self.input_buffer.user.clone(),
-            port,
-            key_path: if self.input_buffer.key_path.is_empty() {
-                None
-            } else {
-                Some(self.input_buffer.key_path.clone())
-            },
-            folder: if self.input_buffer.folder.is_empty() {
-                None
-            } else {
-                Some(self.input_buffer.folder.clone())
-            },
+        let result = if self.mode == AppMode::Edit {
+            let editing = self
+                .filtered_indices
+                .get(self.selected_index)
+                .and_then(|&i| self.config.connections.get(i))
+                .map(|c| c.id.clone())
+                .unwrap_or_default();
+            connections::edit(&mut self.config, &editing, &self.input_buffer)
+        } else {
+            connections::add(&mut self.config, &self.input_buffer)
         };
 
-        if self.mode == AppMode::Edit {
-            self.config.update_connection(conn);
-        } else {
-            self.config.add_connection(conn);
-        }
-
-        if let Err(e) = self.config.save() {
-            self.message = Some(format!("Error saving: {}", e));
-        } else {
-            self.update_filter();
-            self.message = Some("Connection saved!".to_string());
+        match result {
+            Ok(_) => {
+                self.update_filter();
+                self.message = Some("Connection saved!".to_string());
+            }
+            Err(e) => self.message = Some(format!("Error saving: {}", e)),
         }
 
         self.mode = AppMode::Normal;
     }
 
     fn delete_connection(&mut self) {
-        let id_to_remove = self
+        let selected = self
             .filtered_indices
             .get(self.selected_index)
             .and_then(|&i| self.config.connections.get(i))
             .map(|c| c.id.clone());
 
-        if let Some(id) = id_to_remove {
-            self.config.remove_connection(&id);
-            if let Err(e) = self.config.save() {
-                self.message = Some(format!("Error saving: {}", e));
-            } else {
-                self.update_filter();
-                if self.selected_index > 0 && self.selected_index >= self.filtered_indices.len() {
-                    self.selected_index = self.filtered_indices.len().saturating_sub(1);
+        if let Some(id) = selected {
+            match connections::remove(&mut self.config, &id) {
+                Ok(Some(_)) => {
+                    self.update_filter();
+                    if self.selected_index > 0 && self.selected_index >= self.filtered_indices.len()
+                    {
+                        self.selected_index = self.filtered_indices.len().saturating_sub(1);
+                    }
+                    self.message = Some("Connection deleted".to_string());
                 }
-                self.message = Some("Connection deleted".to_string());
+                Ok(None) => {}
+                Err(e) => self.message = Some(format!("Error saving: {}", e)),
             }
         }
     }
 
     fn import_connections(&mut self) {
-        let imported = import_from_ssh_config(&mut self.config);
-        if let Err(e) = self.config.save() {
-            self.message = Some(format!("Error saving: {}", e));
-        } else {
-            self.update_filter();
-            self.message = Some(format!("Imported {} connections", imported));
+        match connections::import(&mut self.config) {
+            Ok(imported) => {
+                self.update_filter();
+                self.message = Some(format!("Imported {} connections", imported));
+            }
+            Err(e) => self.message = Some(format!("Error saving: {}", e)),
         }
     }
 
@@ -663,20 +614,13 @@ impl App {
     }
 
     fn check_for_update(&mut self) {
-        if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
-            return;
-        }
-
-        match crate::update::check_for_update() {
-            crate::update::UpdateResult::UpdateAvailable { version } => {
-                self.update_info = Some(crate::update::UpdateInfo {
-                    current_version: env!("CARGO_PKG_VERSION").to_string(),
-                    new_version: version,
-                });
+        match connections::read_update_note() {
+            connections::UpdateNote::Available(info) => {
+                self.update_info = Some(info);
                 self.mode = AppMode::Update;
             }
-            crate::update::UpdateResult::NoUpdate => {}
-            crate::update::UpdateResult::Error(e) => {
+            connections::UpdateNote::None => {}
+            connections::UpdateNote::Failed(e) => {
                 self.message = Some(format!("Update check failed: {}", e));
             }
         }
@@ -3125,5 +3069,51 @@ mod tests {
                 app.render_footer(f, area);
             })
             .unwrap();
+    }
+
+    // Characterization pins: what a Connection-manager result turns into on this
+    // surface. Written against the pre-extraction code so the move cannot quietly
+    // change the words a user reads.
+
+    #[test]
+    fn saving_a_connection_says_so_and_returns_to_normal_mode() {
+        let mut app = create_test_app();
+        app.mode = AppMode::Add;
+        app.input_buffer = InputBuffer {
+            alias: "pin-server".to_string(),
+            host: "10.0.0.7".to_string(),
+            user: "deploy".to_string(),
+            port: "22".to_string(),
+            key_path: String::new(),
+            folder: String::new(),
+        };
+
+        app.save_connection();
+
+        assert_eq!(app.message, Some("Connection saved!".to_string()));
+        assert_eq!(app.mode, AppMode::Normal);
+    }
+
+    #[test]
+    fn deleting_a_connection_says_so() {
+        let mut app = create_test_app();
+        app.selected_index = 0;
+
+        app.delete_connection();
+
+        assert_eq!(app.message, Some("Connection deleted".to_string()));
+    }
+
+    #[test]
+    fn importing_says_how_many_connections_came_across() {
+        let mut app = create_test_app();
+
+        app.import_connections();
+
+        let message = app.message.expect("an import always reports a count");
+        assert!(
+            message.starts_with("Imported ") && message.ends_with(" connections"),
+            "unexpected import message: {message}"
+        );
     }
 }

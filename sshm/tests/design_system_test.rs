@@ -97,6 +97,7 @@ fn no_color_literals_outside_the_theme_module() {
     let crate_dir = env!("CARGO_MANIFEST_DIR");
     let sources = [
         "src/app.rs",
+        "src/connections.rs",
         "src/picker.rs",
         "src/main.rs",
         "src/runtime.rs",
