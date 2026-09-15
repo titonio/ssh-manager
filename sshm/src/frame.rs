@@ -54,36 +54,106 @@ const GUTTER: usize = 1 + GUTTER_PAD.len();
 /// What separates two hints in the hint rail.
 const HINT_SEP: &str = " · ";
 
+/// The lines of a frame that are not list rows: the `◆` header, the hint rail
+/// and the `└` corner.
+pub const CHROME_LINES: usize = 3;
+
+/// The list rows a frame shows when the terminal has room for all of them.
+///
+/// Eight is the frame's shape, not a limit on the list: the list is a window
+/// over as many Connections as match, and the window slides ([`visible_window`])
+/// so the frame never has to grow to fit it.
+pub const VISIBLE_ROWS: usize = 8;
+
+/// The lines of a full frame: the 8-row list area plus the chrome around it.
+///
+/// The spec's "~12 lines" counts the blank line the frame opens on below the
+/// prompt (#34); the frame itself is eleven.
+pub const FRAME_LINES: usize = VISIBLE_ROWS + CHROME_LINES;
+
+/// The line the frame leaves for the user's own prompt.
+///
+/// An inline frame that ate the whole terminal would push the prompt off the
+/// top, which is the opposite of the reason it is inline.
+const PROMPT_LINES: usize = 1;
+
+/// How many list rows a terminal `height` rows tall can show.
+///
+/// `None` means the terminal is too short to hold a frame at all — the caller
+/// has somewhere to go with that answer (#34's resize falls back to a clean
+/// cancel-and-restore) rather than drawing a frame with no room for a row.
+pub fn fit_visible_rows(terminal_height: usize) -> Option<usize> {
+    let room = terminal_height.saturating_sub(CHROME_LINES + PROMPT_LINES);
+    if room == 0 {
+        None
+    } else {
+        Some(room.min(VISIBLE_ROWS))
+    }
+}
+
 /// The terminal the frame is being drawn into.
 ///
 /// The frame is pure, so the terminal arrives as data. `width` decides which
 /// hint segments survive; `support` decides whether any of them arrive in
-/// colour at all. Grouped into one argument rather than two loose parameters
-/// because they are one fact — *this is the terminal* — and because #34 will
-/// add to it (height, for the sliding window) without reshaping `build_frame`
-/// again.
+/// colour at all; `height` decides how many list rows the frame can hold.
+/// Grouped into one argument rather than three loose parameters because they
+/// are one fact — *this is the terminal* — and because every consumer of the
+/// frame needs all three together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Canvas {
     /// Columns available to the frame.
     pub width: usize,
+    /// Rows available to the terminal the frame is drawn into.
+    pub height: usize,
     /// How much colour this terminal can actually render.
     pub support: ColorSupport,
 }
 
 impl Canvas {
-    /// A canvas `width` columns wide with the given colour capability.
-    pub const fn new(width: usize, support: ColorSupport) -> Self {
-        Self { width, support }
+    /// A canvas `width` by `height` with the given colour capability.
+    pub const fn new(width: usize, height: usize, support: ColorSupport) -> Self {
+        Self {
+            width,
+            height,
+            support,
+        }
     }
 
-    /// A canvas `width` columns wide whose colour capability is whatever this
+    /// A canvas `width` by `height` whose colour capability is whatever this
     /// terminal reports — the constructor a live caller uses.
     ///
     /// This is the one place in the inline path that reads the environment, and
     /// it reads it once, at the edge. `build_frame` stays pure.
-    pub fn detect(width: usize) -> Self {
-        Self::new(width, ColorSupport::detect())
+    pub fn detect(width: usize, height: usize) -> Self {
+        Self::new(width, height, ColorSupport::detect())
     }
+
+    /// How many list rows this canvas leaves the frame, or `None` when it is
+    /// too short to hold one.
+    pub fn visible_rows(&self) -> Option<usize> {
+        fit_visible_rows(self.height)
+    }
+}
+
+/// The rows a fixed-height window shows for a given selection.
+///
+/// The selection lands in the middle of the window — `visible / 2` rows down
+/// from its top — and the window slides to keep it there while the user walks
+/// the list. At either end it pins instead of scrolling past, so the range is
+/// always clipped to `[0, total)` and never names a row that does not exist.
+///
+/// This is the whole of the frame's scrolling: the list may be any length, the
+/// window is always `visible` rows, which is what lets the frame hold one
+/// height while active (user story 12).
+pub fn visible_window(total: usize, selection: usize, visible: usize) -> std::ops::Range<usize> {
+    if total == 0 || visible == 0 {
+        return 0..0;
+    }
+
+    let visible = visible.min(total);
+    let start = selection.saturating_sub(visible / 2).min(total - visible);
+
+    start..start + visible
 }
 
 /// What the frame is being used for.
@@ -215,21 +285,44 @@ pub fn build_frame(
 
     let matched: Vec<usize> = matches.iter().map(|(conn_idx, _, _)| *conn_idx).collect();
     let selection = selection.min(matched.len().saturating_sub(1));
+    let visible = canvas.visible_rows().unwrap_or(0);
 
     let mut lines = vec![header_line(mode, &t)];
 
     match state {
-        FrameState::Empty => lines.push(state_line(empty_message(mode), &t)),
-        FrameState::NoMatch => lines.push(state_line(&format!("No matches for {query:?}"), &t)),
+        FrameState::Empty => {
+            lines.push(state_line(empty_message(mode), &t));
+            pad_rows(&mut lines, visible.saturating_sub(1), &t);
+        }
+        FrameState::NoMatch => {
+            lines.push(state_line(&format!("No matches for {query:?}"), &t));
+            pad_rows(&mut lines, visible.saturating_sub(1), &t);
+        }
         FrameState::Rows => {
+            // The list area is the window, not the list: the frame emits the
+            // `visible` rows the window covers and pads the rest with bare
+            // rail, so narrowing the query changes which rows are there but
+            // never how many lines the frame takes.
+            let window = visible_window(matches.len(), selection, visible);
             for (i, (conn_idx, _score, hits)) in matches.iter().enumerate() {
-                lines.push(row_line(&connections[*conn_idx], i == selection, hits, &t));
+                if window.contains(&i) {
+                    lines.push(row_line(&connections[*conn_idx], i == selection, hits, &t));
+                }
             }
+            pad_rows(&mut lines, visible.saturating_sub(window.len()), &t);
         }
     }
 
     lines.push(hint_rail_line(mode, canvas.width, &t));
     lines.push(corner_line(&t));
+
+    // Nothing the frame emits may exceed the canvas: the inline driver's
+    // row-diff collapse (#34) counts one frame line as one physical row,
+    // and a wrapped line breaks that count — and the constant height with it.
+    let lines: Vec<Line<'static>> = lines
+        .into_iter()
+        .map(|line| fit_line(line, canvas.width))
+        .collect();
 
     Frame {
         lines,
@@ -239,12 +332,55 @@ pub fn build_frame(
     }
 }
 
+/// Trim a line to `width` display columns, keeping the styles of what survives.
+///
+/// The cut falls where the budget runs out; the tail is dropped whole. This
+/// is safe against the frame's grammar because everything meaningful — the
+/// rail, the cursor, the folder prefix — sits at the *head* of a line, so a
+/// fitted row loses its meta tail, never its structure.
+fn fit_line(line: Line<'static>, width: usize) -> Line<'static> {
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+
+    for span in line.spans {
+        let w = span.content.chars().count();
+        if used + w <= width {
+            used += w;
+            spans.push(span);
+        } else {
+            let keep = width - used;
+            if keep > 0 {
+                let cut: String = span.content.chars().take(keep).collect();
+                spans.push(Span::styled(cut, span.style));
+            }
+            break;
+        }
+    }
+
+    Line::from(spans)
+}
+
 /// The `└` that closes the rail.
 ///
 /// Chrome, not content: it is drawn with the border role so it reads as
 /// structure and carries no state.
 fn corner_line(t: &Theme) -> Line<'static> {
     Line::from(vec![Span::styled(CORNER, Style::default().fg(t.border))])
+}
+
+/// Pad the list area out to a constant height with rows that carry the rail
+/// and nothing else.
+///
+/// The rail runs unbroken from the header to the corner even when the list is
+/// shorter than the window, so the frame reads as one fixed shape rather than
+/// a box with a ragged bottom.
+fn pad_rows(lines: &mut Vec<Line<'static>>, rows: usize, t: &Theme) {
+    for _ in 0..rows {
+        lines.push(Line::from(vec![Span::styled(
+            RAIL,
+            Style::default().fg(t.border),
+        )]));
+    }
 }
 
 /// The `└` that closes the rail at the bottom left.

@@ -2,6 +2,7 @@ pub mod app;
 pub mod config;
 pub mod connections;
 pub mod frame;
+pub mod inline;
 pub mod picker;
 pub mod ssh;
 pub mod theme;

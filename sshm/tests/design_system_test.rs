@@ -101,6 +101,7 @@ fn no_color_literals_outside_the_theme_module() {
         "src/app.rs",
         "src/connections.rs",
         "src/frame.rs",
+        "src/inline.rs",
         "src/picker.rs",
         "src/main.rs",
         "src/runtime.rs",
@@ -735,35 +736,53 @@ fn dump_frames_for_review() {
     for (name, frame) in [
         (
             "frame-pick-80",
-            build_frame(&c, "prod", 0, FrameMode::Pick, Canvas::new(80, truecolor)),
+            build_frame(
+                &c,
+                "prod",
+                0,
+                FrameMode::Pick,
+                Canvas::new(80, 24, truecolor),
+            ),
         ),
         (
             "frame-manage-80",
-            build_frame(&c, "", 1, FrameMode::Manage, Canvas::new(80, truecolor)),
+            build_frame(&c, "", 1, FrameMode::Manage, Canvas::new(80, 24, truecolor)),
         ),
         (
             "frame-pick-60",
-            build_frame(&c, "prod", 0, FrameMode::Pick, Canvas::new(60, truecolor)),
+            build_frame(
+                &c,
+                "prod",
+                0,
+                FrameMode::Pick,
+                Canvas::new(60, 24, truecolor),
+            ),
         ),
         (
             "frame-manage-60",
-            build_frame(&c, "", 1, FrameMode::Manage, Canvas::new(60, truecolor)),
+            build_frame(&c, "", 1, FrameMode::Manage, Canvas::new(60, 24, truecolor)),
         ),
         (
             "frame-pick-80-mono",
-            build_frame(&c, "prod", 0, FrameMode::Pick, Canvas::new(80, mono)),
+            build_frame(&c, "prod", 0, FrameMode::Pick, Canvas::new(80, 24, mono)),
         ),
         (
             "frame-manage-80-mono",
-            build_frame(&c, "", 1, FrameMode::Manage, Canvas::new(80, mono)),
+            build_frame(&c, "", 1, FrameMode::Manage, Canvas::new(80, 24, mono)),
         ),
         (
             "frame-empty",
-            build_frame(&[], "", 0, FrameMode::Pick, Canvas::new(80, truecolor)),
+            build_frame(&[], "", 0, FrameMode::Pick, Canvas::new(80, 24, truecolor)),
         ),
         (
             "frame-no-match",
-            build_frame(&c, "zzz", 0, FrameMode::Pick, Canvas::new(80, truecolor)),
+            build_frame(
+                &c,
+                "zzz",
+                0,
+                FrameMode::Pick,
+                Canvas::new(80, 24, truecolor),
+            ),
         ),
     ] {
         // The frame's own name already carries the support it was built with;

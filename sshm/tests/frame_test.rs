@@ -11,7 +11,9 @@
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 use sshm::config::Connection;
-use sshm::frame::{build_frame, Canvas, FrameMode, FrameState};
+use sshm::frame::{
+    build_frame, visible_window, Canvas, FrameMode, FrameState, FRAME_LINES, VISIBLE_ROWS,
+};
 use sshm::theme::{ColorSupport, Theme};
 
 /// The palette the frame draws with. Tests name the *role*, never the hue; the
@@ -20,9 +22,10 @@ fn t() -> Theme {
     Theme::clack()
 }
 
-/// A truecolour canvas `width` columns wide.
+/// A truecolour canvas `width` columns wide, in a 24-row terminal — tall
+/// enough for the full 8-row window.
 fn canvas(width: usize) -> Canvas {
-    Canvas::new(width, ColorSupport::Truecolor)
+    Canvas::new(width, 24, ColorSupport::Truecolor)
 }
 
 /// Wide enough that nothing is fitted away, for tests about content rather than
@@ -178,6 +181,11 @@ fn every_rail_line_puts_its_content_in_the_same_column() {
         for line in frame.lines() {
             let text = line_text(line);
             if !text.starts_with('│') {
+                continue;
+            }
+            // A padded list-area row carries the rail and nothing else, so
+            // there is no content to put in a column (#34's constant height).
+            if text.chars().skip(1).all(|c| c == ' ') {
                 continue;
             }
             // Display columns, not bytes: `│` is three bytes wide.
@@ -469,7 +477,7 @@ fn hint_spans(frame: &sshm::frame::Frame) -> Vec<&ratatui::text::Span<'static>> 
 /// than changing `build_frame`'s signature.
 #[test]
 fn a_monochrome_canvas_emits_no_colour_at_all() {
-    let mono = Canvas::new(80, ColorSupport::Monochrome);
+    let mono = Canvas::new(80, 24, ColorSupport::Monochrome);
 
     for (connections, query, mode) in [
         (conns(), "", FrameMode::Pick),
@@ -499,7 +507,7 @@ fn the_monochrome_frame_keeps_every_glyph_and_modifier_that_carries_state() {
         "web",
         0,
         FrameMode::Pick,
-        Canvas::new(80, ColorSupport::Monochrome),
+        Canvas::new(80, 24, ColorSupport::Monochrome),
     )
     .to_ansi();
 
@@ -598,7 +606,7 @@ fn every_canvas_colour_mode_still_renders_the_grammar() {
             "web",
             0,
             FrameMode::Manage,
-            Canvas::new(80, support),
+            Canvas::new(80, 24, support),
         )
         .to_ansi();
         for glyph in ['◆', '│', '❯', '└'] {
@@ -626,8 +634,8 @@ fn an_empty_connection_set_renders_a_call_to_action_behind_the_rail() {
     );
     assert_eq!(
         frame.lines().len(),
-        4,
-        "empty frame is header + message + hint rail + corner, got {:?}",
+        FRAME_LINES,
+        "the empty frame is padded to the frame's constant height, got {:?}",
         frame_text(&frame)
     );
 }
@@ -669,8 +677,8 @@ fn a_query_matching_nothing_names_the_query_it_could_not_match() {
     assert_eq!(line_text(&frame.lines()[1]), "│   No matches for \"zzz\"");
     assert_eq!(
         frame.lines().len(),
-        4,
-        "no-match frame is header + message + hint rail + corner, got {:?}",
+        FRAME_LINES,
+        "the no-match frame is padded to the frame's constant height, got {:?}",
         frame_text(&frame)
     );
 }
@@ -928,4 +936,215 @@ fn the_frame_uses_only_the_allowed_modifiers() {
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The sliding window (#34)
+//
+// The frame is a fixed-height window over the matched rows, so which rows are
+// visible is a pure function of (total, selection, visible). The window is
+// where the frame's "constant height" comes from: the list can be any length,
+// the frame is always the same size.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The selection sits four rows down from the top of an 8-row window whenever
+/// there is room, so the rows above and below it both stay in view while the
+/// user scrolls through a long list (user story 12).
+#[test]
+fn the_window_recentres_the_selection_in_the_middle_of_the_view() {
+    assert_eq!(visible_window(20, 0, 8), 0..8);
+    assert_eq!(visible_window(20, 4, 8), 0..8);
+    assert_eq!(visible_window(20, 5, 8), 1..9);
+    assert_eq!(visible_window(20, 10, 8), 6..14);
+}
+
+/// Near the ends of the list the window cannot stay centred, so it pins to the
+/// end rather than scrolling past it — the frame never shows rows that do not
+/// exist.
+#[test]
+fn the_window_pins_to_the_ends_instead_of_scrolling_past_the_list() {
+    assert_eq!(visible_window(20, 19, 8), 12..20);
+    assert_eq!(visible_window(20, 12, 8), 8..16);
+    assert_eq!(visible_window(8, 7, 8), 0..8);
+}
+
+/// A list shorter than the window is shown whole, from the top. The window is
+/// never padded with rows that do not exist — padding is the frame's job, not
+/// the window's.
+#[test]
+fn a_short_list_is_shown_whole_from_the_top() {
+    assert_eq!(visible_window(3, 0, 8), 0..3);
+    assert_eq!(visible_window(3, 2, 8), 0..3);
+    assert_eq!(visible_window(0, 0, 8), 0..0);
+}
+
+/// A frame built for a terminal that cannot hold 8 rows shows fewer, but still
+/// one height for every query — the window shrinks, the frame does not jitter.
+#[test]
+fn a_short_terminal_shrinks_the_window_not_the_rule() {
+    let all = many_conns(20);
+    let short = Canvas::new(80, 9, ColorSupport::Truecolor); // 9 rows: 8 visible - 1
+    let frame = build_frame(&all, "", 12, FrameMode::Pick, short);
+
+    assert_eq!(
+        data_rows(&frame).len(),
+        5,
+        "a 9-row terminal leaves 5 list rows after the chrome and the prompt line"
+    );
+    assert_eq!(frame.lines().len(), 1 + 5 + 1 + 1);
+}
+
+/// The rows the frame emits are the window's rows, not the whole list: at
+/// selection 12 of 20 the frame shows rows 8..16 with the cursor four rows
+/// down from the top of the list area (user story 12).
+#[test]
+fn the_frame_emits_the_windowed_rows_with_the_cursor_centred() {
+    let all = many_conns(20);
+    let frame = build_frame(&all, "", 12, FrameMode::Pick, canvas(80));
+    let rows = data_rows(&frame);
+
+    assert_eq!(
+        rows.len(),
+        VISIBLE_ROWS,
+        "the frame shows the {VISIBLE_ROWS}-row window, got {rows:?}"
+    );
+    assert!(
+        rows[0].contains("c-08"),
+        "the window starts at row 8, got {rows:?}"
+    );
+    assert!(
+        rows[4].contains('❯') && rows[4].contains("c-12"),
+        "the selection sits four rows down from the top of the window: {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|r| r.contains("c-16")),
+        "rows past the window must not be emitted: {rows:?}"
+    );
+}
+
+/// The frame is the same height whatever the query matches: the list area is a
+/// fixed 8-row window padded with empty rail rows, so the hint rail and the
+/// corner never move as the list narrows or empties (user story 10).
+#[test]
+fn the_frame_is_the_same_height_whatever_the_query_matches() {
+    let all = many_conns(20);
+
+    let roomy = build_frame(&all, "", 0, FrameMode::Pick, canvas(80));
+    let narrow = build_frame(&all, "c-03", 0, FrameMode::Pick, canvas(80));
+    let none = build_frame(&all, "zzzznothing", 0, FrameMode::Pick, canvas(80));
+    let empty = build_frame(&[], "", 0, FrameMode::Pick, canvas(80));
+
+    for (label, frame) in [
+        ("20 matches", &roomy),
+        ("one match", &narrow),
+        ("no match", &none),
+        ("no Connections", &empty),
+    ] {
+        assert_eq!(
+            frame.lines().len(),
+            FRAME_LINES,
+            "{label}: the frame is {} lines, not the constant {FRAME_LINES}: {:?}",
+            frame.lines().len(),
+            frame_text(frame)
+        );
+    }
+}
+
+/// The padding is rail, not blank space: the `│` runs the full height of the
+/// frame so the corner closes a continuous rail whatever the list is doing.
+#[test]
+fn the_padded_rows_keep_the_rail_continuous() {
+    let frame = build_frame(&conns(), "", 0, FrameMode::Pick, canvas(80));
+    let body = &frame.lines()[1..frame.lines().len() - 2];
+
+    assert_eq!(
+        body.len(),
+        VISIBLE_ROWS,
+        "the list area is {VISIBLE_ROWS} rows: {:?}",
+        frame_text(&frame)
+    );
+    for line in body {
+        assert!(
+            line_text(line).starts_with('│'),
+            "every list-area row carries the rail, got {:?}",
+            line_text(line)
+        );
+    }
+}
+
+/// Fixture of `n` Connections, named `c-00..` so a window slice can be read
+/// straight out of the row text.
+fn many_conns(n: usize) -> Vec<Connection> {
+    (0..n)
+        .map(|i| Connection {
+            id: format!("{i}"),
+            alias: format!("c-{i:02}"),
+            host: format!("10.0.0.{i}"),
+            user: "deploy".into(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        })
+        .collect()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The width invariant (#34)
+//
+// The inline driver collapses the frame by row-diffing it, and that arithmetic
+// only works if one frame line is one physical terminal row. A line wider than
+// the canvas wraps, and a wrapped line breaks both the driver's row count and
+// the frame's constant height — so no line the frame emits may exceed the
+// canvas width, whatever the Connection data says.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A Connection whose every field is long enough to blow past a narrow canvas.
+fn bloated() -> Vec<Connection> {
+    vec![Connection {
+        id: "1".into(),
+        alias: "the-longest-alias-this-connection-has-ever-carried".into(),
+        host: "some.extremely.long.hostname.internal.example.com".into(),
+        user: "a-user-with-a-long-name".into(),
+        port: 2222,
+        key_path: None,
+        folder: Some("a-folder-name-for-completeness".into()),
+    }]
+}
+
+/// Whatever the Connection data, every line of a `width`-column frame fits in
+/// `width` columns. The hint rail already fitted itself; the rows must too.
+#[test]
+fn no_frame_line_is_wider_than_the_canvas() {
+    for width in [40, 60, 80] {
+        let frame = build_frame(&bloated(), "", 0, FrameMode::Pick, canvas(width));
+        for line in frame.lines() {
+            let w: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            assert!(
+                w <= width,
+                "a {width}-column canvas got a {w}-column line: {:?}",
+                line_text(line)
+            );
+        }
+    }
+}
+
+/// Truncation keeps the frame's shape: the rail still leads every body line,
+/// the header and corner survive, and the row still starts with its cursor
+/// column — it just loses its tail, not its grammar.
+#[test]
+fn a_fitted_row_keeps_its_rail_and_cursor_and_loses_only_its_tail() {
+    let frame = build_frame(&bloated(), "", 0, FrameMode::Pick, canvas(40));
+    let rows = data_rows(&frame);
+
+    assert_eq!(rows.len(), 1, "one Connection, one row");
+    assert!(
+        rows[0].starts_with("│ ❯ [a-folder-name-for-completeness]"),
+        "the row keeps its rail, cursor and folder prefix, got {:?}",
+        rows[0]
+    );
+    assert!(
+        !rows[0].contains("hostname"),
+        "the over-long tail was cut, got {:?}",
+        rows[0]
+    );
 }

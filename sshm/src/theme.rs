@@ -510,6 +510,25 @@ pub mod ansi {
         }
     }
 
+    /// Serialize one rendered line to its ANSI text, without a trailing newline.
+    ///
+    /// The inline driver (#34) draws row by row — it erases and rewrites the
+    /// rows a redraw actually changed — so it needs a line-level serializer
+    /// rather than the whole-buffer walk. Same [`RunWriter`], same bytes: a
+    /// `Style` cannot mean two different things depending on which surface it
+    /// is drawn on.
+    pub fn line_to_ansi(line: &ratatui::text::Line<'_>) -> String {
+        let mut out = String::new();
+        let mut runs = RunWriter::new(&mut out);
+
+        for span in &line.spans {
+            runs.push(span.style, &span.content);
+        }
+        out.push_str(RESET);
+
+        out
+    }
+
     /// Named ANSI colors as their 0..=15 index, for SGR emission.
     fn ansi_index(color: Color) -> Option<u8> {
         Some(match color {
