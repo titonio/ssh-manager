@@ -17,9 +17,11 @@ use sshm::frame::FrameMode;
 use sshm::inline::run_inline;
 
 /// A fixture, not the user's config: the window only proves anything when
-/// there are more rows than fit in it.
+/// there are more rows than fit in it — and one of those rows is written in
+/// two-column glyphs, because a wide alias is the case that breaks any
+/// row-count that was measured in characters.
 fn fixture() -> Vec<Connection> {
-    let rows: [(&str, &str, &str, u16, Option<&str>); 14] = [
+    let rows: [(&str, &str, &str, u16, Option<&str>); 15] = [
         ("web-01", "10.0.0.4", "deploy", 22, Some("prod")),
         ("web-02", "10.0.0.5", "deploy", 22, Some("prod")),
         ("db-primary", "10.0.1.10", "postgres", 5432, Some("prod")),
@@ -46,6 +48,8 @@ fn fixture() -> Vec<Connection> {
         ("loki", "logs.internal", "admin", 22, Some("obs")),
         ("dev-box", "localhost", "dev", 2222, None),
         ("edge-cache", "cdn.edge", "ops", 22, Some("prod")),
+        // Two columns per glyph: the row-count invariant's worst customer.
+        ("服务器-01", "10.9.9.9", "ops", 22, Some("生产")),
     ];
 
     rows.into_iter()

@@ -22,9 +22,11 @@ use std::rc::Rc;
 use ratatui::style::Modifier;
 use ratatui::text::Line;
 use sshm::config::Connection;
-use sshm::frame::{build_frame, fit_visible_rows, Canvas, FrameMode, FRAME_LINES, VISIBLE_ROWS};
+use sshm::frame::{
+    build_frame, fit_visible_rows, physical_rows, Canvas, FrameMode, FRAME_LINES, VISIBLE_ROWS,
+};
 use sshm::inline::{
-    diff_rows, plan_resize, settle_trace, Live, LiveFrame, ResizePlan, RowOp, Settle,
+    diff_rows, plan_resize, settle_trace, CursorGuard, Live, LiveFrame, ResizePlan, RowOp, Settle,
 };
 use sshm::theme::ColorSupport;
 
@@ -46,6 +48,16 @@ fn web01() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("prod".into()),
+    }
+}
+
+/// The same Connection with no folder — which is what the spec's example line
+/// is: story 8 says the folder prefix shows *only when a Connection has one*,
+/// so the folder-less trace is the one that reads verbatim.
+fn web01_without_folder() -> Connection {
+    Connection {
+        folder: None,
+        ..web01()
     }
 }
 
@@ -212,23 +224,43 @@ fn rows_beyond_the_live_frame_are_written_not_dropped() {
 // Seam: the settle trace
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The picked trace is the exact line the spec names, and it is one line — the
-/// whole live frame collapses to it.
+/// The picked trace keeps the folder the Connection has.
+///
+/// Story 8: the folder prefix shows *only when a Connection has one*. Story
+/// 27 keeps it in a settle trace (`◇ added [prod] web-01`). Dropping it is
+/// not a style choice — `config.rs` imposes no alias-uniqueness across
+/// folders, so `[prod] web-01` and a folder-less `web-01` would otherwise
+/// leave byte-identical traces and the user could not tell which Connection
+/// they actually picked.
 #[test]
-fn a_picked_connection_settles_to_the_trace_the_spec_names() {
+fn a_picked_connection_settles_to_a_trace_that_names_its_folder() {
     let trace = settle_trace(&Settle::Picked(web01()), canvas());
 
     assert_eq!(trace.len(), 1, "the settle trace is a single line");
     assert_eq!(
         line_text(&trace[0]),
+        "◆ picked  [prod] web-01  (deploy@10.0.0.4:22)",
+        "the trace must name the whole Connection, folder included"
+    );
+}
+
+/// A Connection with no folder leaves no empty brackets and no stray gap: the
+/// trace is the spec's worked example, verbatim (user story 13).
+#[test]
+fn a_folderless_connection_settles_to_the_trace_the_spec_names() {
+    let trace = settle_trace(&Settle::Picked(web01_without_folder()), canvas());
+
+    assert_eq!(trace.len(), 1);
+    assert_eq!(
+        line_text(&trace[0]),
         "◆ picked  web-01  (deploy@10.0.0.4:22)",
-        "the trace must be the spec's worked example, verbatim"
+        "the spec's example is a folder-less Connection and must read exactly so"
     );
 }
 
 /// The trace keeps the frame's emphasis grammar: the step icon carries the
-/// accent, the alias is bold, the host meta is dim. It reads as the same
-/// design system as the frame it replaced.
+/// accent, the alias is bold, the folder and host meta are dim. It reads as
+/// the same design system as the frame it replaced.
 #[test]
 fn the_picked_trace_keeps_the_frames_emphasis_grammar() {
     let trace = settle_trace(&Settle::Picked(web01()), canvas());
@@ -239,12 +271,23 @@ fn the_picked_trace_keeps_the_frames_emphasis_grammar() {
         "◆",
         "the trace opens with the Clack step icon"
     );
+    assert_eq!(
+        spans[0].style.fg,
+        Some(sshm::theme::Theme::clack().accent),
+        "◆ is the accent-role glyph in tokens.md; a trace may not quietly \
+         redraw it with a chrome-only role"
+    );
     assert!(
         span_with(spans, "web-01")
             .style
             .add_modifier
             .contains(Modifier::BOLD),
         "the alias stays bold, as it is in a row"
+    );
+    let meta = span_with(spans, "[prod] ");
+    assert!(
+        meta.style.add_modifier.contains(Modifier::DIM),
+        "the folder prefix recedes as meta, as it does in a row: {meta:?}"
     );
     let meta = span_with(spans, "(deploy@10.0.0.4:22)");
     assert!(
@@ -262,6 +305,28 @@ fn a_cancel_settles_to_a_cancel_trace() {
     assert_eq!(trace.len(), 1);
     assert_eq!(line_text(&trace[0]), "◆ cancelled");
     assert_eq!(trace[0].spans[0].content.as_ref(), "◆");
+}
+
+/// The cancel icon is state — it says *this step was abandoned* — so it may
+/// not be drawn with `border`, which `tokens.md` documents as "structural
+/// chrome only, carries no state". It wears the documented `◆` role.
+#[test]
+fn the_cancel_trace_draws_its_step_icon_in_the_documented_role() {
+    let theme = sshm::theme::Theme::clack();
+    let trace = settle_trace(&Settle::Cancelled, canvas());
+    let icon = &trace[0].spans[0];
+
+    assert_eq!(
+        icon.style.fg,
+        Some(theme.accent),
+        "the cancel `◆` must carry the accent role, not the stateless \
+         chrome role it is documented as not being"
+    );
+    assert_ne!(
+        icon.style.fg,
+        Some(theme.border),
+        "`border` is documented as carrying no state; a cancel icon is state"
+    );
 }
 
 /// The settle trace is part of the user's scrollback now, so it obeys the
@@ -359,6 +424,141 @@ fn a_terminal_too_short_to_hold_the_frame_cancels() {
     assert_eq!(plan_resize(live, 80, 4), ResizePlan::CancelAndRestore);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Seam: physical rows under a narrowing reflow
+//
+// `up(N)` and `\x1b[M` count *physical* rows on the glass. A row the frame
+// drew at 80 columns and the terminal then narrowed to 40 is two physical
+// rows, so a collapse that counts drawn rows erases the wrong number and
+// leaves the wrapped tails behind. This is the case the cancel-and-restore
+// fallback exists for, and it is the case the old code got wrong.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A row that no longer fits is re-wrapped by the terminal into more physical
+/// rows than it was drawn as.
+#[test]
+fn a_row_that_no_longer_fits_becomes_more_physical_rows() {
+    assert_eq!(physical_rows(40, 80), 1, "a row that fits is one row");
+    assert_eq!(physical_rows(80, 80), 1, "exactly full is still one row");
+    assert_eq!(physical_rows(81, 80), 2, "one column over is two rows");
+    assert_eq!(physical_rows(160, 80), 2);
+    assert_eq!(physical_rows(161, 80), 3);
+    assert_eq!(physical_rows(0, 80), 1, "a blank row still occupies a row");
+}
+
+/// The case the fallback exists for: the terminal narrows *after* the frame is
+/// drawn, the terminal re-wraps the rows that no longer fit, and the cancel
+/// still has to erase every one of them.
+#[test]
+fn a_narrowing_that_reflows_the_live_rows_still_cancels_clean() {
+    let (mut sink, view) = shared_screen("$ sshm ");
+    let frame = build_frame(&many(20), "", 0, FrameMode::Pick, canvas());
+
+    let mut live = LiveFrame::new(&mut sink);
+    live.open(&frame).unwrap();
+    assert_eq!(view.borrow().height(), 1 + FRAME_LINES);
+
+    // The terminal narrows. The model re-wraps the glass; the driver is told
+    // the new width so it can recount what it is standing on.
+    view.borrow_mut().reflow_to(40);
+    live.note_width(40);
+    assert!(
+        view.borrow().height() > 1 + FRAME_LINES,
+        "the narrowing must actually have re-wrapped a row, got {} rows",
+        view.borrow().height()
+    );
+
+    live.collapse(&settle_trace(&Settle::Cancelled, canvas()))
+        .unwrap();
+
+    assert_eq!(
+        view.borrow().rows(),
+        vec!["$ sshm ".to_string(), "◆ cancelled".to_string()],
+        "a cancel after a reflowing narrowing must leave the trace and \
+         nothing above it"
+    );
+}
+
+/// The same reflow, collapsed to a pick: the trace survives, the frame does
+/// not.
+#[test]
+fn a_narrowing_that_reflows_the_live_rows_still_settles_clean() {
+    let (mut sink, view) = shared_screen("$ sshm ");
+    let frame = build_frame(&many(20), "", 0, FrameMode::Pick, canvas());
+
+    let mut live = LiveFrame::new(&mut sink);
+    live.open(&frame).unwrap();
+    view.borrow_mut().reflow_to(40);
+    live.note_width(40);
+
+    live.collapse(&settle_trace(
+        &Settle::Picked(web01_without_folder()),
+        canvas(),
+    ))
+    .unwrap();
+
+    assert_eq!(
+        view.borrow().rows(),
+        vec![
+            "$ sshm ".to_string(),
+            "◆ picked  web-01  (deploy@10.0.0.4:22)".to_string(),
+        ],
+        "the settle trace must be all that survives the reflow: {:?}",
+        view.borrow().rows()
+    );
+}
+
+/// A widening re-wraps nothing: hard-newlined rows never un-wrap, so the
+/// driver's count stays honest and no erase is over-reached.
+#[test]
+fn a_widening_rewraps_nothing() {
+    let (mut sink, view) = shared_screen("$ sshm ");
+    let frame = build_frame(&many(20), "", 0, FrameMode::Pick, canvas());
+
+    let mut live = LiveFrame::new(&mut sink);
+    live.open(&frame).unwrap();
+    view.borrow_mut().reflow_to(120);
+    live.note_width(120);
+
+    assert_eq!(view.borrow().height(), 1 + FRAME_LINES);
+    live.collapse(&settle_trace(&Settle::Cancelled, canvas()))
+        .unwrap();
+    assert_eq!(
+        view.borrow().rows(),
+        vec!["$ sshm ".to_string(), "◆ cancelled".to_string()]
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Seam: the cursor guard's stream
+//
+// `$(sshm pick …)` captures stdout. A cursor restore written to a hardcoded
+// stdout lands in the pipe — corrupting the emitted selection — while the
+// real terminal's cursor stays hidden. Both halves of the guard have to go
+// to the writer the caller was given.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The hide and the restore both land on the injected writer, in that order.
+#[test]
+fn the_cursor_guard_hides_and_restores_on_the_writer_it_was_given() {
+    let mut sink: Vec<u8> = Vec::new();
+    {
+        let _guard = CursorGuard::new(&mut sink);
+    }
+    let text = String::from_utf8(sink).expect("the guard writes UTF-8");
+
+    let hid = text
+        .find("\x1b[?25l")
+        .expect("the guard never hid the cursor");
+    let shown = text
+        .find("\x1b[?25h")
+        .expect("the guard never restored the cursor on its writer");
+    assert!(
+        hid < shown,
+        "the cursor was restored before it was hidden: {text:?}"
+    );
+}
+
 /// A resize that shrinks the window but still fits re-opens at the smaller
 /// window — the frame follows the terminal, it does not cancel on a squeeze.
 #[test]
@@ -451,7 +651,7 @@ fn a_submit_collapses_the_live_frame_to_one_clean_line() {
         view.borrow().rows(),
         vec![
             "$ sshm ".to_string(),
-            "◆ picked  web-01  (deploy@10.0.0.4:22)".to_string(),
+            "◆ picked  [prod] web-01  (deploy@10.0.0.4:22)".to_string(),
         ],
         "the live list must be fully erased, leaving the trace and nothing else"
     );
@@ -613,6 +813,21 @@ struct Screen {
     entered_alternate_screen: bool,
 }
 
+/// Split `text` into chunks of at most `width` characters, always at least one.
+///
+/// The re-wrap a terminal performs on a narrowing, in this model's char-per
+/// cell terms. An empty line is still a line.
+fn wrap_columns(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return vec![String::new()];
+    }
+    chars.chunks(width).map(|c| c.iter().collect()).collect()
+}
+
 impl Screen {
     fn with_prompt(prompt: &str) -> Self {
         Self {
@@ -633,6 +848,37 @@ impl Screen {
 
     fn height(&self) -> usize {
         self.rows.len()
+    }
+
+    /// The same glass after the terminal narrowed (or widened) to `width`.
+    ///
+    /// A real terminal re-wraps every logical line that no longer fits, so a
+    /// frame drawn at 80 columns occupies *more* rows at 40 than it was
+    /// drawn as — which is exactly the fact the collapse has to know. The
+    /// inline driver hard-newlines every row and never soft-wraps, so each
+    /// row in this model is one logical line and reflow splits each one into
+    /// `ceil(len / width)` rows. The cursor rides on its logical line.
+    fn reflow_to(&mut self, width: usize) {
+        // The cursor may sit one row past the drawn content — the row the
+        // frame has not written into yet. That row is real space but not
+        // real content, so it stays off the row list.
+        let past_the_end = self.row >= self.rows.len();
+
+        let mut reflowed: Vec<String> = Vec::with_capacity(self.rows.len());
+        let mut cursor = 0usize;
+        for (i, text) in self.rows.iter().enumerate() {
+            let chunks = wrap_columns(text, width);
+            if i == self.row {
+                cursor = reflowed.len() + (self.col / width.max(1)).min(chunks.len() - 1);
+            }
+            reflowed.extend(chunks);
+        }
+        if past_the_end {
+            cursor = reflowed.len();
+        }
+
+        self.rows = reflowed;
+        self.row = cursor;
     }
 
     /// The terminal always has a row under the cursor; this model grows lazily.

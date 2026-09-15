@@ -106,11 +106,19 @@ regression.
 
 | Glyph | Role | Carries | Notes |
 |---|---|---|---|
-| `◆` | `accent` | The open step of the flow | Opens every frame: `◆ <question>` |
+| `◆` | `accent` | The step of the flow | Opens every frame: `◆ <question>`; also opens both settle traces (`◆ picked …`, `◆ cancelled`) |
 | `│` | `border` | The rail every body line hangs off | Chrome; never carries state |
 | `❯` | `accent` + `BOLD` | **Selection** | Blank (same width) on unselected rows |
 | `└` | `border` | Closes the rail | Chrome; the frame's last line |
 | `·` | `fg_muted` + `DIM` | Separates hint segments | Dropped with its segment, never stranded |
+
+`◆` is `accent` **wherever it appears**, including the cancel trace. That is
+not decoration: the cancel icon *is* state ("this step was abandoned"), and
+`border` is defined as structural chrome that carries none. A cancel that
+wore `border` would be a state-carrying glyph drawn in a stateless role —
+the exact drift the role table exists to catch. What distinguishes the two
+traces is the word after the icon, not a third colour; the Clack palette
+has no "abandoned" hue and inventing one is not on the table.
 
 Selection on this surface is the `❯` glyph plus a bold alias — never a filled
 row, because a transparent frame has no background to fill and a hue alone

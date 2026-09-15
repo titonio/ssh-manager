@@ -13,7 +13,18 @@ repo holds a UI change to.
 The screen model understands the sequences the inline driver emits (CUU/CUD,
 EL, DL, SGR, the cursor private modes) plus CR/LF/printables. Ambiguous-width
 glyphs (◆ │ ❯ └) are counted as one cell, as they render in a monospace
-terminal.
+terminal; East-Asian Wide/Fullwidth glyphs are counted as two, which is what
+makes the wide-character scenario mean something.
+
+Horizontal resize **reflows**, like a real terminal: every logical line is
+re-wrapped at the new width, so a row drawn at 80 columns occupies more
+physical rows at 60 than it was drawn as. The earlier version of this model
+truncated instead — which meant the harness never once exercised the case
+the driver's cancel-and-restore fallback exists for, and a test that cannot
+fail is not a test.
+
+Checks are printed as PASS/FAIL next to each dump and the script exits
+non-zero if any of them fails, so this is a gate as well as a look.
 """
 
 import fcntl
@@ -24,6 +35,7 @@ import struct
 import sys
 import termios
 import time
+import unicodedata
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(REPO, "sshm", "target", "debug", "examples", "inline_demo")
@@ -34,15 +46,62 @@ SCROLLBACK = [
     "prior scrollback: ls demo docs",
 ]
 
+# The row the demo's prompt sits on, and the row the frame opens on.
+PROMPT_ROW = len(SCROLLBACK)
+FRAME_ROW = PROMPT_ROW + 1
+
 DOWN = b"\x1b[B"
 UP = b"\x1b[A"
 ENTER = b"\r"
 ESC = b"\x1b"
 BACKSPACE = b"\x7f"
 
+CHECKS = []
+
+
+def check(label, ok, detail=""):
+    """Record a verdict so the run can both be looked at and be gated."""
+    CHECKS.append((label, ok))
+    print(f"    [{'PASS' if ok else 'FAIL'}] {label}" + (f" — {detail}" if detail else ""))
+    return ok
+
+
+def cell_width(ch):
+    """Cells a character occupies in a monospace terminal.
+
+    East Asian Wide and Fullwidth take two. Combining marks take none.
+    Ambiguous (`◆ │ ❯ └ ·`) take one, which is how they render in the
+    monospace terminals this project targets.
+    """
+    if unicodedata.combining(ch):
+        return 0
+    if unicodedata.east_asian_width(ch) in ("W", "F"):
+        return 2
+    return 1
+
+
+def display_width(text):
+    return sum(cell_width(c) for c in text)
+
+
+def wrap_logical(text, cols):
+    """Re-wrap one logical line into physical rows of at most `cols` cells."""
+    if cols <= 0:
+        return [text]
+    chunks, cur, used = [], [], 0
+    for ch in text:
+        w = cell_width(ch)
+        if used + w > cols and cur:
+            chunks.append("".join(cur))
+            cur, used = [], 0
+        cur.append(ch)
+        used += w
+    chunks.append("".join(cur))
+    return chunks
+
 
 class Screen:
-    """A minimal VT screen: rows x cols of characters, with a cursor."""
+    """A minimal VT screen: rows x cols of cells, with a cursor."""
 
     def __init__(self, rows, cols):
         self.rows = rows
@@ -148,9 +207,15 @@ class Screen:
     def _put(self, ch):
         while len(self.buf) <= self.r:
             self.buf.append([" "] * self.cols)
+        w = cell_width(ch)
         if self.c < self.cols:
             self.buf[self.r][self.c] = ch
-            self.c += 1
+            # A double-width glyph owns the cell after it as well; blanking it
+            # keeps the column arithmetic honest.
+            for k in range(1, w):
+                if self.c + k < self.cols:
+                    self.buf[self.r][self.c + k] = ""
+            self.c += w
 
     def _erase_line(self, mode):
         if self.r >= len(self.buf):
@@ -177,28 +242,41 @@ class Screen:
     def resized(self, rows, cols):
         """The same screen after the window changed shape.
 
-        Real terminals anchor the *cursor* across a vertical resize: on a
-        shrink the viewport keeps the cursor visible and content above it
-        scrolls out (into scrollback this model does not track); on a grow
-        the cursor keeps its row and blank rows appear at the bottom.
-        Horizontal resize truncates here; real terminals reflow, which is
-        exactly why the driver's `widest` check cancels rather than trusting
-        its row count across a narrowing.
+        Vertical: the viewport keeps the cursor visible. On a shrink the
+        content above it scrolls out (into scrollback this model does not
+        track); on a grow blank rows appear at the bottom.
+
+        Horizontal: **reflow**. Every logical line is re-wrapped at the new
+        width, so a row drawn at 80 columns becomes two physical rows at 40
+        and the frame occupies more of the glass than it was drawn as. The
+        inline driver hard-newlines every row and never soft-wraps, so each
+        row of this buffer is one logical line. The cursor rides on its own
+        logical line through the re-wrap.
         """
+        logical = ["".join(r).rstrip() for r in self.buf]
+        # The cursor may sit one row past the drawn content — real space,
+        # but no content of its own.
+        past_end = self.r >= len(logical)
+
+        reflowed = []
+        cursor = 0
+        for i, line in enumerate(logical):
+            chunks = wrap_logical(line, cols)
+            if i == self.r:
+                chunk = min(self.c // max(cols, 1), len(chunks) - 1)
+                cursor = len(reflowed) + chunk
+            reflowed.extend(chunks)
+        if past_end:
+            cursor = len(reflowed)
+
         s = Screen(rows, cols)
-        if rows < len(self.buf):
-            # Keep the window that contains the cursor, anchored at its bottom.
-            keep_from = max(0, min(self.r - (rows - 1), len(self.buf) - rows))
-            src_slice = self.buf[keep_from:]
-            s.r = self.r - keep_from
-        else:
-            src_slice = self.buf
-            s.r = self.r
-        for i in range(min(rows, len(src_slice))):
-            src = src_slice[i]
-            for j in range(min(cols, len(src))):
-                s.buf[i][j] = src[j]
-        s.c = min(self.c, cols - 1)
+        start = max(0, min(cursor - (rows - 1), max(0, len(reflowed) - rows)))
+        for i in range(rows):
+            src = start + i
+            if src < len(reflowed):
+                for j, ch in enumerate(reflowed[src][:cols]):
+                    s.buf[i][j] = ch
+        s.r = cursor - start
         s.alt_screen = self.alt_screen
         return s
 
@@ -209,6 +287,19 @@ class Screen:
             if r.strip():
                 last = i
         return last + 1
+
+    def frame_rows(self):
+        """Non-blank rows from the frame's own region down.
+
+        The demo reports its outcome on stderr (`[demo] Picked(...)`), which
+        lands on the glass right after the settle trace. It is harness
+        output, not frame output, so it is not counted here.
+        """
+        return [
+            r
+            for r in self.text()[FRAME_ROW:]
+            if r.strip() and not r.startswith("[demo]")
+        ]
 
 
 class Demo:
@@ -267,6 +358,19 @@ class Demo:
         self.screen = self.screen.resized(rows, cols)
         self.pump(settle)
 
+    def reflow_only(self, rows, cols):
+        """Resize and reflow the model, but do not let the driver answer yet.
+
+        The terminal re-wraps the glass the instant the window changes; the
+        driver finds out afterwards, via SIGWINCH. Splitting the two is what
+        lets the reflow itself be looked at before the fallback erases it —
+        otherwise every dump after a narrowing shows the aftermath and the
+        thing under test is never visible at all.
+        """
+        self._set_size(self.master, rows, cols)
+        self.rows, self.cols = rows, cols
+        self.screen = self.screen.resized(rows, cols)
+
     def dump(self, label):
         rows = self.screen.text()
         print(f"\n=== {label}  ({self.cols}x{self.rows}) ===")
@@ -281,25 +385,38 @@ def scenario_pick():
     d = Demo(["pick"])
     d.pump(0.6)
     d.dump("A. frame opened (below the prompt, prior scrollback intact)")
+    check("no alternate screen", not d.screen.alt_screen)
+    check("frame opens below the prompt line",
+          d.screen.text()[PROMPT_ROW] == "$", repr(d.screen.text()[PROMPT_ROW]))
 
     for _ in range(6):
         d.send(DOWN, 0.12)
-    d.dump("B. selection 6 of 14 — window slid to 2..10, selection centred")
+    d.dump("B. selection 6 of 15 — window slid to 2..10, selection centred")
 
     for _ in range(8):
         d.send(DOWN, 0.12)
-    d.dump("C. selection pinned at the end — window 6..14, height unchanged")
+    d.dump("C. selection pinned at the end — window 7..15, height unchanged")
 
+    height = len(d.screen.frame_rows())
     for ch in "web":
         d.send(ch.encode(), 0.2)
     d.dump("D. typed 'web' — narrowed to 2 rows, frame still 11 lines")
+    check("height constant across narrowing", len(d.screen.frame_rows()) == height,
+          f"{height} -> {len(d.screen.frame_rows())}")
 
     d.send(BACKSPACE, 0.2)
     d.send(BACKSPACE, 0.2)
     d.dump("E. backspaced to 'w' — list widened again, height unchanged")
+    check("height constant across widening", len(d.screen.frame_rows()) == height,
+          f"{height} -> {len(d.screen.frame_rows())}")
 
     d.send(ENTER, 0.5)
     d.dump("F. Enter — live list erased, settle trace only")
+    check("submit leaves exactly one frame row", len(d.screen.frame_rows()) == 1,
+          f"{len(d.screen.frame_rows())} rows: {d.screen.frame_rows()}")
+    check("the trace carries the folder prefix",
+          d.screen.frame_rows()[0].startswith("◆ picked  ["),
+          d.screen.frame_rows()[0])
 
 
 def scenario_cancel():
@@ -309,6 +426,10 @@ def scenario_cancel():
     d.dump("G. typed 'sta' before cancelling")
     d.send(ESC, 0.5)
     d.dump("H. Esc — cancel trace, nothing left behind")
+    check("cancel leaves exactly one frame row", len(d.screen.frame_rows()) == 1,
+          f"{d.screen.frame_rows()}")
+    check("cancel trace is '◆ cancelled'",
+          d.screen.frame_rows()[0] == "◆ cancelled", d.screen.frame_rows()[0])
 
 
 def scenario_resize():
@@ -320,6 +441,8 @@ def scenario_resize():
 
     d.resize(30, 100)
     d.dump("J. 100x30 — re-opened, query and selection kept")
+    check("re-opened frame keeps the query", "web" in "\n".join(d.screen.frame_rows()),
+          "query survived the resize")
 
     d.resize(11, 100)
     d.dump("K. 100x11 — re-opened SMALLER (7 visible rows), query and selection kept")
@@ -327,16 +450,91 @@ def scenario_resize():
     d.resize(24, 100)
     d.dump("L. back to 100x24 — re-opened at 8 visible rows again")
 
-    d.resize(24, 60)
-    d.dump("M. 60x24 — a live row would have to wrap: cancel-and-restore")
+
+def scenario_reflow():
+    """The case the cancel-and-restore fallback exists for.
+
+    The terminal narrows *after* the frame is drawn. The rows that no longer
+    fit are re-wrapped by the terminal into more physical rows before the
+    driver is told, so a collapse that counts the rows it drew erases too
+    few and leaves the frame's tail sitting above the trace.
+    """
+    d = Demo(["pick"])
+    d.pump(0.6)
+    before = d.screen.nonblank_height()
+    d.dump("M. 80x24 before the narrowing")
+
+    d.reflow_only(24, 60)
+    mid = d.screen.nonblank_height()
+    d.dump("N. narrowed to 60 — the hint rail re-wrapped, so the frame now "
+           "occupies MORE physical rows than it was drawn as")
+    check("the narrowing really did reflow (frame grew on the glass)",
+          mid > before, f"{before} -> {mid} non-blank rows")
+
+    d.pump(0.8)
+    d.dump("O. the driver's cancel-and-restore after the reflow")
+    trace = d.screen.text()[FRAME_ROW]
+    check("the trace landed exactly on the frame's own first row",
+          trace == "◆ cancelled", repr(trace))
+    check("clean cancel after a reflowing narrowing — no surviving rows",
+          "│" not in "\n".join(d.screen.text()[PROMPT_ROW:])
+          and "└" not in "\n".join(d.screen.text()[PROMPT_ROW:]),
+          "no rail fragment and no corner left below the prompt")
+    check("nothing survived above the trace",
+          all(not r.strip() for r in d.screen.text()[FRAME_ROW + 2:]),
+          "the rows under the settle are empty")
+
+
+def scenario_wide_chars():
+    """A CJK alias must not break the collapse.
+
+    A wide glyph is one `char` and two columns. Measuring rows in characters
+    under-counts them, the row wraps, and the `up(N)` / `\\x1b[M` counts
+    stop matching the glass.
+    """
+    d = Demo(["pick"])
+    d.pump(0.6)
+    d.send("服务器".encode("utf-8"), 0.4)
+    d.dump("P. typed a CJK query — the wide-character row is listed")
+    check("the wide-character row matched", "服务器-01" in "\n".join(d.screen.frame_rows()),
+          "CJK alias visible in the frame")
+
+    d.send(ENTER, 0.5)
+    d.dump("Q. Enter on the CJK alias — collapse must still be one clean line")
+    check("wide-character settle leaves one frame row", len(d.screen.frame_rows()) == 1,
+          f"{d.screen.frame_rows()}")
+    check("wide-character trace names the CJK folder and alias",
+          d.screen.frame_rows()[0] == "◆ picked  [生产] 服务器-01  (ops@10.9.9.9:22)",
+          d.screen.frame_rows()[0])
 
 
 def scenario_short_terminal():
     d = Demo(["pick"], rows=11, cols=80)
     d.pump(0.6)
-    d.dump("N. a short terminal: 7 visible rows, one constant height")
+    d.dump("R. a short terminal: 7 visible rows, one constant height")
     d.send(b"w", 0.4)
-    d.dump("O. same short terminal after typing — height unchanged")
+    d.dump("S. same short terminal after typing — height unchanged")
+
+
+def scenario_too_short_at_open():
+    """A terminal too short to host the frame must cancel cleanly at open.
+
+    Before the guard, `fit_visible_rows` returned `None`, `build_frame`
+    substituted zero visible rows, and the frame opened as three lines of
+    chrome with no list in it.
+    """
+    d = Demo(["pick"], rows=4, cols=80)
+    d.pump(0.8)
+    d.dump("T. a 4-row terminal: too short for a frame at all")
+    screen = "\n".join(d.screen.text())
+    check("no degenerate frame was drawn", "│" not in screen and "└" not in screen,
+          "no rail and no corner on screen")
+    # FRAME_ROW is meaningless here: a 4-row terminal scrolled the fake
+    # scrollback off the top, so look for the trace anywhere on the glass.
+    traces = [r for r in d.screen.text() if r.startswith("◆")]
+    check("the too-short open leaves the cancel trace and nothing else",
+          traces == ["◆ cancelled"], f"◆ lines on screen: {traces}")
+    check("no alternate screen on the too-short path", not d.screen.alt_screen)
 
 
 def main():
@@ -345,7 +543,10 @@ def main():
         "pick": scenario_pick,
         "cancel": scenario_cancel,
         "resize": scenario_resize,
+        "reflow": scenario_reflow,
+        "wide": scenario_wide_chars,
         "short": scenario_short_terminal,
+        "too-short": scenario_too_short_at_open,
     }
     if which == "all":
         for fn in scenarios.values():
@@ -353,6 +554,13 @@ def main():
     else:
         scenarios[which]()
 
+    failed = [label for label, ok in CHECKS if not ok]
+    print(f"\n{'=' * 60}")
+    print(f"checks: {len(CHECKS) - len(failed)}/{len(CHECKS)} passed")
+    for label in failed:
+        print(f"  FAILED: {label}")
+    return 1 if failed else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

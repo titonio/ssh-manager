@@ -19,6 +19,13 @@
 //! `NO_COLOR` or a 60-column terminal later without breaking its own signature
 //! — and #34 has to do exactly that.
 //!
+//! The geometry lives in [`fit`]: the row budget, the sliding window, the
+//! column-accurate line fitter, and how many physical rows a drawn line
+//! becomes once the terminal narrows under it. That split is deliberate —
+//! the grammar changes when the design changes, the geometry changes when
+//! the terminal mechanics do, and keeping them in one pile meant one file
+//! changing for two unrelated reasons.
+//!
 //! Three rules bind every span produced here:
 //!
 //! 1. **Colour comes from a `theme.rs` role, never a literal.** The frame
@@ -54,42 +61,152 @@ const GUTTER: usize = 1 + GUTTER_PAD.len();
 /// What separates two hints in the hint rail.
 const HINT_SEP: &str = " · ";
 
-/// The lines of a frame that are not list rows: the `◆` header, the hint rail
-/// and the `└` corner.
-pub const CHROME_LINES: usize = 3;
-
-/// The list rows a frame shows when the terminal has room for all of them.
+/// What a frame spends, and where it lands on the glass.
 ///
-/// Eight is the frame's shape, not a limit on the list: the list is a window
-/// over as many Connections as match, and the window slides ([`visible_window`])
-/// so the frame never has to grow to fit it.
-pub const VISIBLE_ROWS: usize = 8;
-
-/// The lines of a full frame: the 8-row list area plus the chrome around it.
+/// Everything that answers *how does this fit* lives here; everything that
+/// answers *what does it look like* stays out. The split is the one #34
+/// forced: #33 owns the Clack grammar above, #34 owns the geometry, and the
+/// two change for unrelated reasons — a new hint segment and a new resize
+/// rule should not have to live in the same handful of lines.
 ///
-/// The spec's "~12 lines" counts the blank line the frame opens on below the
-/// prompt (#34); the frame itself is eleven.
-pub const FRAME_LINES: usize = VISIBLE_ROWS + CHROME_LINES;
+/// The unit throughout is the **terminal column**, never the character. A CJK
+/// glyph is one `char` and two columns, and every count downstream of this
+/// module — `up(N)`, `\x1b[M` — is counted in the columns the terminal
+/// actually spent. Measuring in characters is what let a wide alias wrap a
+/// row the collapse could not count.
+pub mod fit {
+    use ratatui::text::{Line, Span};
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-/// The line the frame leaves for the user's own prompt.
-///
-/// An inline frame that ate the whole terminal would push the prompt off the
-/// top, which is the opposite of the reason it is inline.
-const PROMPT_LINES: usize = 1;
+    /// The lines of a frame that are not list rows: the `◆` header, the hint
+    /// rail and the `└` corner.
+    pub const CHROME_LINES: usize = 3;
 
-/// How many list rows a terminal `height` rows tall can show.
-///
-/// `None` means the terminal is too short to hold a frame at all — the caller
-/// has somewhere to go with that answer (#34's resize falls back to a clean
-/// cancel-and-restore) rather than drawing a frame with no room for a row.
-pub fn fit_visible_rows(terminal_height: usize) -> Option<usize> {
-    let room = terminal_height.saturating_sub(CHROME_LINES + PROMPT_LINES);
-    if room == 0 {
-        None
-    } else {
-        Some(room.min(VISIBLE_ROWS))
+    /// The list rows a frame shows when the terminal has room for all of them.
+    ///
+    /// Eight is the frame's shape, not a limit on the list: the list is a
+    /// window over as many Connections as match, and the window slides
+    /// ([`visible_window`]) so the frame never has to grow to fit it.
+    pub const VISIBLE_ROWS: usize = 8;
+
+    /// The lines of a full frame: the 8-row list area plus the chrome around it.
+    ///
+    /// The spec's "~12 lines" counts the blank line the frame opens on below
+    /// the prompt (#34); the frame itself is eleven.
+    pub const FRAME_LINES: usize = VISIBLE_ROWS + CHROME_LINES;
+
+    /// The line the frame leaves for the user's own prompt.
+    ///
+    /// An inline frame that ate the whole terminal would push the prompt off
+    /// the top, which is the opposite of the reason it is inline.
+    pub const PROMPT_LINES: usize = 1;
+
+    /// How many list rows a terminal `height` rows tall can show.
+    ///
+    /// `None` means the terminal is too short to hold a frame at all — the
+    /// caller has somewhere to go with that answer (the open path and the
+    /// resize path both fall back to a clean cancel-and-restore) rather than
+    /// drawing a frame with no room for a row.
+    pub fn fit_visible_rows(terminal_height: usize) -> Option<usize> {
+        let room = terminal_height.saturating_sub(CHROME_LINES + PROMPT_LINES);
+        if room == 0 {
+            None
+        } else {
+            Some(room.min(VISIBLE_ROWS))
+        }
+    }
+
+    /// The rows a fixed-height window shows for a given selection.
+    ///
+    /// The selection lands in the middle of the window — `visible / 2` rows
+    /// down from its top — and the window slides to keep it there while the
+    /// user walks the list. At either end it pins instead of scrolling past,
+    /// so the range is always clipped to `[0, total)` and never names a row
+    /// that does not exist.
+    ///
+    /// This is the whole of the frame's scrolling: the list may be any length,
+    /// the window is always `visible` rows, which is what lets the frame hold
+    /// one height while active (user story 12).
+    pub fn visible_window(
+        total: usize,
+        selection: usize,
+        visible: usize,
+    ) -> std::ops::Range<usize> {
+        if total == 0 || visible == 0 {
+            return 0..0;
+        }
+
+        let visible = visible.min(total);
+        let start = selection.saturating_sub(visible / 2).min(total - visible);
+
+        start..start + visible
+    }
+
+    /// Trim a line to `width` **display columns**, keeping the styles of what
+    /// survives.
+    ///
+    /// The cut falls where the budget runs out; the tail is dropped whole.
+    /// This is safe against the frame's grammar because everything meaningful
+    /// — the rail, the cursor, the folder prefix — sits at the *head* of a
+    /// line, so a fitted row loses its meta tail, never its structure.
+    ///
+    /// Truncating *every* line rather than just the ones known to overflow is
+    /// deliberate and load-bearing: the row-count invariant the settle-collapse
+    /// depends on is "one frame line = one physical row", and the only way to
+    /// guarantee it for arbitrary Connection data is to make the frame itself
+    /// the last line of defence rather than trusting that no row is too long.
+    pub fn fit_line(line: Line<'static>, width: usize) -> Line<'static> {
+        let mut spans = Vec::new();
+        let mut used = 0usize;
+
+        for span in line.spans {
+            if used + span.content.width() <= width {
+                used += span.content.width();
+                spans.push(span);
+                continue;
+            }
+
+            // The budget runs out inside this span. Keep the whole characters
+            // that still fit and drop the rest: half a wide glyph would render
+            // as a hole and occupy a column the row count does not know about.
+            let mut keep = String::new();
+            let mut kept = 0usize;
+            for ch in span.content.chars() {
+                let w = ch.width().unwrap_or(0);
+                if used + kept + w > width {
+                    break;
+                }
+                keep.push(ch);
+                kept += w;
+            }
+            if !keep.is_empty() {
+                spans.push(Span::styled(keep, span.style));
+            }
+            break;
+        }
+
+        Line::from(spans)
+    }
+
+    /// How many physical rows a drawn line of `columns` display columns
+    /// occupies in a terminal `width` columns wide.
+    ///
+    /// One while it fits; more once the terminal has narrowed under it and
+    /// re-wrapped it. The driver's `up(N)` / `\x1b[M` count physical rows,
+    /// so a collapse after a narrowing has to sum this across the drawn lines
+    /// instead of counting the lines it drew.
+    pub fn physical_rows(columns: usize, width: usize) -> usize {
+        if width == 0 {
+            return 1;
+        }
+        columns.div_ceil(width).max(1)
     }
 }
+
+pub use fit::{
+    fit_line, fit_visible_rows, physical_rows, visible_window, CHROME_LINES, FRAME_LINES,
+    VISIBLE_ROWS,
+};
 
 /// The terminal the frame is being drawn into.
 ///
@@ -133,27 +250,19 @@ impl Canvas {
     pub fn visible_rows(&self) -> Option<usize> {
         fit_visible_rows(self.height)
     }
-}
 
-/// The rows a fixed-height window shows for a given selection.
-///
-/// The selection lands in the middle of the window — `visible / 2` rows down
-/// from its top — and the window slides to keep it there while the user walks
-/// the list. At either end it pins instead of scrolling past, so the range is
-/// always clipped to `[0, total)` and never names a row that does not exist.
-///
-/// This is the whole of the frame's scrolling: the list may be any length, the
-/// window is always `visible` rows, which is what lets the frame hold one
-/// height while active (user story 12).
-pub fn visible_window(total: usize, selection: usize, visible: usize) -> std::ops::Range<usize> {
-    if total == 0 || visible == 0 {
-        return 0..0;
+    /// The columns the frame may spend: one fewer than the canvas owns.
+    ///
+    /// A narrowing terminal re-wraps any line that reaches its new right
+    /// edge, and a re-wrapped line stops being the single physical row the
+    /// driver counted it as. Spending at most `width - 1` means a
+    /// one-column narrowing re-wraps nothing, so the drawn row count stays
+    /// the physical row count and the collapse keeps its footing. This is
+    /// the cheap half of making the resize fallback clean; the honest row
+    /// count ([`physical_rows`]) is the other half.
+    pub fn fit_width(&self) -> usize {
+        self.width.saturating_sub(1)
     }
-
-    let visible = visible.min(total);
-    let start = selection.saturating_sub(visible / 2).min(total - visible);
-
-    start..start + visible
 }
 
 /// What the frame is being used for.
@@ -313,15 +422,19 @@ pub fn build_frame(
         }
     }
 
-    lines.push(hint_rail_line(mode, canvas.width, &t));
+    lines.push(hint_rail_line(mode, canvas.fit_width(), &t));
     lines.push(corner_line(&t));
 
-    // Nothing the frame emits may exceed the canvas: the inline driver's
-    // row-diff collapse (#34) counts one frame line as one physical row,
-    // and a wrapped line breaks that count — and the constant height with it.
+    // Nothing the frame emits may exceed the frame's own budget. The inline
+    // driver's row-diff collapse (#34) counts one frame line as one
+    // physical row, and a wrapped line breaks that count — and the constant
+    // height with it. The budget sits one column inside the canvas so a
+    // narrowing terminal has nothing to re-wrap either; see
+    // [`Canvas::fit_width`].
+    let budget = canvas.fit_width();
     let lines: Vec<Line<'static>> = lines
         .into_iter()
-        .map(|line| fit_line(line, canvas.width))
+        .map(|line| fit_line(line, budget))
         .collect();
 
     Frame {
@@ -330,34 +443,6 @@ pub fn build_frame(
         matched,
         selection,
     }
-}
-
-/// Trim a line to `width` display columns, keeping the styles of what survives.
-///
-/// The cut falls where the budget runs out; the tail is dropped whole. This
-/// is safe against the frame's grammar because everything meaningful — the
-/// rail, the cursor, the folder prefix — sits at the *head* of a line, so a
-/// fitted row loses its meta tail, never its structure.
-fn fit_line(line: Line<'static>, width: usize) -> Line<'static> {
-    let mut spans = Vec::new();
-    let mut used = 0usize;
-
-    for span in line.spans {
-        let w = span.content.chars().count();
-        if used + w <= width {
-            used += w;
-            spans.push(span);
-        } else {
-            let keep = width - used;
-            if keep > 0 {
-                let cut: String = span.content.chars().take(keep).collect();
-                spans.push(Span::styled(cut, span.style));
-            }
-            break;
-        }
-    }
-
-    Line::from(spans)
 }
 
 /// The `└` that closes the rail.

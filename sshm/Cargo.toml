@@ -10,6 +10,9 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 dirs = "5.0"
 fuzzy-matcher = "0.3"
+# Display width in terminal columns, not characters. The inline frame's
+# row-count invariant is counted in columns; `chars().count()` is not.
+unicode-width = "0.2"
 uuid = { version = "1.0", features = ["v4"] }
 self-github-update-enhanced = { version = "0.39", features = ["archive-tar", "archive-zip"] }
 tar = "0.4"

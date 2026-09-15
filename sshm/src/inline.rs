@@ -13,7 +13,7 @@
 //!   already made by the model; what is left is cursor arithmetic, so it is
 //!   kept to a handful of escape sequences and proved by running it.
 //!
-//! Three rules bind the whole module:
+//! Four rules bind the whole module:
 //!
 //! 1. **Never the alternate screen.** The frame lives inside the user's own
 //!    scrollback, so it must never ask for `?1049`. This path does not build a
@@ -24,7 +24,15 @@
 //!    change how many lines are on screen.
 //! 3. **Leave the line clean.** Every exit collapses the live rows away — the
 //!    rows that changed are rewritten, the rows that are gone are deleted — so
-//!    no orphan row or rail fragment survives the frame.
+//!    no orphan row or rail fragment survives the frame. "Clean" is counted in
+//!    *physical* rows, because a narrowing terminal re-wraps the glass before
+//!    it says so; [`LiveFrame::note_width`] is what stops the drawn count and
+//!    the physical count from drifting apart.
+//! 4. **One stream, both directions.** Everything the frame writes — rows,
+//!    cursor hide, cursor restore — goes to the writer the caller was given,
+//!    never to a hardcoded `stdout`. Under `result=$(sshm pick …)` stdout is
+//!    a pipe: a control sequence there corrupts the emitted selection, and the
+//!    real terminal keeps whatever state the restore was meant to undo.
 
 use std::io::{self, Write};
 
@@ -133,31 +141,48 @@ pub fn diff_rows(prev: &[Line<'static>], next: &[Line<'static>]) -> Vec<RowOp> {
 /// The one line a closed frame leaves behind.
 ///
 /// `◆ picked  web-01  (deploy@10.0.0.4:22)` is the spec's worked example
-/// (user story 13) and is emitted verbatim. The folder prefix is deliberately
-/// absent: the trace names the Connection the user is acting on, and the spec
-/// writes that line without it. A cancel leaves `◆ cancelled`.
+/// (user story 13) and is emitted verbatim for a Connection that has no
+/// folder. A Connection that *does* have one gets it back: story 8 says the
+/// folder prefix shows only when a Connection has one, story 27 keeps it in
+/// a settle trace (`◇ added [prod] web-01`), and `config.rs` imposes no
+/// alias-uniqueness across folders — so dropping it would leave
+/// `[prod] web-01` and a folder-less `web-01` with byte-identical traces
+/// and no way to tell which one was actually picked. A cancel leaves
+/// `◆ cancelled`.
 ///
-/// The emphasis is the frame's own grammar — accent step icon, bold alias, dim
-/// meta — so the trace reads as the same design system as the list it
+/// The emphasis is the frame's own grammar — accent step icon, bold alias,
+/// dim meta — so the trace reads as the same design system as the list it
 /// replaced, and carries its meaning with the colour turned off.
 pub fn settle_trace(settle: &Settle, canvas: Canvas) -> Vec<Line<'static>> {
     let t = Theme::clack().resolve(canvas.support);
+    // `◆` is the accent glyph in `tokens.md`. Both traces wear that role: the
+    // cancel icon is state ("this step was abandoned"), and `border` is
+    // documented as structural chrome that carries none.
     let icon = |role: ratatui::style::Color| Span::styled("◆", Style::default().fg(role));
     let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
 
     match settle {
-        Settle::Picked(conn) => vec![Line::from(vec![
-            icon(t.accent),
-            Span::raw(" picked  "),
-            Span::styled(
+        Settle::Picked(conn) => {
+            let mut spans = vec![icon(t.accent), Span::raw(" picked  ")];
+
+            if let Some(folder) = conn.folder.as_deref().filter(|f| !f.is_empty()) {
+                spans.push(Span::styled(format!("[{folder}] "), dim));
+            }
+
+            spans.push(Span::styled(
                 conn.alias.clone(),
                 Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(format!("({}@{}:{})", conn.user, conn.host, conn.port), dim),
-        ])],
+            ));
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                format!("({}@{}:{})", conn.user, conn.host, conn.port),
+                dim,
+            ));
+
+            vec![Line::from(spans)]
+        }
         Settle::Cancelled => vec![Line::from(vec![
-            icon(t.border),
+            icon(t.accent),
             Span::styled(" cancelled", dim),
         ])],
     }
@@ -180,15 +205,22 @@ const DELETE_ROW: &[u8] = b"\x1b[M";
 
 /// A live frame: the frame's lines, on the glass, in the user's own scrollback.
 ///
-/// The driver tracks how many rows it drew and how wide the widest one was,
-/// which is everything the next redraw and the next resize need. It never
-/// reads the terminal and never owns a viewport: it writes, and remembers what
-/// it wrote.
+/// The driver tracks how many rows it drew, how wide the widest one was, and
+/// how many *physical* rows those rows currently occupy — which is what the
+/// next redraw and the next resize need. It never reads the terminal and never
+/// owns a viewport: it writes, and remembers what it wrote.
 #[derive(Debug)]
 pub struct LiveFrame<'w, W: Write> {
     out: &'w mut W,
     drawn: Vec<Line<'static>>,
     widest: usize,
+    /// Physical rows the drawn rows currently stand on.
+    ///
+    /// Equal to `drawn.len()` while nothing has wrapped, and larger once a
+    /// narrowing has re-wrapped rows into two. Every `up(N)` and `\x1b[M`
+    /// the driver issues counts *this*, not the line count, because that is
+    /// what the terminal counts.
+    occupied: usize,
 }
 
 impl<'w, W: Write> LiveFrame<'w, W> {
@@ -198,6 +230,7 @@ impl<'w, W: Write> LiveFrame<'w, W> {
             out,
             drawn: Vec::new(),
             widest: 0,
+            occupied: 0,
         }
     }
 
@@ -209,6 +242,31 @@ impl<'w, W: Write> LiveFrame<'w, W> {
         }
     }
 
+    /// How many physical rows the drawn rows occupy at `width` columns.
+    ///
+    /// The frame's rows are hard-newlined, so each is its own logical line
+    /// and a terminal `width` columns wide re-wraps it into
+    /// [`physical_rows`] of its own. Summing that is the only honest way to
+    /// count what has to be erased after a narrowing.
+    pub fn physical_rows(&self, width: usize) -> usize {
+        self.drawn
+            .iter()
+            .map(|line| crate::frame::physical_rows(line.width(), width))
+            .sum()
+    }
+
+    /// Tell the driver the terminal is now `width` columns wide.
+    ///
+    /// The terminal re-wraps the rows already on the glass *before* it says
+    /// anything, so a narrowing silently turns N drawn rows into more than N
+    /// physical rows. This recomputes the count the collapse has to use.
+    /// Call it on every resize, before acting on the plan — otherwise the
+    /// rewind lands short, the trace prints mid-frame, and the wrapped tails
+    /// survive above it.
+    pub fn note_width(&mut self, width: usize) {
+        self.occupied = self.physical_rows(width);
+    }
+
     /// Open the frame on the line *below* the cursor.
     ///
     /// The leading newline is the whole of "renders below the prompt": the
@@ -217,6 +275,18 @@ impl<'w, W: Write> LiveFrame<'w, W> {
     pub fn open(&mut self, frame: &Frame) -> io::Result<()> {
         self.out.write_all(b"\r\n")?;
         self.paint(frame.lines())
+    }
+
+    /// Open straight into a settle trace, without ever drawing a live frame.
+    ///
+    /// The path a terminal too short to host the frame takes: it still lands
+    /// below the prompt and still leaves a trace, so a cancel reads the same
+    /// whether or not a frame ever drew. The alternative — opening a frame
+    /// whose list area collapsed to zero rows — leaves the user staring at
+    /// three lines of chrome with nothing in it.
+    pub fn open_settled(&mut self, trace: &[Line<'static>]) -> io::Result<()> {
+        self.out.write_all(b"\r\n")?;
+        self.paint(trace)
     }
 
     /// Redraw in place, writing only the rows the new frame changed.
@@ -230,10 +300,27 @@ impl<'w, W: Write> LiveFrame<'w, W> {
     ///
     /// The first row becomes the trace and every row below it is deleted, so
     /// the live list is gone rather than having been painted over.
+    ///
+    /// The rows below are counted *physically*, not as drawn lines. After a
+    /// narrowing reflow the glass holds more rows than the frame was drawn
+    /// with, and diffing the drawn lines against the trace would delete the
+    /// drawn surplus only — leaving the wrapped tails, and the `└`, sitting
+    /// above the trace.
     pub fn collapse(&mut self, trace: &[Line<'static>]) -> io::Result<()> {
         self.rewind()?;
-        let ops = diff_rows(&self.drawn, trace);
-        self.apply(&ops)
+
+        let mut painted = Vec::with_capacity(trace.len());
+        for line in trace {
+            self.write_row(line)?;
+            painted.push(line.clone());
+        }
+
+        let leftover = self.occupied.saturating_sub(painted.len());
+        if leftover > 0 {
+            self.out.write_all(format!("\x1b[{leftover}M").as_bytes())?;
+        }
+
+        self.commit(painted)
     }
 
     /// Tear the frame down and draw a new one where it stood, at whatever size
@@ -252,11 +339,15 @@ impl<'w, W: Write> LiveFrame<'w, W> {
     }
 
     /// Move the cursor back to the top of the live frame.
+    ///
+    /// Counts physical rows, not drawn lines: after a narrowing reflow the
+    /// two are not the same number, and the difference is exactly how far
+    /// short the rewind would otherwise land.
     fn rewind(&mut self) -> io::Result<()> {
-        if self.drawn.is_empty() {
+        if self.occupied == 0 {
             return Ok(());
         }
-        self.out.write_all(up(self.drawn.len()).as_bytes())
+        self.out.write_all(up(self.occupied).as_bytes())
     }
 
     /// Draw `lines` from where the cursor stands, one row per line.
@@ -308,7 +399,7 @@ impl<'w, W: Write> LiveFrame<'w, W> {
 
     /// Delete the rows the frame currently occupies.
     fn delete_live_rows(&mut self) -> io::Result<()> {
-        let rows = self.drawn.len();
+        let rows = self.occupied;
         if rows > 0 {
             self.out.write_all(format!("\x1b[{rows}M").as_bytes())?;
         }
@@ -316,13 +407,17 @@ impl<'w, W: Write> LiveFrame<'w, W> {
     }
 
     /// Record what is now on screen.
+    ///
+    /// `widest` is measured in display columns, not characters: a CJK alias
+    /// counts one per character and spends two per column, and the resize
+    /// decision is made against what the terminal actually ran out of.
     fn commit(&mut self, drawn: Vec<Line<'static>>) -> io::Result<()> {
-        self.widest = drawn
-            .iter()
-            .map(|line| line.spans.iter().map(|s| s.content.chars().count()).sum())
-            .max()
-            .unwrap_or(0);
+        self.widest = drawn.iter().map(|line| line.width()).max().unwrap_or(0);
         self.drawn = drawn;
+        // Whatever was just painted was painted at the width we are standing
+        // at, so it occupies exactly as many physical rows as there are
+        // lines. A later narrowing changes that; `note_width` re-reads it.
+        self.occupied = self.drawn.len();
         self.out.flush()
     }
 }
@@ -361,16 +456,39 @@ pub fn run_inline<W: Write>(
 
     let (width, height) = crossterm::terminal::size()?;
     let mut canvas = Canvas::detect(width as usize, height as usize);
+
+    // A terminal too short to host the frame never gets one. This is the
+    // same cancel-and-restore the resize path falls back to, applied at open:
+    // without it `build_frame` emits three lines of chrome wrapped around a
+    // list area that fitted zero rows, which is a degenerate frame rather
+    // than a clean refusal.
+    if canvas.visible_rows().is_none() {
+        let mut live = LiveFrame::new(out);
+        live.open_settled(&settle_trace(&Settle::Cancelled, canvas))?;
+        return Ok(InlineOutcome::Cancelled);
+    }
+
     let mut query = initial_query;
     let mut selection = 0usize;
-    let mut frame = build_frame(connections, &query, selection, mode, canvas);
-    selection = frame.selection();
+
+    // One place assembles the five inputs a frame is built from, and one
+    // place re-syncs the selection to whatever the frame clamped it to.
+    // Without it every call site re-typed the quintuple and had to remember
+    // that the selection it passed in is not necessarily the one it gets.
+    let build = |query: &str, selection: usize, canvas: Canvas| {
+        let frame = build_frame(connections, query, selection, mode, canvas);
+        let selection = frame.selection();
+        (frame, selection)
+    };
+
+    let (mut frame, synced) = build(&query, selection, canvas);
+    selection = synced;
 
     crossterm::terminal::enable_raw_mode()?;
     let _raw = RawModeGuard;
-    let _ = out.write_all(b"\x1b[?25l");
+    let mut cursor = CursorGuard::new(out);
 
-    let mut live = LiveFrame::new(out);
+    let mut live = LiveFrame::new(cursor.writer());
     live.open(&frame)?;
 
     loop {
@@ -403,16 +521,26 @@ pub fn run_inline<W: Write>(
                     _ => continue,
                 }
 
-                frame = build_frame(connections, &query, selection, mode, canvas);
-                selection = frame.selection();
+                let (next, synced) = build(&query, selection, canvas);
+                frame = next;
+                selection = synced;
                 live.redraw(&frame)?;
             }
             Event::Resize(width, height) => {
-                match plan_resize(live.geometry(), width as usize, height as usize) {
+                let (width, height) = (usize::from(width), usize::from(height));
+
+                // The terminal re-wrapped the rows on the glass before it
+                // told us. Recount before anything acts on the plan, so a
+                // collapse that follows erases the rows that are really
+                // there rather than the ones we remember drawing.
+                live.note_width(width);
+
+                match plan_resize(live.geometry(), width, height) {
                     ResizePlan::Reopen { .. } => {
-                        canvas = Canvas::detect(width as usize, height as usize);
-                        frame = build_frame(connections, &query, selection, mode, canvas);
-                        selection = frame.selection();
+                        canvas = Canvas::detect(width, height);
+                        let (next, synced) = build(&query, selection, canvas);
+                        frame = next;
+                        selection = synced;
                         live.reopen(&frame)?;
                     }
                     ResizePlan::CancelAndRestore => {
@@ -437,12 +565,51 @@ fn settle_cancel<W: Write>(
     Ok(InlineOutcome::Cancelled)
 }
 
-/// Puts the terminal back the way it was found, whatever the exit path.
+/// Hide the cursor while the frame is live.
+const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+
+/// Show the cursor again.
+const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+
+/// Hides the cursor on `out` for its life and puts it back on the *same*
+/// writer.
+///
+/// The two halves have to agree on the stream. The hide goes to the caller's
+/// writer because that is the stream the frame is drawn on; restoring on a
+/// hardcoded `stdout` would, under `result=$(sshm pick …)`, land the
+/// show-cursor SGR in the *pipe* — corrupting the emitted selection — while
+/// the real terminal's cursor stayed hidden. Owning the writer for the whole
+/// life of the guard is what keeps that split honest, which is the same split
+/// #35's captured-stdout contract rests on.
+pub struct CursorGuard<'w, W: Write> {
+    out: &'w mut W,
+}
+
+impl<'w, W: Write> CursorGuard<'w, W> {
+    /// Hide the cursor on `out`.
+    pub fn new(out: &'w mut W) -> Self {
+        let _ = out.write_all(HIDE_CURSOR);
+        Self { out }
+    }
+
+    /// The writer, borrowed for as long as the guard holds it.
+    fn writer(&mut self) -> &mut W {
+        self.out
+    }
+}
+
+impl<W: Write> Drop for CursorGuard<'_, W> {
+    fn drop(&mut self) {
+        let _ = self.out.write_all(SHOW_CURSOR);
+        let _ = self.out.flush();
+    }
+}
+
+/// Leaves raw mode whatever the exit path.
 struct RawModeGuard;
 
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = crossterm::terminal::disable_raw_mode();
-        let _ = std::io::stdout().write_all(b"\x1b[?25h");
     }
 }

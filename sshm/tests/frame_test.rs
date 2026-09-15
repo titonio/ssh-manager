@@ -69,8 +69,12 @@ fn frame_text(frame: &sshm::frame::Frame) -> Vec<String> {
 }
 
 /// Display width of a rendered line, in terminal columns.
+///
+/// Columns, not characters: a CJK glyph is one `char` and two columns. The
+/// inline driver's collapse counts *physical* rows, so every width decision
+/// has to be made in the unit the terminal actually spends.
 fn line_width(line: &Line<'static>) -> usize {
-    line.spans.iter().map(|s| s.content.chars().count()).sum()
+    line.width()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1118,12 +1122,77 @@ fn no_frame_line_is_wider_than_the_canvas() {
     for width in [40, 60, 80] {
         let frame = build_frame(&bloated(), "", 0, FrameMode::Pick, canvas(width));
         for line in frame.lines() {
-            let w: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+            let w = line_width(line);
             assert!(
                 w <= width,
                 "a {width}-column canvas got a {w}-column line: {:?}",
                 line_text(line)
             );
+        }
+    }
+}
+
+/// A Connection written in characters that occupy two terminal columns each.
+/// `chars().count()` calls the alias 3 wide; the terminal spends 6. Every
+/// width decision made in the wrong unit is a row that wraps and breaks the
+/// driver's physical-row count.
+fn wide_glyphs() -> Vec<Connection> {
+    vec![Connection {
+        id: "1".into(),
+        alias: "服务器".into(),
+        host: "10.0.0.4".into(),
+        user: "deploy".into(),
+        port: 22,
+        key_path: None,
+        folder: Some("生产".into()),
+    }]
+}
+
+/// A wide-character alias is measured in columns, not characters: at every
+/// width the frame fits inside, in the unit the terminal actually spends.
+#[test]
+fn a_wide_character_alias_is_measured_in_columns_not_characters() {
+    for width in 8..=80usize {
+        let frame = build_frame(&wide_glyphs(), "", 0, FrameMode::Pick, canvas(width));
+        for line in frame.lines() {
+            let w = line_width(line);
+            assert!(
+                w <= width,
+                "a {width}-column canvas got a {w}-column line from a wide-char \
+                 Connection: {:?}",
+                line_text(line)
+            );
+        }
+    }
+}
+
+/// The frame leaves one column of headroom against the canvas.
+///
+/// A narrowing terminal re-wraps any row that reaches its new right edge, and
+/// a re-wrapped row is no longer one physical row — which is precisely the
+/// case the resize fallback has to survive. Spending at most `width - 1`
+/// columns means a one-column narrowing re-wraps nothing, so the drawn row
+/// count stays the physical row count.
+#[test]
+fn every_frame_line_leaves_a_column_of_headroom_against_reflow() {
+    for (label, connections) in [
+        ("bloated", bloated()),
+        ("wide glyphs", wide_glyphs()),
+        ("normal", conns()),
+    ] {
+        for width in [40, 60, 80] {
+            // The most a line may spend on a `width`-column terminal.
+            let budget = width - 1;
+            let frame = build_frame(&connections, "", 0, FrameMode::Pick, canvas(width));
+            for line in frame.lines() {
+                let w = line_width(line);
+                assert!(
+                    w <= budget,
+                    "{label} at {width} columns: line is {w} wide, no headroom \
+                     left against a narrowing reflow: {:?}",
+                    line_text(line)
+                );
+            }
         }
     }
 }
