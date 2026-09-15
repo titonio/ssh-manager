@@ -383,6 +383,7 @@ fn dump_frames_for_review() {
                 &FrameFlow {
                     confirming: Some(c[0].clone()),
                     trace: None,
+                    add: None,
                 },
             ),
         ),
@@ -399,6 +400,7 @@ fn dump_frames_for_review() {
                     trace: Some(sshm::manage::Trace::Deleted {
                         connection: c[0].clone(),
                     }),
+                    add: None,
                 },
             ),
         ),
@@ -415,6 +417,7 @@ fn dump_frames_for_review() {
                     trace: Some(sshm::manage::Trace::DeleteFailed {
                         connection: c[0].clone(),
                     }),
+                    add: None,
                 },
             ),
         ),

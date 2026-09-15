@@ -69,6 +69,10 @@ fn plain(ch: char) -> crossterm::event::KeyEvent {
     crossterm::event::KeyEvent::new(KeyCode::Char(ch), crossterm::event::KeyModifiers::NONE)
 }
 
+fn key(code: KeyCode) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+}
+
 /// Render the manage frame for whatever state the interaction is in.
 fn render(state: &ManageState) -> sshm::frame::Frame {
     build_frame_with_flow(
@@ -338,37 +342,343 @@ fn a_short_terminal_drops_the_settled_line_before_the_note() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The `Ctrl+A` add step-sequence (#37)
+//
+// The same grammar the delete confirm established, applied five times:
+// `◆` asks on the header, `◇` records what was answered, and the note
+// about the write only appears once the write has been reported.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Type `text` into the live step, then press Enter.
+fn answer(state: &ManageState, text: &str) -> ManageState {
+    let mut typed = state.clone();
+    for ch in text.chars() {
+        typed = step(&typed, plain(ch), Some(&web01())).state;
+    }
+    step(&typed, key(KeyCode::Enter), Some(&web01())).state
+}
+
+/// Type `text` into the live step and leave it there.
+fn typed(state: &ManageState, text: &str) -> ManageState {
+    let mut s = state.clone();
+    for ch in text.chars() {
+        s = step(&s, plain(ch), Some(&web01())).state;
+    }
+    s
+}
+
+/// The state with Alias and Host answered: the live step is Port.
+fn at_port() -> ManageState {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+    answer(&answer(&adding.state, "web-01"), "10.0.0.4")
+}
+
+/// The state with Alias, Host and Port answered: the live step is Key.
+fn at_key() -> ManageState {
+    answer(&at_port(), "2222")
+}
+
+/// The state with everything but Folder answered: the live step is Folder,
+/// the last of the five.
+fn at_folder() -> ManageState {
+    answer(&at_key(), "~/.ssh/id_ed25519")
+}
+
+#[test]
+fn the_add_step_header_is_the_step_with_what_has_been_typed() {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+
+    let frame = render(&typed(&adding.state, "web-01"));
+
+    assert_eq!(
+        line_text(&frame.lines()[0]),
+        "◆ Alias  web-01_",
+        "one line, one ask — and the caret the frame draws for itself, \
+         because it hides the hardware one"
+    );
+}
+
+#[test]
+fn an_untouched_step_shows_just_the_ask_and_the_caret() {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+
+    let frame = render(&adding.state);
+
+    assert_eq!(line_text(&frame.lines()[0]), "◆ Alias  _");
+}
+
+#[test]
+fn a_settled_step_leaves_a_diamond_trace_naming_its_value() {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+
+    let frame = render(&answer(&adding.state, "web-01"));
+
+    assert!(
+        frame_text(&frame)
+            .iter()
+            .any(|l| l.starts_with("│   ◇ Alias   web-01")),
+        "the answered step settles to ◇, got {:?}",
+        frame_text(&frame)
+    );
+}
+
+#[test]
+fn the_settled_steps_line_up_down_the_sequence() {
+    let frame = render(&at_port());
+
+    let text = frame_text(&frame);
+    let alias = text
+        .iter()
+        .find(|l| l.contains("Alias"))
+        .expect("Alias settled line");
+    let host = text.iter().find(|l| l.contains("Host")).expect("Host settled line");
+
+    // `◇ Alias   web-01` / `◇ Host    10.0.0.4` — the values start in
+    // the same column, so the eye reads down a column of answers rather
+    // than chasing a ragged right edge of labels.
+    assert_eq!(alias.find("web-01").unwrap(), host.find("10.0.0.4").unwrap());
+}
+
+/// An optional field the user left empty is drawn as *absent*, not as
+/// nothing. A blank after `◇ Key` reads as a step that lost its answer.
+#[test]
+fn an_absent_optional_field_is_drawn_as_absent_not_blank() {
+    let after_key = answer(&at_key(), "");
+
+    let frame = render(&after_key);
+
+    assert!(
+        frame_text(&frame)
+            .iter()
+            .any(|l| l.starts_with("│   ◇ Key     —")),
+        "an empty optional field settles visibly as absent, got {:?}",
+        frame_text(&frame)
+    );
+}
+
+#[test]
+fn a_refused_answer_is_shown_under_the_header_in_the_warning_role() {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+
+    let refused = step(&adding.state, key(KeyCode::Enter), Some(&web01()));
+    let frame = render(&refused.state);
+
+    let joined = frame_text(&frame).join("\n");
+    assert!(
+        joined.contains("! alias is required"),
+        "the refusal is on the glass, got {joined}"
+    );
+
+    let t = sshm::theme::Theme::clack();
+    let glyph = line_with(&frame, '!')
+        .spans
+        .iter()
+        .find(|s| s.content.contains('!'))
+        .expect("the ! glyph span");
+    assert_eq!(
+        glyph.style.fg,
+        Some(t.warning),
+        "the refusal wears the warning role, not a hue of its own"
+    );
+}
+
+/// The refusal is the last thing dropped-and-kept: a terminal too short
+/// for the whole sequence history keeps the reason the user is stuck and
+/// drops the oldest settled step instead.
+#[test]
+fn a_short_terminal_keeps_the_refusal_over_the_settled_history() {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+    let deep = answer(&answer(&adding.state, "web-01"), "");
+
+    let short = build_frame_with_flow(
+        &conns(),
+        "",
+        0,
+        FrameMode::Manage,
+        Canvas::new(120, 6, ColorSupport::Truecolor),
+        &FrameFlow::from(&deep),
+    );
+
+    let joined = frame_text(&short).join("\n");
+    assert!(
+        joined.contains("host is required"),
+        "the reason survives the squeeze, got {joined}"
+    );
+}
+
+/// The ticket's string, earned the way the `◇ deleted` note earns its own.
+#[test]
+fn the_added_note_is_the_ticket_s_own_string() {
+    let finalised = answer(&at_folder(), "prod");
+    let settled = manage::settle_add(&finalised, Ok(web01()))
+        .expect("a Connection that was really written settles onto the list");
+
+    let frame = render(&settled);
+
+    let text = frame_text(&frame);
+    let note = text
+        .iter()
+        .find(|l| l.contains('◇'))
+        .unwrap_or_else(|| panic!("no ◇ note in {text:?}"));
+
+    assert_eq!(
+        note.trim_start_matches('│').trim(),
+        "◇ added [prod] web-01",
+        "the note is the ticket's string"
+    );
+}
+
+/// The honesty rule at the frame level: a sequence that finished without
+/// the store's answer shows no `added` note, and an abandoned one shows
+/// nothing that could be read as a write.
+#[test]
+fn nothing_claims_an_add_before_the_store_says_so() {
+    let finalised = answer(&at_folder(), "prod");
+
+    let joined = frame_text(&render(&finalised)).join("\n");
+    assert!(
+        !joined.contains("added"),
+        "the frame claimed a write the store has not confirmed: {joined}"
+    );
+
+    // A sequence backed off its first step with a partial answer in it.
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+    let abandoned = step(&typed(&adding.state, "web"), key(KeyCode::Esc), Some(&web01()));
+
+    let joined = frame_text(&render(&abandoned.state)).join("\n");
+    assert!(
+        !joined.contains("added"),
+        "an abandoned sequence must not read as an added Connection: {joined}"
+    );
+    assert!(
+        joined.contains("nothing saved"),
+        "it must say the opposite instead: {joined}"
+    );
+}
+
+/// The constant-height contract (#34) holds across every step of the
+/// sequence, including the ones carrying four settled traces and a
+/// refusal.
+#[test]
+fn the_add_sequence_never_grows_the_frame() {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+
+    let mut states = vec![("Alias, empty", adding.state.clone())];
+    let mut cursor = adding.state.clone();
+    for label in ["Alias", "Host", "Port", "Key"] {
+        cursor = answer(&cursor, "x");
+        states.push((label, cursor.clone()));
+        let refused = step(&cursor, key(KeyCode::Enter), Some(&web01()));
+        states.push((label, refused.state.clone()));
+    }
+
+    for (label, state) in states {
+        let frame = render(&state);
+        assert_eq!(
+            frame.lines().len(),
+            FRAME_LINES,
+            "{label}: the frame grew past its constant height"
+        );
+    }
+}
+
+/// Every glyph the sequence carries survives the colour being turned off.
+#[test]
+fn the_add_sequence_survives_monochrome() {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+    let deep = answer(&answer(&adding.state, "web-01"), "");
+
+    let mono = build_frame_with_flow(
+        &conns(),
+        "",
+        0,
+        FrameMode::Manage,
+        Canvas::new(120, 24, ColorSupport::Monochrome),
+        &FrameFlow::from(&deep),
+    );
+    let joined = frame_text(&mono).join("\n");
+
+    assert!(joined.contains('◆'), "the live step glyph vanished: {joined}");
+    assert!(joined.contains('◇'), "the settled trace vanished: {joined}");
+    assert!(
+        joined.contains('!') && joined.contains("host is required"),
+        "the refusal vanished: {joined}"
+    );
+    assert!(
+        joined.contains('_'),
+        "the caret vanished: {joined}"
+    );
+}
+
+/// The rail during a step names only what that step reads, escape hatch
+/// first. `Ctrl+X delete` is *not* among them: the add step ignores that
+/// chord, and a hint for a key the step does not read is the one thing
+/// this frame has promised twice already not to do.
+#[test]
+fn the_add_step_rail_names_only_what_the_step_reads() {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+
+    let frame = render(&adding.state);
+    let rail = line_text(frame.lines().iter().rev().nth(1).expect("hint rail"));
+
+    for live in ["Esc back", "Enter next", "Ctrl+C quit"] {
+        assert!(rail.contains(live), "missing {live:?} from {rail:?}");
+    }
+    for not_live in ["Ctrl+X delete", "y confirm"] {
+        assert!(
+            !rail.contains(not_live),
+            "{not_live:?} is not a key this step reads: {rail:?}"
+        );
+    }
+}
+
+/// On the last step the same key means something different, and the rail
+/// says the different thing.
+#[test]
+fn the_last_step_s_rail_says_what_enter_does_there() {
+    let frame = render(&at_folder());
+    let rail = line_text(frame.lines().iter().rev().nth(1).expect("hint rail"));
+
+    assert!(rail.contains("Enter add"), "the last step commits: {rail:?}");
+    assert!(!rail.contains("Enter next"), "there is no next: {rail:?}");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // The add route's note
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn the_add_route_answers_visibly() {
+/// `Ctrl+A` answers its chord by putting the first step on the glass.
+/// The visible answer to the chord *is* the live step now (#37), not a
+/// note about one.
+#[test]
+fn ctrl_a_answers_visibly_by_opening_the_sequence() {
     let added = step(&ManageState::new(), ctrl('a'), Some(&web01()));
 
     let frame = render(&added.state);
     let joined = frame_text(&frame).join("\n");
 
     assert!(
-        joined.contains('◇') && joined.contains("add"),
-        "Ctrl+A must leave a visible dim answer, got {joined}"
+        joined.contains("◆ Alias"),
+        "Ctrl+A must open the first step on the glass, got {joined}"
     );
     assert!(
         !joined.contains("deleted"),
-        "the add note must not read as a delete: {joined}"
+        "the add step must not read as a delete: {joined}"
     );
 }
 
 /// The rail lists only keys that actually work in this build.
 ///
-/// `Ctrl+A add` and `Ctrl+E edit` were advertised while neither performed
-/// the action its label names: `Ctrl+A` printed a "not built yet" note, and
-/// `Ctrl+E` exited with `◆ picked`, byte-identical to Enter. The rule this
-/// frame states for itself — *never hint a key the frame does not read* — is
-/// not satisfied by a key that is read and then answers "not built yet".
-/// A hint is a promise about what the key does, and both of these broke it.
+/// `Ctrl+A add` is back (#37): the chord now walks the five-step
+/// sequence and writes the Connection, which is the thing its label has
+/// always claimed.
 ///
-/// #37 restores both when they do what they say. Until then the rail names
-/// `Ctrl+X delete`, which really deletes, and nothing else that is not real.
+/// `Ctrl+E edit` is still off it. The chord is read, and what it does is
+/// leave the frame with the selection — byte-identical to Enter. The
+/// in-place single-field editor the label promises is the follow-on
+/// ticket, so the label stays off the rail until that lands. A hint is a
+/// promise about what the key does, and this one still does not keep it.
 #[test]
 fn the_manage_rail_advertises_only_the_keys_that_work() {
     let frame = render(&ManageState::new());
@@ -381,18 +691,22 @@ fn the_manage_rail_advertises_only_the_keys_that_work() {
             .expect("the frame has a hint rail"),
     );
 
-    for unfulfilled in ["Ctrl+A", "Ctrl+E"] {
-        assert!(
-            !rail.contains(unfulfilled),
-            "{unfulfilled} is advertised but does not perform its named action; \
-             it belongs back here when #37 builds it. Rail: {rail:?}"
-        );
-    }
+    assert!(
+        !rail.contains("Ctrl+E"),
+        "Ctrl+E is advertised but does not perform its named action; it \
+         belongs back here when the in-place editor is built. Rail: {rail:?}"
+    );
 
-    for working in ["Esc cancel", "Enter edit", "↑↓ navigate", "Ctrl+X delete"] {
+    for working in [
+        "Esc cancel",
+        "Enter edit",
+        "↑↓ navigate",
+        "Ctrl+X delete",
+        "Ctrl+A add",
+    ] {
         assert!(
             rail.contains(working),
-            "{working:?} works in this build and must stay on the rail: {rail:?}"
+            "{working:?} works in this build and must be on the rail: {rail:?}"
         );
     }
 }

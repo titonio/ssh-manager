@@ -20,7 +20,7 @@ use crate::config::{Config, Connection};
 /// Every field is a string because it arrives from keystroke-collected input, not
 /// from a parsed config file: the port is digits-as-text, and an optional field
 /// the user left alone is empty rather than absent.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConnectionDraft {
     pub alias: String,
     pub host: String,
@@ -140,6 +140,16 @@ pub trait Store {
     /// `Ok(None)` means no Connection had that id, so nothing was deleted
     /// and nothing was written — the same contract [`remove`] has.
     fn remove(&mut self, id: &str) -> Result<Option<Connection>, String>;
+
+    /// Build the Connection the draft describes, persist the set, and
+    /// return what was actually written (#37).
+    ///
+    /// The add half of the seam the frame's `◇ added` note rests on: the
+    /// frame asks, the store answers with the Connection it made — id
+    /// and all — or with an error. There is one implementation of "add a
+    /// Connection" in this crate and the frame does not get to write a
+    /// second one.
+    fn add(&mut self, draft: &ConnectionDraft) -> Result<Connection, String>;
 }
 
 impl Store for Config {
@@ -149,6 +159,10 @@ impl Store for Config {
 
     fn remove(&mut self, id: &str) -> Result<Option<Connection>, String> {
         remove(self, id)
+    }
+
+    fn add(&mut self, draft: &ConnectionDraft) -> Result<Connection, String> {
+        add(self, draft)
     }
 }
 
@@ -178,6 +192,15 @@ impl Store for Ephemeral {
     fn remove(&mut self, id: &str) -> Result<Option<Connection>, String> {
         let position = self.connections.iter().position(|c| c.id == id);
         Ok(position.map(|i| self.connections.remove(i)))
+    }
+
+    fn add(&mut self, draft: &ConnectionDraft) -> Result<Connection, String> {
+        // Built through the same `connection_from` the persisted path
+        // uses, so the row the harness shows is the row the real store
+        // would have written. Only the durability is absent.
+        let conn = connection_from(draft);
+        self.connections.push(conn.clone());
+        Ok(conn)
     }
 }
 

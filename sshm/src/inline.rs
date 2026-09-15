@@ -40,7 +40,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::config::Connection;
-use crate::connections::Store;
+use crate::connections::{ConnectionDraft, Store};
 use crate::frame::{
     build_frame_with_flow, fit_line, fit_visible_rows, Canvas, Frame, FrameFlow, FrameMode,
 };
@@ -80,6 +80,20 @@ pub enum Settle {
     Error {
         /// The Connection the failed action was about.
         connection: Connection,
+        /// The store's own reason, carried through verbatim.
+        message: String,
+    },
+    /// An add the store refused, named by the draft the user finished
+    /// typing rather than by a Connection that does not exist.
+    ///
+    /// The distinction matters because the whole point of the trace is
+    /// what it claims about `connections.json`: there is no Connection
+    /// here to name, only a draft that never became one. The line it
+    /// renders is the `◆ error` line all the same — the failure reads the
+    /// same shape whatever it was about.
+    AddFailed {
+        /// The draft that was refused.
+        draft: ConnectionDraft,
         /// The store's own reason, carried through verbatim.
         message: String,
     },
@@ -187,7 +201,7 @@ pub fn settle_trace(settle: &Settle, canvas: Canvas) -> Vec<Line<'static>> {
     let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
 
     match settle {
-        Settle::Picked(conn) => vec![connection_trace("picked", conn, &t)],
+        Settle::Picked(conn) => vec![connection_trace("picked", &TraceSubject::from(conn), &t)],
         Settle::Cancelled => vec![Line::from(vec![
             icon(t.accent),
             Span::styled(" cancelled", dim),
@@ -199,21 +213,34 @@ pub fn settle_trace(settle: &Settle, canvas: Canvas) -> Vec<Line<'static>> {
             // Built through `connection_trace` so the verb is read by the
             // `#31 Settled set` gate in `design_system_test.rs` rather
             // than sneaking past it.
-            let mut line = connection_trace("error", connection, &t);
-            let budget = canvas.fit_width();
-            // The reason is the only part of this line that comes from
-            // outside the program, so it is the only part that can arrive
-            // too long. It is cut to the room left over — with an ellipsis,
-            // because a message that simply stops reads as a message that
-            // finished — and the whole line is still fitted as a last
-            // defence: the collapse counts one settle line as one physical
-            // row, and a wrapped row strands half a message on the glass.
-            let reason = fit_reason(message, line.width(), budget);
-            if !reason.is_empty() {
-                line.spans.push(Span::styled(format!("  — {reason}"), dim));
-            }
-            vec![fit_line(line, budget)]
+            let mut line = connection_trace("error", &TraceSubject::from(connection), &t);
+            push_reason(&mut line, message, canvas.fit_width(), &t);
+            vec![fit_line(line, canvas.fit_width())]
         }
+        Settle::AddFailed { draft, message } => {
+            // The same `◆ error` line, with the draft in place of the
+            // Connection: the failure is the same failure, and a second
+            // shape for it would be a second grammar.
+            let mut line = connection_trace("error", &TraceSubject::from(draft), &t);
+            push_reason(&mut line, message, canvas.fit_width(), &t);
+            vec![fit_line(line, canvas.fit_width())]
+        }
+    }
+}
+
+/// Append the store's reason to an error trace, cut to the room left over.
+fn push_reason(line: &mut Line<'static>, message: &str, budget: usize, t: &Theme) {
+    // The reason is the only part of this line that comes from
+    // outside the program, so it is the only part that can arrive
+    // too long. It is cut to the room left over — with an ellipsis,
+    // because a message that simply stops reads as a message that
+    // finished — and the whole line is still fitted as a last
+    // defence: the collapse counts one settle line as one physical
+    // row, and a wrapped row strands half a message on the glass.
+    let reason = fit_reason(message, line.width(), budget);
+    if !reason.is_empty() {
+        let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+        line.spans.push(Span::styled(format!("  — {reason}"), dim));
     }
 }
 
@@ -240,6 +267,50 @@ fn fit_reason(message: &str, used: usize, budget: usize) -> String {
     kept
 }
 
+/// What a settle trace is about, in the five fields the line renders.
+///
+/// A trace used to be able to name only a stored `Connection`. An add the
+/// store refused has no Connection to name — only the draft that never
+/// became one — and inventing a `Connection` value for the failure would
+/// put a fake id on the glass's most permanent line. So the trace names
+/// the *fields*, and both a `Connection` and a `ConnectionDraft` know how
+/// to answer for them.
+struct TraceSubject<'a> {
+    folder: Option<&'a str>,
+    alias: &'a str,
+    user: &'a str,
+    host: &'a str,
+    port: String,
+}
+
+impl<'a> From<&'a Connection> for TraceSubject<'a> {
+    fn from(conn: &'a Connection) -> Self {
+        Self {
+            folder: conn.folder.as_deref(),
+            alias: &conn.alias,
+            user: &conn.user,
+            host: &conn.host,
+            port: conn.port.to_string(),
+        }
+    }
+}
+
+impl<'a> From<&'a ConnectionDraft> for TraceSubject<'a> {
+    fn from(draft: &'a ConnectionDraft) -> Self {
+        Self {
+            folder: none_if_blank(&draft.folder),
+            alias: &draft.alias,
+            user: &draft.user,
+            host: &draft.host,
+            port: draft.port.clone(),
+        }
+    }
+}
+
+fn none_if_blank(value: &str) -> Option<&str> {
+    (!value.is_empty()).then_some(value)
+}
+
 /// One `◆ <verb>  [folder] alias  (user@host:port)` line.
 ///
 /// The single shape every settle trace takes, so two verbs can never drift
@@ -248,23 +319,21 @@ fn fit_reason(message: &str, used: usize, budget: usize) -> String {
 /// `tests/design_system_test.rs` reads the verbs out of this call site, so
 /// a verb the spec does not have fails the build instead of shipping a
 /// scrollback that claims something the command never did.
-fn connection_trace(verb: &str, conn: &Connection, t: &Theme) -> Line<'static> {
+fn connection_trace(verb: &str, subject: &TraceSubject<'_>, t: &Theme) -> Line<'static> {
     let icon = |role: ratatui::style::Color| Span::styled("◆", Style::default().fg(role));
     let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
 
     let mut spans = vec![icon(t.accent), Span::raw(format!(" {verb}  "))];
 
-    if let Some(folder) = conn.folder.as_deref().filter(|f| !f.is_empty()) {
+    if let Some(folder) = subject.folder.filter(|f| !f.is_empty()) {
         spans.push(Span::styled(format!("[{folder}] "), dim));
     }
 
-    spans.push(Span::styled(
-        conn.alias.clone(),
-        Style::default().add_modifier(Modifier::BOLD),
-    ));
+    spans.push(Span::styled(subject.alias.to_string(), bold));
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
-        format!("({}@{}:{})", conn.user, conn.host, conn.port),
+        format!("({}@{}:{})", subject.user, subject.host, subject.port),
         dim,
     ));
 
@@ -623,12 +692,26 @@ pub fn run_inline<W: Write>(
                                     }
                                 }
                             }
-                            // #37 replaces this arm with the `◆ Alias` →
-                            // `◆ Host` step-sequence. The chord is read and
-                            // the frame has already answered it with the dim
-                            // note the state carries; there is nothing to
-                            // perform until that sequence exists.
-                            Effect::BeginAdd => {}
+                            // The write happens here and its result folds
+                            // straight back through `settle_add`, so the
+                            // `◇ added` note reports what the store did
+                            // rather than what the sequence finished
+                            // doing. `connections::add` is the only
+                            // implementation of "add a Connection"; the
+                            // frame does not get its own.
+                            Effect::Add { draft } => {
+                                match manage::settle_add(&state, store.add(&draft)) {
+                                    Ok(next) => state = next,
+                                    // The store refused the add. Same
+                                    // contract as a refused delete:
+                                    // collapse, report, exit non-zero.
+                                    Err(message) => {
+                                        return settle_add_error(
+                                            &mut live, canvas, &draft, message,
+                                        )
+                                    }
+                                }
+                            }
                             Effect::Exit(outcome) => {
                                 return settle(&mut live, canvas, outcome);
                             }
@@ -735,6 +818,26 @@ fn settle_error<W: Write>(
 ) -> io::Result<InlineOutcome> {
     let trace = Settle::Error {
         connection: connection.clone(),
+        message: message.clone(),
+    };
+    live.collapse(&settle_trace(&trace, canvas))?;
+    Err(io::Error::other(message))
+}
+
+/// Collapse the frame on a refused **add** and hand the shell back with an
+/// error, mirroring [`settle_error`].
+///
+/// The trace names the draft, not a Connection: the add failed, so there
+/// is no Connection to point at, and a line that invented one would be
+/// claiming an object the file never received.
+fn settle_add_error<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    canvas: Canvas,
+    draft: &ConnectionDraft,
+    message: String,
+) -> io::Result<InlineOutcome> {
+    let trace = Settle::AddFailed {
+        draft: draft.clone(),
         message: message.clone(),
     };
     live.collapse(&settle_trace(&trace, canvas))?;

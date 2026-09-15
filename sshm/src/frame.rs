@@ -299,16 +299,66 @@ pub struct FrameFlow {
     /// What the last management action did, rendered as the lines above the
     /// rows.
     pub trace: Option<crate::manage::Trace>,
+    /// The `Ctrl+A` add sequence, while one is running (#37).
+    pub add: Option<AddFlow>,
+}
+
+/// One step of the add sequence that has already been answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettledField {
+    /// The step's word, drawn after the `◇`.
+    pub label: &'static str,
+    /// What it settled to, or `None` for an optional field left empty —
+    /// which the frame draws as *absent* rather than as a blank.
+    pub value: Option<String>,
+}
+
+/// The add sequence as far as the frame can see it (#37).
+///
+/// The frame does not run the sequence — [`crate::manage`] does. This is
+/// the projection of one live step: the word wearing the `◆`, what is on
+/// the line, what the last rejection said, and what has already settled
+/// behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AddFlow {
+    /// The step being answered now.
+    pub label: &'static str,
+    /// What the user has typed into it.
+    pub input: String,
+    /// The rejection shown under the header, if the last Enter was refused.
+    pub error: Option<String>,
+    /// The steps already settled, in the order they were answered.
+    pub settled: Vec<SettledField>,
+    /// Whether this is the last step, so the rail can say what Enter
+    /// means *here* rather than guessing.
+    pub last: bool,
 }
 
 impl From<&crate::manage::ManageState> for FrameFlow {
     fn from(state: &crate::manage::ManageState) -> Self {
+        let (confirming, add) = match &state.phase {
+            crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None),
+            crate::manage::Phase::List => (None, None),
+            crate::manage::Phase::Add(sequence) => (
+                None,
+                Some(AddFlow {
+                    label: sequence.field.label(),
+                    input: sequence.input.clone(),
+                    error: sequence.error.clone(),
+                    settled: sequence
+                        .settled()
+                        .into_iter()
+                        .map(|(label, value)| SettledField { label, value })
+                        .collect(),
+                    last: sequence.field.next().is_none(),
+                }),
+            ),
+        };
+
         Self {
-            confirming: match &state.phase {
-                crate::manage::Phase::ConfirmDelete { target } => Some(target.clone()),
-                crate::manage::Phase::List => None,
-            },
+            confirming,
             trace: state.trace.clone(),
+            add,
         }
     }
 }
@@ -336,15 +386,84 @@ fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> 
         Some(crate::manage::Trace::Declined { connection }) => {
             vec![settled_confirm_line(connection, false, t)]
         }
-        Some(crate::manage::Trace::AddRequested) => vec![plain_note_line(ADD_NOTE, t)],
+        Some(crate::manage::Trace::AddAbandoned) => {
+            vec![plain_note_line(ADD_ABANDONED_NOTE, t)]
+        }
+        // The note the ticket asks for: `◇ added [prod] web-01`. It is
+        // one line, not two — there was no confirm question to settle
+        // first, only the write that happened.
+        Some(crate::manage::Trace::Added { connection }) => {
+            vec![note_line("added", connection, t)]
+        }
         None => Vec::new(),
     };
+
+    // The add sequence's own history: each answered step settled to a
+    // `◇` line, and the rejection — if there is one — goes last, so a
+    // terminal too short for all of them drops the oldest settled step
+    // before it drops the reason the user is stuck.
+    if let Some(add) = &flow.add {
+        for settled in &add.settled {
+            lines.push(settled_field_line(settled, t));
+        }
+        if let Some(error) = &add.error {
+            lines.push(error_line(error, t));
+        }
+    }
 
     if lines.len() > budget {
         lines.drain(..lines.len() - budget);
     }
 
     lines
+}
+
+/// A settled add step: `◇ Alias  web-01`.
+///
+/// The label recedes with the note grammar and the value is bold, because
+/// the value is the fact worth scanning back through. An optional field
+/// the user left empty is drawn as `—`, not as nothing: a blank after
+/// `◇ Key` reads as a step that lost its answer, not as one that
+/// deliberately has none.
+fn settled_field_line(settled: &SettledField, t: &Theme) -> Line<'static> {
+    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+
+    let value = match &settled.value {
+        Some(value) => Span::styled(value.clone(), bold),
+        None => Span::styled(ABSENT, dim),
+    };
+
+    Line::from(vec![
+        Span::styled(RAIL, Style::default().fg(t.border)),
+        Span::styled(GUTTER_PAD, dim),
+        Span::styled(format!("◇ {:<FIELD_LABEL_WIDTH$}  ", settled.label), dim),
+        value,
+    ])
+}
+
+/// How a settled optional field reads when the user left it empty.
+const ABSENT: &str = "—";
+
+/// The width every settled step label is padded to, so the values line up
+/// down the sequence instead of stair-stepping.
+const FIELD_LABEL_WIDTH: usize = 6;
+
+/// The step's rejection, shown under the header.
+///
+/// `!` plus the sentence, in the `warning` role. The role existed so a
+/// warning never invents a hue; this is the first thing to draw it. The
+/// state is carried by the glyph and the words as much as by the colour,
+/// so it reads the same with `NO_COLOR` set.
+fn error_line(message: &str, t: &Theme) -> Line<'static> {
+    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+
+    Line::from(vec![
+        Span::styled(RAIL, Style::default().fg(t.border)),
+        Span::styled(GUTTER_PAD, dim),
+        Span::styled("! ", Style::default().fg(t.warning).add_modifier(Modifier::BOLD)),
+        Span::styled(message.to_string(), Style::default().fg(t.warning)),
+    ])
 }
 
 /// A `◇` note with no Connection to name — for the routes that ask for
@@ -359,9 +478,13 @@ fn plain_note_line(text: &str, t: &Theme) -> Line<'static> {
     ])
 }
 
-/// The note the add chord leaves: the route is real, the sequence is not
-/// built yet, and the frame says so instead of swallowing the keystroke.
-const ADD_NOTE: &str = "add — not built yet; run sshm add for now";
+/// The note an abandoned add sequence leaves.
+///
+/// Worded to answer the one question the user has after backing out of a
+/// half-filled form: *did the half of it get saved?* It did not, and the
+/// note says so — no `Effect::Add` was ever emitted, so nothing was ever
+/// written.
+const ADD_ABANDONED_NOTE: &str = "add abandoned — nothing saved";
 
 /// The note a `y` that removed nothing leaves.
 ///
@@ -873,14 +996,15 @@ const CORNER: &str = "└";
 
 /// What the empty frame tells the user to do next.
 ///
-/// Both arms name a *command*, because a command is what works today. The
-/// manage arm used to say `Ctrl+A to add one`; no handler reads that chord
-/// until #36, and an empty frame is exactly where a hint the user tries
-/// first has to be true.
+/// Both arms name something that works today. The manage arm names the
+/// chord: as of #37 `Ctrl+A` walks the add sequence and writes the
+/// Connection, so an empty manage frame — the exact place a new user
+/// starts — can point straight at the action instead of at a command
+/// outside the frame.
 fn empty_message(mode: FrameMode) -> &'static str {
     match mode {
         FrameMode::Pick => "No Connections yet — run sshm manage to add one",
-        FrameMode::Manage => "No Connections yet — run sshm add to create one",
+        FrameMode::Manage => "No Connections yet — Ctrl+A to add one",
     }
 }
 
@@ -924,8 +1048,18 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// 80-column terminal" from a mid-word clip into a clean loss of the
 /// least-needed segment.
 fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) -> Line<'static> {
+    // Declared out here so the borrow outlives the `match` that picks one.
+    const ADD_MID: &[&str] = &["Esc back", "Enter next", "Ctrl+C quit"];
+    const ADD_LAST: &[&str] = &["Esc back", "Enter add", "Ctrl+C quit"];
+
     let hints: &[&str] = if flow.confirming.is_some() {
         &["Esc back", "y confirm", "N abort", "Ctrl+C quit"]
+    } else if let Some(add) = &flow.add {
+        // The add step names what Enter means *on this step*: `next`
+        // while there are steps left, `add` on the last one, where the
+        // same keypress commits the Connection. A rail that said `next`
+        // there would be hinting a step that does not exist.
+        if add.last { ADD_LAST } else { ADD_MID }
     } else {
         match mode {
             FrameMode::Pick => &[
@@ -937,10 +1071,19 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
                 // for, free here because the line was written in that order.
                 "sshm manage to add or edit",
             ],
-            // Only what works: `Ctrl+A`/`Ctrl+E` are deliberately absent until
-            // #37 makes them do what they would say. Dropping them also means
-            // the whole manage rail now fits an 80-column terminal.
-            FrameMode::Manage => &["Esc cancel", "Enter edit", "↑↓ navigate", "Ctrl+X delete"],
+            // `Ctrl+A add` is back on the rail (#37): it now walks the
+            // five-step sequence and writes the Connection, which is the
+            // thing the label always promised. `Ctrl+E edit` is still
+            // absent — it leaves the frame exactly as Enter does, and the
+            // in-place single-field editor is the follow-on ticket, not
+            // this one.
+            FrameMode::Manage => &[
+                "Esc cancel",
+                "Enter edit",
+                "↑↓ navigate",
+                "Ctrl+X delete",
+                "Ctrl+A add",
+            ],
         }
     };
 
@@ -982,6 +1125,24 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
         return Line::from(spans);
     }
 
+    // The add step: the header *is* the step, one line, one ask — the
+    // same grammar the delete confirm uses. The typed text rides on the
+    // header with it because the frame hides the terminal cursor and a
+    // text field with no cursor and no echo of its own is a field the
+    // user cannot see themselves filling.
+    if let Some(add) = &flow.add {
+        let dim = Style::default().fg(t.fg_muted);
+
+        return Line::from(vec![
+            Span::styled("◆", Style::default().fg(t.accent)),
+            Span::raw(" "),
+            Span::styled(add.label.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw("  "),
+            Span::raw(add.input.clone()),
+            Span::styled(CARET, dim),
+        ]);
+    }
+
     let title = match mode {
         FrameMode::Pick => "Select a Connection",
         FrameMode::Manage => "Manage Connections",
@@ -993,6 +1154,16 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
         Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
     ])
 }
+
+/// The caret the add step draws for itself.
+///
+/// The frame hides the hardware cursor for its whole life — it has to,
+/// or a redraw would leave a blinking cell in the middle of a frame that
+/// is trying not to look like a window. A text field still has to show
+/// where it is being typed into, so the frame draws its own. `_` because
+/// it is ASCII: every font that renders this frame's box-drawing renders
+/// it, and a caret that turns into tofu is worse than no caret at all.
+const CARET: &str = "_";
 
 /// The cursor column: `❯` on the selected row, a blank of the same width on
 /// every other row so the rows stay aligned.

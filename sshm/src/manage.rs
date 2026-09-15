@@ -32,6 +32,7 @@
 //! untouched: this module only says which lines the frame should be showing.
 
 use crate::config::Connection;
+use crate::connections::ConnectionDraft;
 use crate::inline::InlineOutcome;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -46,9 +47,195 @@ pub enum Phase {
     /// pressed, captured by value. The confirm asks about *this* one; a
     /// cursor that drifts afterwards changes nothing about it.
     ConfirmDelete { target: Connection },
+    /// The `Ctrl+A` add step-sequence (#37).
+    ///
+    /// The whole sequence is one value: which field is live, what has been
+    /// settled so far, what is being typed right now, and what the last
+    /// rejection said. That is what makes "what does Enter do on the Port
+    /// step" a question a unit test can answer with no terminal.
+    Add(AddSequence),
 }
 
-/// The trace the last management action leaves on the list.
+/// Which field of the add sequence is live.
+///
+/// The five are the spec's five, in the spec's order (#31 user story 24).
+/// Each one carries its own optionality and its own validation, and both
+/// come from the `Connection` model rather than from taste:
+///
+/// * **Alias, Host** — required. A `Connection` without one of these is
+///   not a Connection: no alias and there is nothing to pick or emit; no
+///   host and `ssh` has nowhere to go. Empty is rejected.
+/// * **Port** — optional with the SSH default. Empty settles as `22`,
+///   which is what [`ConnectionDraft::clear`] seeds and what
+///   `connections::connection_from` falls back to. Anything that is not
+///   a number in `1..=65535` is rejected, because a `port` that silently
+///   becomes `22` after the user typed `99999` is a Connection that
+///   connects to the wrong machine.
+/// * **Key, Folder** — optional, and *absent* when left empty.
+///   `Connection::key_path` and `::folder` are `Option<String>`, and a
+///   settled empty string would reach `ssh` as `-i ""`.
+///
+/// There is deliberately **no User step.** The spec names five steps and
+/// `user` is not one of them, so the sequence cannot collect one and the
+/// added Connection carries an empty `user` — exactly what `sshm add`
+/// without `--user` produces, and what `ssh::build_ssh_args` already
+/// treats as "no `user@`, let ssh use the local login name". Adding the
+/// field is a spec change, not this ticket's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddField {
+    Alias,
+    Host,
+    Port,
+    Key,
+    Folder,
+}
+
+impl AddField {
+    /// The order the sequence walks, as the spec writes it.
+    pub const ORDER: [AddField; 5] = [
+        AddField::Alias,
+        AddField::Host,
+        AddField::Port,
+        AddField::Key,
+        AddField::Folder,
+    ];
+
+    /// The step's label — the word that wears the `◆` in the header and
+    /// the `◇` once it has settled.
+    pub fn label(self) -> &'static str {
+        match self {
+            AddField::Alias => "Alias",
+            AddField::Host => "Host",
+            AddField::Port => "Port",
+            AddField::Key => "Key",
+            AddField::Folder => "Folder",
+        }
+    }
+
+    /// The next step, or `None` after the last one — which is the answer
+    /// that turns "settle this field" into "add the Connection".
+    pub fn next(self) -> Option<AddField> {
+        let i = Self::ORDER.iter().position(|f| *f == self)?;
+        Self::ORDER.get(i + 1).copied()
+    }
+
+    /// Whether this field must be answered with something.
+    fn required(self) -> bool {
+        matches!(self, AddField::Alias | AddField::Host)
+    }
+
+    /// Validate and normalise one step's answer.
+    ///
+    /// `Ok(value)` is what settles into the draft — trimmed, and for the
+    /// port step the empty answer already replaced with the SSH default.
+    /// `Err(message)` is the sentence the frame shows while the user stays
+    /// on this step with what they typed still there.
+    fn settle(self, raw: &str) -> Result<String, String> {
+        let value = raw.trim();
+
+        match self {
+            AddField::Alias | AddField::Host if value.is_empty() => {
+                Err(format!("{} is required", self.label().to_lowercase()))
+            }
+            AddField::Alias | AddField::Host => Ok(value.to_string()),
+            AddField::Port if value.is_empty() => Ok(DEFAULT_PORT.to_string()),
+            AddField::Port => match value.parse::<u16>() {
+                Ok(0) | Err(_) => Err("port must be a number from 1 to 65535".to_string()),
+                Ok(port) => Ok(port.to_string()),
+            },
+            AddField::Key | AddField::Folder => Ok(value.to_string()),
+        }
+    }
+
+    /// The value this field settled to, read back out of the draft.
+    ///
+    /// `None` is the honest shape of an optional field the user left
+    /// alone: absent, not empty.
+    fn settled_value(self, draft: &ConnectionDraft) -> Option<String> {
+        let value = match self {
+            AddField::Alias => draft.alias.clone(),
+            AddField::Host => draft.host.clone(),
+            AddField::Port => draft.port.clone(),
+            AddField::Key => draft.key_path.clone(),
+            AddField::Folder => draft.folder.clone(),
+        };
+        (!value.is_empty()).then_some(value)
+    }
+
+    /// Write a settled value into the draft.
+    fn commit(self, draft: &mut ConnectionDraft, value: String) {
+        match self {
+            AddField::Alias => draft.alias = value,
+            AddField::Host => draft.host = value,
+            AddField::Port => draft.port = value,
+            AddField::Key => draft.key_path = value,
+            AddField::Folder => draft.folder = value,
+        }
+    }
+}
+
+/// The SSH default port, spelled once.
+const DEFAULT_PORT: u16 = 22;
+
+/// The add sequence as a value: where it has got to, and what it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddSequence {
+    /// The field being answered right now.
+    pub field: AddField,
+    /// The fields already settled. Nothing here has been written anywhere:
+    /// the draft becomes a Connection only when the last step is answered,
+    /// and even then it is the store that decides whether it exists.
+    pub draft: ConnectionDraft,
+    /// What the user has typed into the live field.
+    pub input: String,
+    /// The last rejection, shown under the header. Cleared by the next
+    /// keystroke, so a fixed mistake stops being reported.
+    pub error: Option<String>,
+}
+
+impl AddSequence {
+    /// A sequence at its first step.
+    pub fn start() -> Self {
+        Self {
+            field: AddField::Alias,
+            draft: ConnectionDraft::default(),
+            input: String::new(),
+            error: None,
+        }
+    }
+
+    /// The steps already settled, as `(label, value)`, in order.
+    ///
+    /// Everything before the live field. The frame draws these as the
+    /// `◇` trace lines the spec asks for, and an absent optional field
+    /// is `None` so the frame can say *absent* rather than show a blank.
+    pub fn settled(&self) -> Vec<(&'static str, Option<String>)> {
+        AddField::ORDER
+            .iter()
+            .take_while(|f| **f != self.field)
+            .map(|f| (f.label(), f.settled_value(&self.draft)))
+            .collect()
+    }
+
+    /// The step before this one, with its answer put back on the line for
+    /// editing. `None` at the first step, which is where the sequence is
+    /// abandoned rather than walked back.
+    fn back(&self) -> Option<Self> {
+        let i = AddField::ORDER.iter().position(|f| *f == self.field)?;
+        if i == 0 {
+            return None;
+        }
+        let field = AddField::ORDER[i - 1];
+        Some(Self {
+            field,
+            draft: self.draft.clone(),
+            input: field.settled_value(&self.draft).unwrap_or_default(),
+            error: None,
+        })
+    }
+}
+
+
 ///
 /// Rendered by the frame as the settled `■` line plus the dim `◇` note
 /// (#36). It is kept on the state rather than being a one-frame flash so the
@@ -72,13 +259,18 @@ pub enum Trace {
     DeleteFailed { connection: Connection },
     /// The confirm was answered no, or abandoned. Nothing changed.
     Declined { connection: Connection },
-    /// `Ctrl+A` was routed to the add path.
+    /// `Ctrl+A` ran to the end **and the store really wrote the
+    /// Connection**.
     ///
-    /// The interactive add step-sequence is #37's work. Until it lands the
-    /// route ends here, with the frame answering the chord with a dim note
-    /// rather than swallowing it — a chord that does nothing is worse than
-    /// one that says what is missing.
-    AddRequested,
+    /// Earned through [`settle_add`], never by the keystroke that
+    /// finished the sequence — the same discipline [`Trace::Deleted`]
+    /// is held to. `◇ added [prod] web-01` is a claim about
+    /// `connections.json`, and only the store gets to make it.
+    Added { connection: Connection },
+    /// The sequence was walked back off its first step. Nothing was
+    /// written, and the note says so rather than leaving the user to
+    /// wonder whether a half-filled Connection got saved.
+    AddAbandoned,
 }
 
 /// Everything the manage frame's interaction consists of.
@@ -156,12 +348,14 @@ pub enum Effect {
     /// *this* Connection — and if the store reports it never had one, the
     /// id alone leaves the driver nothing honest to say.
     Delete { target: Connection },
-    /// Start adding a Connection.
+    /// Build a Connection from the completed draft and persist it.
     ///
-    /// #37 replaces what the driver does with this — the `◆ Alias` →
-    /// `◆ Host` step-sequence. It is a real route today: the chord reaches
-    /// the driver as a request, and the driver answers it with a note.
-    BeginAdd,
+    /// The whole draft travels with the request because the frame's answer
+    /// afterwards is about the Connection the draft became, and only the
+    /// store knows whether it became one. The state machine does not
+    /// build a `Connection` here: minting an id is the store's job, and
+    /// so is the write.
+    Add { draft: ConnectionDraft },
     /// Leave the frame with this outcome.
     Exit(InlineOutcome),
 }
@@ -240,6 +434,32 @@ pub fn settle_delete(
     }
 }
 
+/// Fold the store's answer to [`Effect::Add`] into the state the frame is
+/// rebuilt from.
+///
+/// The add half of the honesty rule, mirroring [`settle_delete`]: the
+/// sequence finishing is what the user *did*, and `◇ added` is a claim
+/// about the file. A draft that came back `Err` never earns the word —
+/// the Connection is not in `connections.json`, and a frame that said it
+/// was would be describing a write that did not happen.
+///
+/// * `Ok(conn)` — the note earns `added`, and names the Connection the
+///   store actually built (its id, its folder, its port — not what the
+///   user typed at step one).
+/// * `Err(message)` — the store refused. The caller collapses the frame
+///   to `◆ error …`, the same way a refused delete does: a live list the
+///   store cannot vouch for is worse than no list.
+pub fn settle_add(state: &ManageState, outcome: Result<Connection, String>) -> Result<ManageState, String> {
+    match outcome {
+        Ok(connection) => Ok(ManageState {
+            phase: Phase::List,
+            trace: Some(Trace::Added { connection }),
+            ..state.clone()
+        }),
+        Err(message) => Err(message),
+    }
+}
+
 /// The outcome of one keystroke: the state to become, and the effects to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
@@ -274,6 +494,7 @@ pub fn step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) -
     match state.phase {
         Phase::List => list_step(state, key, selected),
         Phase::ConfirmDelete { ref target } => confirm_step(state, key, target),
+        Phase::Add(ref sequence) => add_step(state, key, sequence),
     }
 }
 
@@ -313,13 +534,14 @@ fn list_step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) 
     }
 
     if is_chord(key, 'a') {
-        return Step {
-            state: ManageState {
-                trace: Some(Trace::AddRequested),
-                ..state.clone()
-            },
-            effects: vec![Effect::BeginAdd],
-        };
+        // The sequence opens on the list's own body: the filter and the
+        // cursor come back with the user when it ends. What it replaces is
+        // the note, never the list.
+        return Step::state_only(ManageState {
+            phase: Phase::Add(AddSequence::start()),
+            trace: None,
+            ..state.clone()
+        });
     }
 
     let mut next = state.clone();
@@ -410,6 +632,116 @@ fn declined(state: &ManageState, target: &Connection) -> ManageState {
             connection: target.clone(),
         }),
         ..state.clone()
+    }
+}
+
+/// The add step-sequence: one field on the line at a time.
+///
+/// Three rules the whole sequence is built on:
+///
+/// * **Typing edits the live field, never the filter behind it.** The
+///   filter is what the user returns to; the sequence borrows the frame,
+///   not their search.
+/// * **A rejection is not a transition.** An answer that fails
+///   validation leaves the step, the input and the cursor exactly where
+///   they were and adds one line saying why. The user fixes the field;
+///   they do not start the step over.
+/// * **Nothing is written until the last step is answered**, and even
+///   then the sequence only *asks* — [`settle_add`] is where the frame
+///   learns whether the write happened.
+fn add_step(state: &ManageState, key: KeyEvent, sequence: &AddSequence) -> Step {
+    if is_chord(key, 'c') {
+        return Step::exit(state.clone(), InlineOutcome::Cancelled);
+    }
+
+    let mut next = sequence.clone();
+    match key.code {
+        KeyCode::Enter => return settle_field(state, sequence),
+        KeyCode::Esc => {
+            // Back one step, with that step's answer back on the line to
+            // be corrected. Backing off the *first* step is backing out of
+            // the sequence: there is nothing before it, and what the user
+            // needs answered is whether the half of it they typed got
+            // saved. It did not — no `Effect::Add` leaves this module
+            // until the last step is answered — and the note says so.
+            return match sequence.back() {
+                Some(previous) => Step::state_only(ManageState {
+                    phase: Phase::Add(previous),
+                    ..state.clone()
+                }),
+                None => Step::state_only(ManageState {
+                    phase: Phase::List,
+                    trace: Some(Trace::AddAbandoned),
+                    ..state.clone()
+                }),
+            };
+        }
+        KeyCode::Backspace => {
+            next.input.pop();
+            next.error = None;
+        }
+        KeyCode::Char(ch) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
+            next.input.push(ch);
+            // The user is fixing it. Keep saying it is broken after the
+            // first keystroke of the fix would be reporting a mistake
+            // that is already on its way out.
+            next.error = None;
+        }
+        _ => return Step::state_only(state.clone()),
+    }
+
+    Step::state_only(ManageState {
+        phase: Phase::Add(next),
+        ..state.clone()
+    })
+}
+
+/// Answer the live step: validate, settle, advance — or refuse.
+///
+/// A refusal keeps everything: the step, the input, the frame. The only
+/// thing it adds is the reason. An acceptance writes the value into the
+/// draft and moves on, and the last step's acceptance is the one thing in
+/// the whole sequence that asks the driver for anything.
+fn settle_field(state: &ManageState, sequence: &AddSequence) -> Step {
+    let value = match sequence.field.settle(&sequence.input) {
+        Ok(value) => value,
+        Err(message) => {
+            return Step::state_only(ManageState {
+                phase: Phase::Add(AddSequence {
+                    error: Some(message),
+                    ..sequence.clone()
+                }),
+                ..state.clone()
+            })
+        }
+    };
+
+    let mut draft = sequence.draft.clone();
+    sequence.field.commit(&mut draft, value);
+
+    match sequence.field.next() {
+        Some(field) => Step::state_only(ManageState {
+            phase: Phase::Add(AddSequence {
+                field,
+                draft,
+                input: String::new(),
+                error: None,
+            }),
+            ..state.clone()
+        }),
+        // The last step. The sequence is done and the draft is complete,
+        // which is the only point at which this module asks for a write —
+        // and it still does not claim one. `trace` stays empty: the
+        // `◇ added` note is earned from the store's answer, through
+        // [`settle_add`], exactly as `◇ deleted` is.
+        None => Step {
+            state: ManageState {
+                phase: Phase::List,
+                trace: None,
+                ..state.clone()
+            },
+            effects: vec![Effect::Add { draft }],
+        },
     }
 }
 

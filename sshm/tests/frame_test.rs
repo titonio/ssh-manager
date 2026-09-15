@@ -435,12 +435,13 @@ fn the_highlighted_columns_are_the_row_text_offsets_the_matcher_reports() {
 /// checked here rather than asserted by hand, so the hint cannot outlive its
 /// handler or the handler lose its hint without this failing.
 ///
-/// `Ctrl+A add` and `Ctrl+E edit` are gone from the rail (#36 review): both
-/// were read by `manage::step` and neither did the thing its label named —
-/// `Ctrl+A` answered "not built yet" and `Ctrl+E` left the frame identical
-/// to Enter. Being *handled* is not the bar; doing what the hint says is.
-/// `manage_frame_test.rs` pins that they stay off the rail until #37 earns
-/// them back.
+/// `Ctrl+A add` is back on the rail (#37): the chord walks the five-step
+/// sequence and writes the Connection, which is what its label names.
+/// `Ctrl+E edit` is still off it — it is read by `manage::step`, but what
+/// it does is leave the frame with the selection, identical to Enter, and
+/// the in-place single-field editor is the follow-on ticket. Being
+/// *handled* is not the bar; doing what the hint says is.
+/// `manage_frame_test.rs` pins that it stays off until then.
 #[test]
 fn manage_frame_hints_lead_with_the_escape_hatch_and_carry_only_live_chords() {
     let frame = build_frame(&conns(), "", 0, FrameMode::Manage, wide());
@@ -448,7 +449,7 @@ fn manage_frame_hints_lead_with_the_escape_hatch_and_carry_only_live_chords() {
     assert_eq!(line_text(&frame.lines()[0]), "◆ Manage Connections");
     assert_eq!(
         hint_rail(&frame),
-        "│   Esc cancel · Enter edit · ↑↓ navigate · Ctrl+X delete"
+        "│   Esc cancel · Enter edit · ↑↓ navigate · Ctrl+X delete · Ctrl+A add"
     );
     assert_advertised_chords_are_live(&frame);
 }
@@ -817,7 +818,7 @@ fn the_manage_empty_state_points_at_a_command_that_works() {
     assert_eq!(frame.state(), FrameState::Empty);
     assert_eq!(
         line_text(&frame.lines()[1]),
-        "│   No Connections yet — run sshm add to create one"
+        "│   No Connections yet — Ctrl+A to add one"
     );
     // The chords this frame advertises are live as of #36, so the empty
     // state is allowed to name them — and is checked for naming only live
