@@ -98,3 +98,48 @@ fn cancel_resolves_to_nothing_on_every_emit() {
         );
     }
 }
+
+// ── the stream split: who gets the frame, who gets the alias ──────────────────
+
+/// The decision the deleted picker's `tui_output_kind` used to make, restored
+/// as a real (non-`#[cfg(test)]`) seam: when stdout is captured by
+/// `$(sshm pick)`, the frame must go to `/dev/tty` so the pipe keeps only
+/// the emitted alias. When stdout is the terminal itself, the frame goes
+/// there and there is nothing to protect.
+#[test]
+fn a_captured_stdout_sends_the_frame_to_the_tty() {
+    assert_eq!(
+        sshm::emit::frame_stream(false),
+        sshm::emit::FrameStream::Tty,
+        "with stdout captured, drawing the frame there would corrupt the alias"
+    );
+}
+
+#[test]
+fn a_terminal_stdout_keeps_the_frame_on_stdout() {
+    assert_eq!(
+        sshm::emit::frame_stream(true),
+        sshm::emit::FrameStream::Stdout,
+        "with a real terminal there is no captured stream to protect"
+    );
+}
+
+/// The split is decided by stdout alone, never by the emit: all three commands
+/// draw the frame the same way, and only the Insert emit has a captured stdout
+/// to keep clean. Asserting the axis is orthogonal stops a future `Emit` from
+/// quietly re-deriving the routing.
+#[test]
+fn every_emit_uses_the_same_stream_decision() {
+    for emit in [Emit::Execute, Emit::Insert, Emit::Edit] {
+        assert_eq!(
+            sshm::emit::frame_stream(true),
+            sshm::emit::FrameStream::Stdout,
+            "{emit:?}: a terminal stdout always gets the frame"
+        );
+        assert_eq!(
+            sshm::emit::frame_stream(false),
+            sshm::emit::FrameStream::Tty,
+            "{emit:?}: a captured stdout never gets the frame"
+        );
+    }
+}
