@@ -700,7 +700,8 @@ pub fn run_inline<W: Write>(
                             // implementation of "add a Connection"; the
                             // frame does not get its own.
                             Effect::Add { draft } => {
-                                match manage::settle_add(&state, store.add(&draft)) {
+                                let added = store.add(&draft);
+                                match manage::settle_add(&state, store.all(), added) {
                                     Ok(next) => state = next,
                                     // The store refused the add. Same
                                     // contract as a refused delete:
@@ -712,6 +713,29 @@ pub fn run_inline<W: Write>(
                             }
                             Effect::Exit(outcome) => {
                                 return settle(&mut live, canvas, outcome);
+                            }
+                            // The edit is performed here and its result
+                            // folded straight back through `settle_edit`,
+                            // so the `◇ edited` note reports what the
+                            // store did rather than what the editor
+                            // finished typing. `Ok(None)` in particular
+                            // means the Connection was not there to
+                            // change, and the frame says so instead of
+                            // claiming an edit that never landed.
+                            Effect::Update { target, draft } => {
+                                let outcome = manage::EditOutcome::from_update(
+                                    store.update(&target.id, &draft),
+                                );
+                                match manage::settle_edit(&state, store.all(), &target, outcome) {
+                                    Ok(next) => state = next,
+                                    // The store refused the edit. Same
+                                    // contract as a refused add and a
+                                    // refused delete: collapse, report,
+                                    // exit non-zero.
+                                    Err(message) => {
+                                        return settle_error(&mut live, canvas, &target, message)
+                                    }
+                                }
                             }
                         }
                     }

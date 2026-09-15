@@ -150,6 +150,23 @@ pub trait Store {
     /// Connection" in this crate and the frame does not get to write a
     /// second one.
     fn add(&mut self, draft: &ConnectionDraft) -> Result<Connection, String>;
+
+    /// Replace the Connection with `existing_id` with the one `draft`
+    /// describes, persist the set, and return what was actually written
+    /// (#37).
+    ///
+    /// The edit half of the seam the frame's `◇ edited` note rests on.
+    /// The id is carried across rather than minted: an edit answers about
+    /// *this* Connection, and a new id would orphan every reference to the
+    /// old one. `Ok(None)` means no Connection had that id, so nothing
+    /// was changed and nothing was written — the same contract [`edit`]
+    /// has, and the reason the frame must not say `edited` until this
+    /// comes back `Some`.
+    fn update(
+        &mut self,
+        existing_id: &str,
+        draft: &ConnectionDraft,
+    ) -> Result<Option<Connection>, String>;
 }
 
 impl Store for Config {
@@ -163,6 +180,14 @@ impl Store for Config {
 
     fn add(&mut self, draft: &ConnectionDraft) -> Result<Connection, String> {
         add(self, draft)
+    }
+
+    fn update(
+        &mut self,
+        existing_id: &str,
+        draft: &ConnectionDraft,
+    ) -> Result<Option<Connection>, String> {
+        edit(self, existing_id, draft)
     }
 }
 
@@ -201,6 +226,27 @@ impl Store for Ephemeral {
         let conn = connection_from(draft);
         self.connections.push(conn.clone());
         Ok(conn)
+    }
+
+    fn update(
+        &mut self,
+        existing_id: &str,
+        draft: &ConnectionDraft,
+    ) -> Result<Option<Connection>, String> {
+        // Same discipline as `add`: built through `connection_from`, with
+        // the *existing* id kept. A new id here would make the harness's
+        // edited row a different Connection from the one the real store
+        // would have changed.
+        let position = self.connections.iter().position(|c| c.id == existing_id);
+        let Some(i) = position else {
+            return Ok(None);
+        };
+        let conn = Connection {
+            id: existing_id.to_string(),
+            ..connection_from(draft)
+        };
+        self.connections[i] = conn.clone();
+        Ok(Some(conn))
     }
 }
 

@@ -21,7 +21,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sshm::config::Connection;
 use sshm::inline::InlineOutcome;
 use sshm::manage::{
-    self, step, AddField, AddSequence, DeleteOutcome, Effect, ManageState, Phase, Trace,
+    self, step, AddField, AddSequence, DeleteOutcome, EditOutcome, Effect, ManageState, Phase,
+    Trace,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -201,18 +202,22 @@ fn ctrl_c_at_an_open_confirm_cancels_without_deleting() {
     );
 }
 
-/// `Ctrl+E` is routed, not swallowed: it hands the selected Connection to
-/// the edit path, which is exactly what Enter means under `sshm manage`
-/// (#35's cut-over contract). #37 replaces the destination with the
-/// in-place single-field editor; the route is already here.
+/// `Ctrl+E` no longer leaves the frame.
+///
+/// It used to exit with the selection on the edit route — byte-identical
+/// to Enter, which is why the hint rail refused to advertise it. #37 gave
+/// the chord its own destination: the in-place editor, which stays on the
+/// glass. This test exists to pin that the old exit is *gone*, because a
+/// chord that both opens an editor and exits the frame would be two
+/// actions on one keystroke.
 #[test]
-fn ctrl_e_routes_the_selected_connection_to_the_edit_path() {
+fn ctrl_e_no_longer_exits_the_frame() {
     let step = step(&ManageState::new(), ctrl('e'), Some(&web01()));
 
-    assert_eq!(
-        step.effects,
-        vec![Effect::Exit(InlineOutcome::Picked(web01()))],
-        "Ctrl+E must leave the frame with the selected Connection on the edit route"
+    assert!(
+        !step.effects.iter().any(|e| matches!(e, Effect::Exit(_))),
+        "Ctrl+E must stay on the glass and open the editor, not exit: {:?}",
+        step.effects
     );
 }
 
@@ -879,7 +884,7 @@ fn finishing_the_sequence_asks_for_the_add_without_claiming_it_happened() {
 fn an_add_the_store_wrote_earns_the_added_note() {
     let finalised = step(&at_folder(), key(KeyCode::Enter), Some(&web01()));
 
-    let settled = manage::settle_add(&finalised.state, Ok(web01()))
+    let settled = manage::settle_add(&finalised.state, &[web01()], Ok(web01()))
         .expect("a Connection that was really written settles onto the list");
 
     assert_eq!(
@@ -900,6 +905,7 @@ fn an_add_the_store_refused_does_not_claim_a_connection_was_added() {
 
     let outcome = manage::settle_add(
         &finalised.state,
+        &[],
         Err("Permission denied (os error 13)".into()),
     );
 
@@ -963,6 +969,50 @@ fn abandoning_the_sequence_mid_way_asks_for_nothing() {
             .any(|e| matches!(e, Effect::Add { .. })),
         "an abandoned sequence must never ask for a write: {:?}",
         abandoned.effects
+    );
+}
+
+/// Going back and then forward again must not lose the answer that was
+/// already settled on the field being re-entered.
+///
+/// `back()` puts the previous step's answer back on the line; the forward
+/// advance owes the same rule. If it starts the re-entered field from an
+/// empty line instead, a bare Enter re-settles that field from nothing —
+/// silently wiping the answer the user gave the first time through. The
+/// line must always show the truth about the field it names, whichever
+/// direction the user arrived from.
+#[test]
+fn going_back_and_forward_again_re_seeds_the_line_from_the_stored_answer() {
+    // Alias, Host, Port=2222 and Key=~/.ssh/id_ed25519 are answered;
+    // Folder is live.
+    let at_folder_state = at_folder();
+
+    // Back twice: Folder → Key → Port. Port's line is correctly seeded
+    // with "2222" by back().
+    let at_key_again = step(&at_folder_state, key(KeyCode::Esc), Some(&web01())).state;
+    let at_port_again = step(&at_key_again, key(KeyCode::Esc), Some(&web01())).state;
+    assert_eq!(seq(&at_port_again).field, AddField::Port);
+    assert_eq!(seq(&at_port_again).input, "2222");
+
+    // Forward: settle Port (unchanged) and land on Key.
+    let forward = step(&at_port_again, key(KeyCode::Enter), Some(&web01()));
+    let sequence = seq(&forward.state);
+    assert_eq!(sequence.field, AddField::Key);
+    assert_eq!(
+        sequence.input, "~/.ssh/id_ed25519",
+        "the line must arrive holding the answer Key already settled to, \
+         not an empty slot waiting to overwrite it"
+    );
+
+    // And a bare Enter on that re-seeded line keeps the key rather than
+    // settling it absent.
+    let settled_onward = step(&forward.state, key(KeyCode::Enter), Some(&web01()));
+    let sequence = seq(&settled_onward.state);
+    assert_eq!(sequence.field, AddField::Folder);
+    assert_eq!(
+        sequence.settled()[3],
+        ("Key", Some("~/.ssh/id_ed25519".to_string())),
+        "re-advancing must not destroy the settled Key"
     );
 }
 
@@ -1116,4 +1166,576 @@ fn ctrl_x_arms_an_inline_confirm_for_the_selected_connection() {
         "nothing may be deleted before the user answers the confirm: {:?}",
         step.effects
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Ctrl+E — the in-place single-field editor (#37)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `Ctrl+E` opens the editor on the Connection the chord was pressed over,
+/// at its first field, with that field's current value already on the line.
+///
+/// The pre-fill is what makes this an *edit* rather than a second add: the
+/// user sees the thing they are changing. Starting on Alias with an empty
+/// line would ask them to retype an alias they already have.
+#[test]
+fn ctrl_e_opens_the_editor_on_the_selected_connection_at_its_first_field() {
+    let step = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+
+    let Phase::Edit(editor) = &step.state.phase else {
+        panic!("Ctrl+E must open the editor, got {:?}", step.state.phase);
+    };
+    assert_eq!(
+        editor.target,
+        web01(),
+        "the editor must carry the Connection the chord was pressed over"
+    );
+    assert_eq!(editor.field, AddField::Alias);
+    assert_eq!(
+        editor.input, "web-01",
+        "the line must arrive holding the field's current value"
+    );
+    assert!(
+        step.effects.is_empty(),
+        "opening an editor writes nothing: {:?}",
+        step.effects
+    );
+}
+
+#[test]
+fn ctrl_e_with_nothing_selected_opens_nothing() {
+    let step = step(&ManageState::new(), ctrl('e'), None);
+
+    assert!(
+        step.effects.is_empty(),
+        "with no row under the cursor the frame must not invent a target to edit"
+    );
+    assert_eq!(step.state, ManageState::new());
+}
+
+/// The editor is scoped to the target captured at the chord, not to the
+/// cursor. Arrowing across five fields must not be able to move the write
+/// onto a neighbour — the same rule that stops a drifting cursor moving a
+/// delete.
+#[test]
+fn the_edit_target_is_captured_at_the_chord_and_never_moves() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+
+    // Walk the field selector all the way round and back.
+    let mut state = armed.state.clone();
+    for _ in 0..7 {
+        state = step(&state, key(KeyCode::Right), Some(&web02())).state;
+    }
+
+    let Phase::Edit(editor) = &state.phase else {
+        panic!("still editing, got {:?}", state.phase);
+    };
+    assert_eq!(
+        editor.target,
+        web01(),
+        "the Connection being edited is the one under the chord, whatever the \
+         cursor is over now"
+    );
+}
+
+/// `Ctrl+E` clears the note the last action left.
+///
+/// A stale `◇ deleted` parked above "which field am I editing?" reads as
+/// an answer to a question nobody has asked yet.
+#[test]
+fn ctrl_e_clears_the_note_the_last_action_left() {
+    let with_note = ManageState {
+        trace: Some(Trace::AddAbandoned),
+        ..ManageState::new()
+    };
+
+    let step = step(&with_note, ctrl('e'), Some(&web01()));
+
+    assert_eq!(step.state.trace, None);
+}
+
+#[test]
+fn typing_in_the_editor_edits_the_field_not_the_filter_behind_it() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let state = type_str(&armed.state, "db-01");
+
+    let Phase::Edit(editor) = &state.phase else {
+        panic!("still editing, got {:?}", state.phase);
+    };
+    assert_eq!(editor.input, "web-01db-01");
+    assert_eq!(
+        state.query, "",
+        "the keystrokes belong to the field; the filter the user returns to is \
+         untouched"
+    );
+}
+
+/// The field selector re-seeds the line from the field it lands on.
+///
+/// This is what makes moving between fields safe: the line always shows the
+/// truth about the field it names, so a user who arrows from Host to Port
+/// and hits Enter cannot write a hostname into the port.
+#[test]
+fn moving_the_field_replaces_the_line_with_that_fields_actual_value() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+
+    let on_host = step(&armed.state, key(KeyCode::Right), Some(&web01())).state;
+
+    let Phase::Edit(editor) = &on_host.phase else {
+        panic!("still editing, got {:?}", on_host.phase);
+    };
+    assert_eq!(editor.field, AddField::Host);
+    assert_eq!(
+        editor.input, "10.0.0.4",
+        "the line must show the Host, not the Alias it was showing a keystroke ago"
+    );
+}
+
+#[test]
+fn the_field_selector_walks_the_five_fields_in_the_specs_order() {
+    let mut state = step(&ManageState::new(), ctrl('e'), Some(&web01())).state;
+    let mut seen = vec![field_of(&state)];
+
+    for _ in 0..4 {
+        state = step(&state, key(KeyCode::Right), Some(&web01())).state;
+        seen.push(field_of(&state));
+    }
+
+    assert_eq!(
+        seen,
+        vec![
+            AddField::Alias,
+            AddField::Host,
+            AddField::Port,
+            AddField::Key,
+            AddField::Folder
+        ],
+        "the editor cycles the same five fields, in the same order, the add \
+         sequence walks"
+    );
+}
+
+/// The selector wraps at both ends.
+///
+/// A `←` that silently dies at the first field reads as a broken keybinding
+/// on a rail that has already promised the arrows move the field.
+#[test]
+fn the_field_selector_wraps_at_both_ends() {
+    let at_alias = step(&ManageState::new(), ctrl('e'), Some(&web01())).state;
+
+    let back = step(&at_alias, key(KeyCode::Left), Some(&web01())).state;
+    assert_eq!(
+        field_of(&back),
+        AddField::Folder,
+        "← off the first field must land on the last, not nowhere"
+    );
+
+    let at_folder = step(&at_alias, key(KeyCode::Left), Some(&web01())).state;
+    assert_eq!(
+        field_of(&at_folder),
+        AddField::Folder,
+        "one step back from the first field is the last field"
+    );
+
+    let forward = step(&at_folder, key(KeyCode::Right), Some(&web01())).state;
+    assert_eq!(
+        field_of(&forward),
+        AddField::Alias,
+        "→ off the last field must come back round to the first"
+    );
+}
+
+#[test]
+fn enter_on_an_unchanged_field_still_asks_for_the_write_it_was_answered() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+
+    let step = step(&armed.state, key(KeyCode::Enter), Some(&web01()));
+
+    let Effect::Update { draft, .. } = &step.effects[0] else {
+        panic!("Enter must ask for the write, got {:?}", step.effects);
+    };
+    assert_eq!(
+        draft.alias, "web-01",
+        "the unchanged value is written back as it was read"
+    );
+}
+
+/// Enter writes exactly one field and leaves every other field of the
+/// Connection exactly as it was read.
+///
+/// The editor changes one thing; the draft it emits must not be a blank
+/// form with one answer in it. A draft built from `Default` rather than
+/// from the target would silently wipe the host, the user and the folder
+/// off a Connection whose alias was being corrected.
+#[test]
+fn committing_a_field_changes_only_that_field() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let state = type_str(&armed.state, "x");
+
+    let step = step(&state, key(KeyCode::Enter), Some(&web01()));
+
+    let Effect::Update { target, draft } = &step.effects[0] else {
+        panic!("Enter must ask for the write, got {:?}", step.effects);
+    };
+    assert_eq!(target, &web01(), "the request names the target");
+    assert_eq!(draft.alias, "web-01x", "the edited field carries the edit");
+    assert_eq!(draft.host, "10.0.0.4", "host untouched");
+    assert_eq!(draft.user, "deploy", "user untouched");
+    assert_eq!(draft.port, "22", "port untouched");
+    assert_eq!(draft.folder, "prod", "folder untouched");
+}
+
+/// The id travels with the edit.
+///
+/// A write that minted a fresh id would orphan every reference to the
+/// Connection the user was editing and leave the old row in the list.
+#[test]
+fn the_edit_carries_the_targets_id_not_a_new_one() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let step = step(&armed.state, key(KeyCode::Enter), Some(&web01()));
+
+    let Effect::Update { target, draft } = &step.effects[0] else {
+        panic!("expected an Update, got {:?}", step.effects);
+    };
+    assert_eq!(target.id, "id-web-01");
+    assert_eq!(
+        draft.alias, "web-01",
+        "the draft is the whole Connection, so the store can keep the id"
+    );
+}
+
+/// The editor validates through the same `settle` the add sequence uses,
+/// so a field cannot have two different rules depending on which chord
+/// opened it.
+#[test]
+fn the_editor_applies_the_same_per_field_validation_as_the_add_sequence() {
+    let on_port = focus(AddField::Port);
+    assert_eq!(field_of(&on_port), AddField::Port);
+
+    // Out of range: refused, stays on the field, writes nothing.
+    let cleared = backspace_n(&on_port, "22".chars().count());
+    let bad = type_str(&cleared, "99999");
+    let refused = step(&bad, key(KeyCode::Enter), Some(&web01()));
+
+    let Phase::Edit(editor) = &refused.state.phase else {
+        panic!(
+            "a refused port must stay on the field, got {:?}",
+            refused.state.phase
+        );
+    };
+    assert_eq!(
+        editor.error.as_deref(),
+        Some("port must be a number from 1 to 65535"),
+        "the same sentence the add sequence gives"
+    );
+    assert!(
+        refused.effects.is_empty(),
+        "a refused field must not write: {:?}",
+        refused.effects
+    );
+
+    // Empty: the SSH default, the same answer the add sequence gives.
+    let cleared = backspace_n(&bad, "99999".chars().count());
+    let settled = step(&cleared, key(KeyCode::Enter), Some(&web01()));
+    let Effect::Update { draft, .. } = &settled.effects[0] else {
+        panic!(
+            "an empty port settles to the default, got {:?}",
+            settled.effects
+        );
+    };
+    assert_eq!(draft.port, "22");
+}
+
+#[test]
+fn a_refused_edit_keeps_the_typed_text_and_the_target() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let state = type_str(&armed.state, "");
+
+    // Blank a required field and press Enter.
+    let cleared = backspace_n(&state, "web-01".len());
+    let refused = step(&cleared, key(KeyCode::Enter), Some(&web01()));
+
+    let Phase::Edit(editor) = &refused.state.phase else {
+        panic!("must still be editing, got {:?}", refused.state.phase);
+    };
+    assert_eq!(editor.target, web01(), "the target survives the refusal");
+    assert_eq!(editor.input, "", "what the user typed stays on the line");
+    assert_eq!(
+        editor.error.as_deref(),
+        Some("alias is required"),
+        "the refusal names the field"
+    );
+    assert!(refused.effects.is_empty());
+}
+
+#[test]
+fn esc_abandons_the_edit_and_promises_nothing_was_saved() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let typed = type_str(&armed.state, "-typo");
+
+    let step = step(&typed, key(KeyCode::Esc), Some(&web01()));
+
+    assert_eq!(step.state.phase, Phase::List);
+    assert_eq!(step.state.trace, Some(Trace::EditAbandoned));
+    assert!(
+        step.effects.is_empty(),
+        "abandoning an edit must not write: {:?}",
+        step.effects
+    );
+}
+
+#[test]
+fn ctrl_c_inside_the_editor_cancels_the_frame_without_writing() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+
+    let step = step(&armed.state, ctrl('c'), Some(&web01()));
+
+    assert_eq!(step.effects, vec![Effect::Exit(InlineOutcome::Cancelled)]);
+}
+
+/// List movement does nothing while the editor is open.
+///
+/// The target is captured at the chord, so there is nothing for the cursor
+/// to change — and a stray arrow that moved the target mid-edit would put
+/// the write somewhere the user never pointed.
+#[test]
+fn list_movement_does_nothing_while_the_editor_is_open() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+
+    for code in [KeyCode::Up, KeyCode::Down] {
+        let step = step(&armed.state, key(code), Some(&web02()));
+        assert_eq!(
+            step.state, armed.state,
+            "{code:?} must not change the edit in any way"
+        );
+        assert!(step.effects.is_empty());
+    }
+}
+
+/// Clearing an optional field on the edit path makes it *absent*, not an
+/// empty string.
+///
+/// A `key_path: Some("")` would reach ssh as `-i ""`. The same rule the
+/// add sequence enforces, reached through the same `settle`.
+#[test]
+fn clearing_an_optional_field_makes_it_absent() {
+    let with_key = Connection {
+        id: "id-web-01".into(),
+        alias: "web-01".into(),
+        host: "10.0.0.4".into(),
+        user: "deploy".into(),
+        port: 22,
+        key_path: Some("~/.ssh/id_ed25519".into()),
+        folder: Some("prod".into()),
+    };
+
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&with_key));
+    // Alias → Host → Port → Key
+    let on_key = step(
+        &step(
+            &step(&armed.state, key(KeyCode::Right), Some(&with_key)).state,
+            key(KeyCode::Right),
+            Some(&with_key),
+        )
+        .state,
+        key(KeyCode::Right),
+        Some(&with_key),
+    )
+    .state;
+    assert_eq!(field_of(&on_key), AddField::Key);
+
+    let cleared = backspace_n(&on_key, "~/.ssh/id_ed25519".chars().count());
+    let step = step(&cleared, key(KeyCode::Enter), Some(&with_key));
+
+    let Effect::Update { draft, .. } = &step.effects[0] else {
+        panic!("expected an Update, got {:?}", step.effects);
+    };
+    assert_eq!(
+        draft.key_path, "",
+        "the draft carries the empty answer; the store turns it into absent"
+    );
+}
+
+/// The refreshed list must actually *show* the Connection the note names.
+///
+/// A filter typed before `Ctrl+A` can hide the new row: add `db-01` while
+/// the filter reads `web` and the list would answer `No matches` under a
+/// note claiming `db-01` was added. The write clears the filter and puts
+/// the cursor on the row it made, so the note and the rows agree.
+#[test]
+fn a_settled_add_clears_a_filter_that_would_hide_the_new_connection() {
+    let filtered = ManageState::with_query("web");
+    let db01 = Connection {
+        id: "id-db-01".into(),
+        alias: "db-01".into(),
+        ..web01()
+    };
+
+    let settled =
+        manage::settle_add(&filtered, &[web01(), db01.clone()], Ok(db01.clone())).unwrap();
+
+    assert_eq!(
+        settled.query, "",
+        "the filter that would hide the new row is cleared by the write"
+    );
+    assert_eq!(
+        settled.selection, 1,
+        "and the cursor lands on the new Connection, the second row"
+    );
+    assert_eq!(settled.trace, Some(Trace::Added { connection: db01 }));
+}
+
+/// The same promise on the edit path: renaming a Connection out from under
+/// the filter must not leave the changed row invisible.
+#[test]
+fn a_settled_edit_clears_a_filter_that_would_hide_the_changed_connection() {
+    let filtered = ManageState::with_query("web");
+    let renamed = Connection {
+        alias: "db-01".into(),
+        ..web01()
+    };
+
+    let settled = manage::settle_edit(
+        &filtered,
+        std::slice::from_ref(&renamed),
+        &web01(),
+        EditOutcome::Updated(renamed.clone()),
+    )
+    .unwrap();
+
+    assert_eq!(
+        settled.query, "",
+        "the write clears the filter the changed row no longer matches"
+    );
+    assert_eq!(settled.selection, 0, "and the cursor is on the changed row");
+    assert_eq!(
+        settled.trace,
+        Some(Trace::Edited {
+            connection: renamed
+        })
+    );
+}
+
+/// A failed edit leaves the user's filter alone — nothing was written, so
+/// there is no new row to reveal and no reason to disturb the list.
+#[test]
+fn a_failed_edit_keeps_the_filter_the_user_had() {
+    let filtered = ManageState::with_query("web");
+
+    let absent = manage::settle_edit(&filtered, &[], &web01(), EditOutcome::Absent).unwrap();
+
+    assert_eq!(absent.query, "web", "nothing was written; the filter stays");
+}
+
+/// `settle_edit` is the only place the frame may claim an edit happened.
+#[test]
+fn settle_edit_grants_the_note_only_on_a_real_write() {
+    let state = ManageState::new();
+    let edited = Connection {
+        alias: "web-01x".into(),
+        ..web01()
+    };
+
+    let ok = manage::settle_edit(
+        &state,
+        std::slice::from_ref(&edited),
+        &web01(),
+        EditOutcome::Updated(edited.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        ok.trace,
+        Some(Trace::Edited { connection: edited }),
+        "a write that happened earns `edited`"
+    );
+    assert_eq!(ok.phase, Phase::List, "and returns to the list");
+
+    let absent = manage::settle_edit(&state, &[], &web01(), EditOutcome::Absent).unwrap();
+    assert_eq!(
+        absent.trace,
+        Some(Trace::EditFailed {
+            connection: web01()
+        }),
+        "a `y` that changed nothing must not be reported as `edited`"
+    );
+
+    let failed = manage::settle_edit(
+        &state,
+        &[],
+        &web01(),
+        EditOutcome::Failed("disk on fire".into()),
+    );
+    assert_eq!(failed, Err("disk on fire".to_string()));
+}
+
+#[test]
+fn the_edit_outcome_classifies_the_store_answer() {
+    assert_eq!(
+        EditOutcome::from_update(Ok(Some(web01()))),
+        EditOutcome::Updated(web01())
+    );
+    assert_eq!(EditOutcome::from_update(Ok(None)), EditOutcome::Absent);
+    assert_eq!(
+        EditOutcome::from_update(Err("nope".into())),
+        EditOutcome::Failed("nope".into())
+    );
+}
+
+/// The editor is not the add sequence.
+///
+/// Story 26 asks for a small correction to take *one* step. If `Ctrl+E`
+/// opened the five-field walk, correcting a port would be four steps of
+/// nothing followed by one step of the thing the user wanted.
+#[test]
+fn the_edit_is_one_step_not_a_five_field_walk() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+
+    let step = step(&armed.state, key(KeyCode::Enter), Some(&web01()));
+
+    assert_eq!(
+        step.effects.len(),
+        1,
+        "one Enter on the opened editor must be the whole edit"
+    );
+    assert!(matches!(step.effects[0], Effect::Update { .. }));
+    assert!(
+        !matches!(step.state.phase, Phase::Add(_)),
+        "Ctrl+E must never open the add sequence"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Open the editor and walk the selector to `field`.
+fn focus(field: AddField) -> ManageState {
+    let mut state = step(&ManageState::new(), ctrl('e'), Some(&web01())).state;
+    while field_of(&state) != field {
+        state = step(&state, key(KeyCode::Right), Some(&web01())).state;
+    }
+    state
+}
+
+fn field_of(state: &ManageState) -> AddField {
+    match &state.phase {
+        Phase::Edit(editor) => editor.field,
+        other => panic!("expected the editor, got {other:?}"),
+    }
+}
+
+fn type_str(state: &ManageState, text: &str) -> ManageState {
+    let mut s = state.clone();
+    for ch in text.chars() {
+        s = step(&s, key(KeyCode::Char(ch)), Some(&web01())).state;
+    }
+    s
+}
+
+fn backspace_n(state: &ManageState, n: usize) -> ManageState {
+    let mut s = state.clone();
+    for _ in 0..n {
+        s = step(&s, key(KeyCode::Backspace), Some(&web01())).state;
+    }
+    s
 }

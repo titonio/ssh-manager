@@ -73,32 +73,43 @@ exactly one thing: what Enter means. That difference is modelled once, in
 | `sshm pick` | `Insert` | Pick | Writes the alias alone to stdout, for the shell to insert |
 | `sshm manage` | `Edit` | Manage | Routes the selection to the edit path |
 
-- **`sshm manage` deletes for real; it still does not edit.** `Ctrl+X`
-  raises the inline `◆ Delete … ? (y/N)` confirm and a `y` answer persists
-  the removal through `connections::Store::remove` — the file on disk
-  changes, and the frame returns to the list with the settled
+- **`sshm manage` deletes and edits for real.** `Ctrl+X` raises the inline
+  `◆ Delete … ? (y/N)` confirm and a `y` answer persists the removal
+  through `connections::Store::remove` — the file on disk changes, and the
+  frame returns to the list with the settled
   `■ Delete [prod] web-01? Yes` and the dim `◇ deleted [prod] web-01`
-  note. That is #36's whole write path, and it is the only one this surface
-  has.
-- **Enter and `Ctrl+E` still write nothing.** Enter resolves to
-  `Action::Edit(conn)` and the runner adds no settle verb claiming a file
-  moved: the `Enter edit` hint names the *route*, which is the `--emit`
-  axis, not a completed change. `Ctrl+E` is routed to the same place and is
-  byte-identical to Enter — which is precisely why it is **not** on the
-  hint rail. A label that promises "edit" on a chord that only repeats Enter
-  teaches a binding that does not do what it says. #37 builds the
-  single-field editor and puts the chord back on the rail with it.
-- **`Ctrl+A` is read and answered, but not advertised.** The chord reaches
-  the driver as an add request and the frame replies with the dim
-  `◇ add — not built yet; run sshm add for now` note rather than
-  swallowing the keystroke. It is off the rail for the same reason
-  `Ctrl+E` is: the named action — adding a Connection — does not happen.
+  note. `Ctrl+E` opens the in-place single-field editor (#37): the header
+  names the captured target (`◆ Edit [prod] web-01`), one field rides its
+  own line seeded from its current value, `←→`/`Tab` move between the five
+  fields, and Enter writes that one field through
+  `connections::Store::update` — returning to the refreshed list with
+  `◇ edited [prod] web-01x`. Esc abandons with
+  `◇ edit abandoned — nothing saved`; a target the store no longer has
+  settles to `◇ edit failed — no such Connection: …`, never as `edited`.
+- **Enter routes; `Ctrl+E` edits.** Enter resolves to
+  `Action::Edit(conn)` and leaves the frame with the selection routed to
+  the emit path — which writes nothing. That is why `Enter edit` is *not*
+  on the manage rail: the route is not a completed change, and a label
+  that promises "edit" on a key that only routes teaches a binding that
+  does not do what it says. `Ctrl+E` is the chord that keeps the promise,
+  and it is on the rail with the behaviour that backs it.
+- **`Ctrl+A` walks the five-step add sequence and writes.** The chord
+  opens the Clack sequence `◆ Alias` → `◆ Host` → `◆ Port` → `◆ Key` →
+  `◆ Folder`, each step settling to a `◇ <label>  <value>` line, with
+  per-field validation (Alias/Host required; Port empty means 22,
+  out-of-range refused; Key/Folder empty settle absent). The last step's
+  Enter persists through `connections::Store::add` and returns to the
+  list with `◇ added [prod] web-01`. Backing out leaves
+  `◇ add abandoned — nothing saved`.
 - **The manage rail lists only keys that work in the current build.**
-  `Esc cancel · Enter edit · ↑↓ navigate · Ctrl+X delete`. Two gates hold
-  that: `assert_advertised_chords_are_live` (a hinted chord must be one
-  `manage::step` acts on) and
-  `the_manage_rail_advertises_only_the_keys_that_work` (a hinted chord must
-  do the thing its label names).
+  `Esc cancel · ↑↓ navigate · Ctrl+X delete · Ctrl+A add · Ctrl+E edit`.
+  Two gates hold that: `assert_advertised_chords_are_live` (a hinted chord
+  must be one `manage::step` acts on) and
+  `the_manage_rail_advertises_only_the_keys_that_work` (a hinted chord
+  must do the thing its label names). `Enter edit` is off the rail for
+  the reason above: six hints do not fit the 75 columns an 80-column
+  terminal leaves, and drop-from-the-end would cut `Ctrl+E` — the chord
+  that really edits — first.
 - **A failed delete collapses the frame; it does not abandon it.** When the
   store refuses the removal the frame settles to
   `◆ error  [prod] web-01  (deploy@10.0.0.4:22)  — <the store's reason>`

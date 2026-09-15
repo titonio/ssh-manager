@@ -14,7 +14,7 @@ use ratatui::style::Modifier;
 use ratatui::text::Line;
 use sshm::config::Connection;
 use sshm::frame::{build_frame_with_flow, Canvas, FrameFlow, FrameMode, FRAME_LINES};
-use sshm::manage::{self, step, DeleteOutcome, ManageState};
+use sshm::manage::{self, step, DeleteOutcome, EditOutcome, ManageState};
 use sshm::theme::ColorSupport;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -516,7 +516,7 @@ fn a_short_terminal_keeps_the_refusal_over_the_settled_history() {
 #[test]
 fn the_added_note_is_the_ticket_s_own_string() {
     let finalised = answer(&at_folder(), "prod");
-    let settled = manage::settle_add(&finalised, Ok(web01()))
+    let settled = manage::settle_add(&finalised, &[web01()], Ok(web01()))
         .expect("a Connection that was really written settles onto the list");
 
     let frame = render(&settled);
@@ -682,15 +682,12 @@ fn ctrl_a_answers_visibly_by_opening_the_sequence() {
 
 /// The rail lists only keys that actually work in this build.
 ///
-/// `Ctrl+A add` is back (#37): the chord now walks the five-step
-/// sequence and writes the Connection, which is the thing its label has
-/// always claimed.
-///
-/// `Ctrl+E edit` is still off it. The chord is read, and what it does is
-/// leave the frame with the selection — byte-identical to Enter. The
-/// in-place single-field editor the label promises is the follow-on
-/// ticket, so the label stays off the rail until that lands. A hint is a
-/// promise about what the key does, and this one still does not keep it.
+/// Both `Ctrl+A add` and `Ctrl+E edit` are on it now (#37). Each was
+/// taken off in an earlier round for the same reason — advertising an
+/// action the chord did not perform — and each is back because the chord
+/// now does the thing its label names: `Ctrl+A` walks the five-step
+/// sequence and writes the Connection, `Ctrl+E` opens the in-place
+/// single-field editor and writes through the store.
 #[test]
 fn the_manage_rail_advertises_only_the_keys_that_work() {
     let frame = render(&ManageState::new());
@@ -703,18 +700,12 @@ fn the_manage_rail_advertises_only_the_keys_that_work() {
             .expect("the frame has a hint rail"),
     );
 
-    assert!(
-        !rail.contains("Ctrl+E"),
-        "Ctrl+E is advertised but does not perform its named action; it \
-         belongs back here when the in-place editor is built. Rail: {rail:?}"
-    );
-
     for working in [
         "Esc cancel",
-        "Enter edit",
         "↑↓ navigate",
         "Ctrl+X delete",
         "Ctrl+A add",
+        "Ctrl+E edit",
     ] {
         assert!(
             rail.contains(working),
@@ -812,4 +803,289 @@ fn the_flow_lines_use_theme_roles_only() {
             );
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The Ctrl+E in-place single-field editor (#37)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Open the editor and walk the field selector to `label`.
+fn focus_edit(label: &str) -> ManageState {
+    let mut state = step(&ManageState::new(), ctrl('e'), Some(&web01())).state;
+    loop {
+        let text = frame_text(&render(&state)).join("\n");
+        if text.contains(&format!("◆ {label:<6}")) {
+            return state;
+        }
+        state = step(&state, key(KeyCode::Right), Some(&web01())).state;
+    }
+}
+
+/// The header names the **Connection**, not the field.
+///
+/// The add header wears the field word because the field is the whole ask.
+/// In an edit the field is drawn on its own line below, and the top of the
+/// frame has a more important question to answer: which Connection is
+/// about to be written. That must be readable from the first line, not
+/// recovered by scanning the list for a cursor.
+#[test]
+fn the_edit_header_names_the_connection_being_edited() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let frame = render(&armed.state);
+
+    assert_eq!(
+        line_text(&frame.lines()[0]),
+        "◆ Edit [prod] web-01",
+        "the header must name the target with its folder prefix and bold alias"
+    );
+}
+
+/// The header keeps naming the same Connection after the field selector
+/// moves, and after the field is retyped.
+#[test]
+fn the_edit_header_survives_the_field_being_changed() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let typed = step(&armed.state, plain('x'), Some(&web01()));
+
+    let frame = render(&typed.state);
+    assert_eq!(
+        line_text(&frame.lines()[0]),
+        "◆ Edit [prod] web-01",
+        "the target is what the header reports, whatever is on the field line"
+    );
+}
+
+/// The field line shows the field word, the value it was seeded from, and
+/// the caret.
+///
+/// The pre-fill is the difference between editing and retyping: the user
+/// sees the value they are changing.
+#[test]
+fn the_edit_field_line_shows_the_field_its_current_value_and_the_caret() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let frame = render(&armed.state);
+    let joined = frame_text(&frame).join("\n");
+
+    assert!(
+        joined.contains("◆ Alias   web-01_"),
+        "the field line must show the label, the seeded value and the caret: {joined}"
+    );
+}
+
+/// Arrowing to another field changes the line to *that* field's value.
+///
+/// The frame must never show `◆ Port  web-01`. A label and a value that
+/// disagree is how a user ends up writing a hostname into a port.
+#[test]
+fn the_edit_field_line_always_matches_the_field_it_names() {
+    for (label, value) in [
+        ("Alias", "web-01"),
+        ("Host", "10.0.0.4"),
+        ("Port", "22"),
+        ("Key", "_"),
+        ("Folder", "prod"),
+    ] {
+        let state = focus_edit(label);
+        let joined = frame_text(&render(&state)).join("\n");
+        assert!(
+            joined.contains(&format!("◆ {label:<6}  {value}"))
+                || joined.contains(&format!("◆ {label:<6} {value}")),
+            "the {label} line must read {value:?}, got: {joined}"
+        );
+    }
+}
+
+/// A field with no value shows the caret alone, not a blank field.
+#[test]
+fn an_absent_optional_field_still_shows_where_typing_goes() {
+    let state = focus_edit("Key");
+    let joined = frame_text(&render(&state)).join("\n");
+
+    assert!(
+        joined.contains("◆ Key     _"),
+        "an empty optional field must still show the caret: {joined}"
+    );
+}
+
+/// The rejection sits under the field, in the warning role with the `!`
+/// glyph — the same grammar the add sequence uses for a refusal.
+#[test]
+fn a_refused_edit_shows_the_reason_under_the_field() {
+    let on_port = focus_edit("Port");
+    let cleared = (0..2).fold(on_port, |s, _| {
+        step(&s, key(KeyCode::Backspace), Some(&web01())).state
+    });
+    let typed = type_into(&cleared, "99999");
+    let refused = step(&typed, key(KeyCode::Enter), Some(&web01()));
+
+    let frame = render(&refused.state);
+    let joined = frame_text(&frame).join("\n");
+
+    assert!(
+        joined.contains("! port must be a number from 1 to 65535"),
+        "the refusal must be visible under the field: {joined}"
+    );
+    assert!(
+        joined.contains("◆ Port    99999_"),
+        "what the user typed stays on the line to be fixed: {joined}"
+    );
+}
+
+/// The note a real edit earns.
+#[test]
+fn the_edited_note_is_the_tickets_own_string() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let typed = step(&armed.state, plain('x'), Some(&web01()));
+    let committed = step(&typed.state, key(KeyCode::Enter), Some(&web01()));
+    let edited = Connection {
+        alias: "web-01x".into(),
+        ..web01()
+    };
+    let settled = manage::settle_edit(
+        &committed.state,
+        std::slice::from_ref(&edited),
+        &web01(),
+        EditOutcome::Updated(edited.clone()),
+    )
+    .expect("a real write settles");
+
+    let frame = render(&settled);
+    let joined = frame_text(&frame).join("\n");
+
+    assert!(
+        joined.contains("◇ edited [prod] web-01x"),
+        "the note must name the Connection the store actually wrote: {joined}"
+    );
+}
+
+/// An abandoned edit says nothing was saved.
+#[test]
+fn an_abandoned_edit_says_nothing_was_saved() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let typed = type_into(&armed.state, "-typo");
+    let abandoned = step(&typed, key(KeyCode::Esc), Some(&web01()));
+
+    let frame = render(&abandoned.state);
+    let joined = frame_text(&frame).join("\n");
+
+    assert!(
+        joined.contains("◇ edit abandoned — nothing saved"),
+        "backing out must answer whether the half-typed field was saved: {joined}"
+    );
+}
+
+/// An Enter on a Connection the store does not have must not read as a
+/// successful edit.
+#[test]
+fn an_edit_that_landed_on_nothing_says_so() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let committed = step(&armed.state, key(KeyCode::Enter), Some(&web01()));
+    let settled = manage::settle_edit(&committed.state, &[], &web01(), EditOutcome::Absent)
+        .expect("absent settles");
+
+    let frame = render(&settled);
+    let joined = frame_text(&frame).join("\n");
+
+    assert!(
+        joined.contains("edit failed"),
+        "a write that did not happen must not be reported as `edited`: {joined}"
+    );
+    assert!(
+        !joined.contains("◇ edited"),
+        "the word `edited` never appears where no edit happened: {joined}"
+    );
+}
+
+/// The editor's rail names the two things true only here.
+///
+/// Without `←→ field` the arrows would be a mystery: the list uses them
+/// for nothing else, and nothing on screen would say they move the field.
+#[test]
+fn the_edit_rail_names_the_field_selector_and_what_enter_does() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let frame = render(&armed.state);
+    let rail = line_text(frame.lines().iter().rev().nth(1).expect("hint rail"));
+
+    for hint in ["Esc back", "Enter save", "←→ field", "Ctrl+C quit"] {
+        assert!(
+            rail.contains(hint),
+            "the edit rail must name {hint:?} — it is what the step reads. Got {rail:?}"
+        );
+    }
+    // Order is the contract, not a style choice: drop-from-the-end means
+    // what is listed first is what survives a narrow terminal, and the
+    // documented order is escape hatch → Enter → movement → the rest.
+    assert_eq!(
+        rail, "│   Esc back · Enter save · ←→ field · Ctrl+C quit",
+        "the edit rail must keep the documented hint order"
+    );
+}
+
+/// The editor never grows the frame.
+///
+/// The settle-collapse counts one frame line as one physical row; a frame
+/// that changed height mid-interaction would strand rows on the glass.
+#[test]
+fn the_edit_never_grows_the_frame() {
+    let base = render(&ManageState::new());
+    let heights = [
+        render(&step(&ManageState::new(), ctrl('e'), Some(&web01())).state),
+        render(&focus_edit("Folder")),
+        render(&focus_edit("Port")),
+    ];
+
+    for frame in heights {
+        assert_eq!(
+            frame.lines().len(),
+            base.lines().len(),
+            "the frame is a constant height whatever the editor is showing"
+        );
+        assert_eq!(frame.lines().len(), FRAME_LINES);
+    }
+}
+
+/// Every glyph the editor uses to carry a state survives with colour off.
+#[test]
+fn the_edit_survives_monochrome() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let mono = build_frame_with_flow(
+        &conns(),
+        "",
+        0,
+        FrameMode::Manage,
+        Canvas::new(120, 24, ColorSupport::Monochrome),
+        &FrameFlow::from(&armed.state),
+    );
+    let joined = frame_text(&mono).join("\n");
+
+    assert!(joined.contains("◆ Edit [prod] web-01"));
+    assert!(joined.contains("◆ Alias   web-01_"));
+    assert!(
+        !joined.contains("\u{fffd}"),
+        "no tofu in the edit frame: {joined}"
+    );
+}
+
+/// The editor's lines use theme roles only — no literal colour.
+#[test]
+fn the_edit_lines_use_theme_roles_only() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let frame = render(&armed.state);
+    for line in frame.lines() {
+        for span in &line.spans {
+            assert!(
+                !format!("{:?}", span.style).contains("Rgb"),
+                "a literal colour in the edit frame: {:?}",
+                span.style
+            );
+        }
+    }
+}
+
+fn type_into(state: &ManageState, text: &str) -> ManageState {
+    let mut s = state.clone();
+    for ch in text.chars() {
+        s = step(&s, plain(ch), Some(&web01())).state;
+    }
+    s
 }

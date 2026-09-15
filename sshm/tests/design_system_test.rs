@@ -384,6 +384,7 @@ fn dump_frames_for_review() {
                     confirming: Some(c[0].clone()),
                     trace: None,
                     add: None,
+                    edit: None,
                 },
             ),
         ),
@@ -401,6 +402,7 @@ fn dump_frames_for_review() {
                         connection: c[0].clone(),
                     }),
                     add: None,
+                    edit: None,
                 },
             ),
         ),
@@ -418,6 +420,253 @@ fn dump_frames_for_review() {
                         connection: c[0].clone(),
                     }),
                     add: None,
+                    edit: None,
+                },
+            ),
+        ),
+        // The #37 in-place editor: the header names the target, the field
+        // line carries the seeded value and the caret, and the refusal is
+        // the warning glyph. Dumped so the grammar gets the same human
+        // read the delete grammar gets.
+        (
+            "frame-manage-edit",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    trace: None,
+                    add: None,
+                    edit: Some(sshm::frame::EditFlow {
+                        target: c[0].clone(),
+                        label: "Alias",
+                        input: "web-01".into(),
+                        error: None,
+                    }),
+                },
+            ),
+        ),
+        (
+            "frame-manage-edit-refused",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    trace: None,
+                    add: None,
+                    edit: Some(sshm::frame::EditFlow {
+                        target: c[0].clone(),
+                        label: "Port",
+                        input: "99999".into(),
+                        error: Some("port must be a number from 1 to 65535".into()),
+                    }),
+                },
+            ),
+        ),
+        (
+            "frame-manage-edited",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    trace: Some(sshm::manage::Trace::Edited {
+                        connection: c[0].clone(),
+                    }),
+                    add: None,
+                    edit: None,
+                },
+            ),
+        ),
+        (
+            "frame-manage-edit-failed",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    trace: Some(sshm::manage::Trace::EditFailed {
+                        connection: c[0].clone(),
+                    }),
+                    add: None,
+                    edit: None,
+                },
+            ),
+        ),
+        // The #37 add sequence: the live caret, the `—` an optional field
+        // settles to, and the `!` a refusal wears. These three glyphs are
+        // new grammar and had never been produced for a human read.
+        (
+            "frame-manage-add",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    trace: None,
+                    add: Some(sshm::frame::AddFlow {
+                        label: "Alias",
+                        input: "web-03".into(),
+                        error: None,
+                        settled: vec![],
+                        last: false,
+                    }),
+                    edit: None,
+                },
+            ),
+        ),
+        (
+            "frame-manage-add-settled",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    trace: None,
+                    add: Some(sshm::frame::AddFlow {
+                        label: "Folder",
+                        input: "stag".into(),
+                        error: None,
+                        settled: vec![
+                            sshm::frame::SettledField {
+                                label: "Alias",
+                                value: Some("web-03".into()),
+                            },
+                            sshm::frame::SettledField {
+                                label: "Host",
+                                value: Some("10.0.0.9".into()),
+                            },
+                            sshm::frame::SettledField {
+                                label: "Port",
+                                value: Some("22".into()),
+                            },
+                            // The optional field left empty: `—`, not a blank.
+                            sshm::frame::SettledField {
+                                label: "Key",
+                                value: None,
+                            },
+                        ],
+                        last: true,
+                    }),
+                    edit: None,
+                },
+            ),
+        ),
+        (
+            "frame-manage-add-refused",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    trace: None,
+                    add: Some(sshm::frame::AddFlow {
+                        label: "Alias",
+                        input: String::new(),
+                        error: Some("alias is required".into()),
+                        settled: vec![],
+                        last: false,
+                    }),
+                    edit: None,
+                },
+            ),
+        ),
+        // The new grammar at 60 columns and in monochrome: the rail drop
+        // and the NO_COLOR downgrade are the two things every other gate
+        // here cannot see, and the edit/add lines are new enough that
+        // nobody has read them under either.
+        (
+            "frame-manage-edit-60",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(60, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    trace: None,
+                    add: None,
+                    edit: Some(sshm::frame::EditFlow {
+                        target: c[0].clone(),
+                        label: "Port",
+                        input: "22".into(),
+                        error: None,
+                    }),
+                },
+            ),
+        ),
+        (
+            "frame-manage-edit-refused-80-mono",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, mono),
+                &FrameFlow {
+                    confirming: None,
+                    trace: None,
+                    add: None,
+                    edit: Some(sshm::frame::EditFlow {
+                        target: c[0].clone(),
+                        label: "Port",
+                        input: "99999".into(),
+                        error: Some("port must be a number from 1 to 65535".into()),
+                    }),
+                },
+            ),
+        ),
+        (
+            "frame-manage-add-settled-80-mono",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, mono),
+                &FrameFlow {
+                    confirming: None,
+                    trace: None,
+                    add: Some(sshm::frame::AddFlow {
+                        label: "Folder",
+                        input: "stag".into(),
+                        error: None,
+                        settled: vec![
+                            sshm::frame::SettledField {
+                                label: "Alias",
+                                value: Some("web-03".into()),
+                            },
+                            sshm::frame::SettledField {
+                                label: "Key",
+                                value: None,
+                            },
+                        ],
+                        last: true,
+                    }),
+                    edit: None,
                 },
             ),
         ),

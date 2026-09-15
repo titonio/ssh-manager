@@ -56,6 +56,8 @@ FRAME_ROW = PROMPT_ROW + 1
 
 DOWN = b"\x1b[B"
 UP = b"\x1b[A"
+RIGHT = b"\x1b[C"
+LEFT = b"\x1b[D"
 ENTER = b"\r"
 ESC = b"\x1b"
 BACKSPACE = b"\x7f"
@@ -706,12 +708,13 @@ def scenario_manage():
     # with the checkpoint this scenario replaces.
     check("the rail advertises the chord that now adds",
           "Ctrl+A add" in rail, repr(rail))
-    # `Ctrl+E edit` stays off the rail: it still leaves the frame exactly
-    # as Enter does, and the in-place single-field editor is a follow-on
-    # ticket, not this one. Hinting it would name an action that does not
-    # happen.
-    check("the rail still does not advertise Ctrl+E",
-          "Ctrl+E" not in rail, repr(rail))
+    # `Ctrl+E edit` is on the rail (#37): the chord now opens the in-place
+    # single-field editor and writes the Connection it captured, which is
+    # what the label promises. The #36-review check that demanded its
+    # absence was written when the chord only routed to the emit path —
+    # that excuse died with the editor this ticket added.
+    check("the rail advertises the chord that now edits",
+          "Ctrl+E edit" in rail, repr(rail))
     check("the rail keeps the escape hatch and movement",
           "Esc cancel" in rail and "↑↓ navigate" in rail, repr(rail))
     d.send(ESC, 0.4)
@@ -1010,6 +1013,274 @@ def scenario_manage_add():
     check("Ctrl+C mid-sequence wrote nothing", sha() == h0b)
     check("no alternate screen on any add path", not d.screen.alt_screen)
 
+    # ── run 4: adding while a filter is active must still SHOW the new
+    # ── Connection — the spec's "the list is refreshed and shows the
+    # ── resulting Connection" is a promise about the glass. ─────────────
+    seed()
+    h0c = sha()
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    # Filter to "web" — the new db-01 will not match it.
+    d.send(b"web", 0.4)
+    d.dump("CQ. filtered to `web` — two rows match, the new one would not")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the filter is live and shows the web rows",
+          "web-01" in joined and "db-01" not in joined, joined)
+    d.send(CTRL_A, 0.4)
+    d.send(b"db-01", 0.3)
+    d.send(ENTER, 0.3)
+    d.send(b"10.1.1.7", 0.3)
+    d.send(ENTER, 0.3)
+    d.send(b"2222", 0.3)
+    d.send(ENTER, 0.3)
+    d.send(ENTER, 0.3)  # empty Key -> absent
+    d.send(b"staging", 0.3)
+    d.send(ENTER, 0.5)
+    d.dump("CR. added db-01 under a `web` filter — the filter clears, the new row shows")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the frame is back on the list",
+          d.screen.text()[FRAME_ROW] == "◆ Manage Connections",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("the note names the added Connection",
+          "│   ◇ added [staging] db-01" in joined, joined)
+    check("the new Connection is actually on the glass — the filter cleared",
+          "[staging] db-01 (@10.1.1.7:2222)" in joined, joined)
+    check("the cursor is on the new row, not stranded where the filter left it",
+          "❯ [staging] db-01" in joined, joined)
+    check("the add really landed on disk", sha() != h0c)
+    d.send(ESC, 0.4)
+
+
+def scenario_manage_edit():
+    """#37: the `Ctrl+E` in-place single-field editor on the real binary.
+
+    Same throwaway-HOME discipline as the add and delete scenarios: every
+    verdict about persistence is a sha256 of the real
+    `connections.json`, not a claim. The chord byte is 0x05 — what a
+    terminal sends for Ctrl+E.
+
+    The walk covers what makes an edit an edit rather than a second add:
+    the line arrives holding the value being changed, the field selector
+    re-seeds it from the field it lands on, a refusal writes nothing, the
+    completed edit earns its `◇ edited` note from a file that really
+    changed, and abandoning leaves the file byte-identical.
+    """
+    home = tempfile.mkdtemp(prefix="sshm-pty-edit-")
+    cfg = os.path.join(home, ".ssh", "connections.json")
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+
+    def seed():
+        with open(cfg, "w") as f:
+            json.dump(
+                {
+                    "connections": [
+                        {"id": "id-web-01", "alias": "web-01", "host": "10.0.0.4",
+                         "user": "deploy", "port": 22, "folder": "prod"},
+                        {"id": "id-web-02", "alias": "web-02", "host": "10.0.0.5",
+                         "user": "deploy", "port": 22, "folder": "prod"},
+                    ]
+                },
+                f,
+                indent=2,
+            )
+
+    def sha():
+        with open(cfg, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    CTRL_E, CTRL_C = b"\x05", b"\x03"
+
+    # ── run 1: the editor opens, edits one field, and writes ───────────
+    seed()
+    h0 = sha()
+    print(f"    seeded connections.json sha256: {h0}")
+
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.dump("EA. manage frame open — Ctrl+E on the rail")
+    height = len(d.screen.frame_rows())
+    rail = d.screen.text()[FRAME_ROW + height - 2]
+    check("Ctrl+E is on the rail because it now does what it says",
+          "Ctrl+E" in rail, repr(rail))
+
+    d.send(CTRL_E, 0.4)
+    d.dump("EB. Ctrl+E — the header names the target, the field line is seeded")
+    check("the header names the Connection being edited, not the field",
+          d.screen.text()[FRAME_ROW] == "◆ Edit [prod] web-01",
+          repr(d.screen.text()[FRAME_ROW]))
+    field = d.screen.text()[FRAME_ROW + 1]
+    check("the field line carries the field, its current value and the caret",
+          field == "│   ◆ Alias   web-01_", repr(field))
+    check("the editor did not grow the frame",
+          len(d.screen.frame_rows()) == height,
+          f"{height} -> {len(d.screen.frame_rows())}")
+    rail = d.screen.text()[FRAME_ROW + height - 2]
+    check("the edit rail names the selector and what Enter means here",
+          "Esc back" in rail and "\u2190\u2192 field" in rail
+          and "Enter save" in rail and "Ctrl+C quit" in rail,
+          repr(rail))
+    check("opening the editor wrote nothing", sha() == h0)
+
+    d.send(b"x", 0.3)
+    d.dump("EC. typing edits the field, not the filter behind it")
+    field = d.screen.text()[FRAME_ROW + 1]
+    check("the field echoes into the live value",
+          field == "│   ◆ Alias   web-01x_", repr(field))
+    check("the keystroke did not filter the list",
+          "No matches" not in "\n".join(d.screen.frame_rows()),
+          "the Connections behind the editor are still listed")
+    check("typing still wrote nothing — Enter is the write", sha() == h0)
+
+    d.send(ENTER, 0.4)
+    d.dump("ED. Enter — the edit lands and the note reports the real write")
+    check("back on the list",
+          d.screen.text()[FRAME_ROW] == "◆ Manage Connections",
+          repr(d.screen.text()[FRAME_ROW]))
+    joined = "\n".join(d.screen.frame_rows())
+    check("the note is the ticket's own string",
+          "│   ◇ edited [prod] web-01x" in joined, joined)
+    check("the list is refreshed and shows the changed Connection",
+          "web-01x" in joined, joined)
+    h1 = sha()
+    check("the edit really changed connections.json", h1 != h0, f"{h0} -> {h1}")
+    with open(cfg) as f:
+        saved = json.load(f)
+    check("exactly one Connection changed, and only its alias",
+          saved["connections"][0]["alias"] == "web-01x"
+          and saved["connections"][0]["host"] == "10.0.0.4"
+          and saved["connections"][0]["port"] == 22
+          and saved["connections"][0]["id"] == "id-web-01",
+          json.dumps(saved["connections"][0]))
+    check("the neighbour is untouched",
+          saved["connections"][1]["alias"] == "web-02",
+          json.dumps(saved["connections"][1]))
+    check("the id survived the edit — no orphaned row",
+          len(saved["connections"]) == 2)
+
+    # ── run 2: the field selector re-seeds the line from the field ─────
+    seed()
+    h2 = sha()
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.send(CTRL_E, 0.4)
+    d.send(RIGHT, 0.3)
+    d.dump("EE. \u2192 to Host — the line now holds the Host, not the Alias")
+    check("the header still names the target",
+          d.screen.text()[FRAME_ROW] == "◆ Edit [prod] web-01",
+          repr(d.screen.text()[FRAME_ROW]))
+    field = d.screen.text()[FRAME_ROW + 1]
+    check("the field line re-seeded to the Host",
+          field == "│   ◆ Host    10.0.0.4_", repr(field))
+
+    d.send(RIGHT, 0.3)
+    d.dump("EF. \u2192 to Port — the line holds the port")
+    field = d.screen.text()[FRAME_ROW + 1]
+    check("the field line re-seeded to the Port",
+          field == "│   ◆ Port    22_", repr(field))
+
+    d.send(BACKSPACE, 0.2)
+    d.send(BACKSPACE, 0.2)
+    d.send(b"99999", 0.3)
+    d.send(ENTER, 0.4)
+    d.dump("EG. an out-of-range port is refused, in place")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the refusal names the rule",
+          "! port must be a number from 1 to 65535" in joined, joined)
+    check("still on the Port field with the bad value kept for fixing",
+          d.screen.text()[FRAME_ROW + 1] == "│   ◆ Port    99999_",
+          repr(d.screen.text()[FRAME_ROW + 1]))
+    check("a refused field wrote nothing", sha() == h2)
+
+    d.send(BACKSPACE, 0.2)
+    d.dump("EH. the first keystroke of a fix stops reporting the old mistake")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the refusal is gone once the user is fixing it",
+          "! port must be a number" not in joined, joined)
+
+    d.send(BACKSPACE, 0.2)
+    d.send(BACKSPACE, 0.2)
+    d.send(BACKSPACE, 0.2)
+    d.send(BACKSPACE, 0.2)
+    d.send(b"2222", 0.3)
+    d.send(ENTER, 0.4)
+    d.dump("EI. a valid port settles and writes")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the edit note names the Connection",
+          "│   ◇ edited [prod] web-01" in joined, joined)
+    h3 = sha()
+    check("the port edit really landed", h3 != h2, f"{h2} -> {h3}")
+    with open(cfg) as f:
+        saved = json.load(f)
+    check("only the port changed; alias and host are as they were",
+          saved["connections"][0]["port"] == 2222
+          and saved["connections"][0]["alias"] == "web-01"
+          and saved["connections"][0]["host"] == "10.0.0.4",
+          json.dumps(saved["connections"][0]))
+
+    # ── run 3: the selector cannot move the target onto a neighbour ─────
+    seed()
+    h4 = sha()
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.send(CTRL_E, 0.4)
+    for _ in range(6):
+        d.send(RIGHT, 0.15)
+    d.dump("EJ. arrowed all the way round — the target is still web-01")
+    check("the header still names the Connection captured at the chord",
+          d.screen.text()[FRAME_ROW] == "◆ Edit [prod] web-01",
+          repr(d.screen.text()[FRAME_ROW]))
+    # six RIGHTs wrap Alias→Host→Port→Key→Folder→Alias→Host, so the live
+    # field here is Host — the point is which Connection receives the write,
+    # not which field.
+    field = d.screen.text()[FRAME_ROW + 1]
+    check("the live field after wrapping is Host",
+          field.startswith("│   ◆ Host"), repr(field))
+    d.send(b"!", 0.3)
+    d.send(ENTER, 0.4)
+    with open(cfg) as f:
+        saved = json.load(f)
+    check("the write landed on the captured Connection, not the neighbour",
+          saved["connections"][0]["host"] == "10.0.0.4!"
+          and saved["connections"][0]["alias"] == "web-01"
+          and saved["connections"][1]["alias"] == "web-02"
+          and saved["connections"][1]["host"] == "10.0.0.5",
+          json.dumps([(c["alias"], c["host"]) for c in saved["connections"]]))
+
+    # ── run 4: abandoning an edit leaves the file byte-identical ────────
+    seed()
+    h5 = sha()
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.send(CTRL_E, 0.4)
+    d.send(b"-typo", 0.3)
+    d.send(ESC, 0.4)
+    d.dump("EK. Esc abandons the edit — nothing saved")
+    joined = "\n".join(d.screen.frame_rows())
+    check("back on the list",
+          d.screen.text()[FRAME_ROW] == "◆ Manage Connections",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("the note answers whether the half-typed field was saved",
+          "│   ◇ edit abandoned — nothing saved" in joined, joined)
+    check("no ◇ edited note — the write never happened",
+          "edited" not in joined, joined)
+    check("abandoning left connections.json byte-identical", sha() == h5,
+          f"{h5} -> {sha()}")
+
+    # ── run 5: Ctrl+C inside the editor cancels and writes nothing ──────
+    seed()
+    h6 = sha()
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.send(CTRL_E, 0.4)
+    d.send(b"half-typed", 0.3)
+    d.send(CTRL_C, 0.5)
+    d.dump("EL. Ctrl+C inside the editor — the frame cancels clean")
+    check("Ctrl+C leaves the cancel trace",
+          d.screen.text()[FRAME_ROW] == "◆ cancelled",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("Ctrl+C inside the editor wrote nothing", sha() == h6)
+    check("no alternate screen on any edit path", not d.screen.alt_screen)
+
 
 def main():
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -1024,6 +1295,7 @@ def main():
         "manage": scenario_manage,
         "manage-error": scenario_manage_error,
         "manage-add": scenario_manage_add,
+        "manage-edit": scenario_manage_edit,
     }
     if which == "all":
         for fn in scenarios.values():

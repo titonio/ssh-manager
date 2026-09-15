@@ -301,6 +301,8 @@ pub struct FrameFlow {
     pub trace: Option<crate::manage::Trace>,
     /// The `Ctrl+A` add sequence, while one is running (#37).
     pub add: Option<AddFlow>,
+    /// The `Ctrl+E` in-place single-field editor, while one is open (#37).
+    pub edit: Option<EditFlow>,
 }
 
 /// One step of the add sequence that has already been answered.
@@ -336,9 +338,9 @@ pub struct AddFlow {
 
 impl From<&crate::manage::ManageState> for FrameFlow {
     fn from(state: &crate::manage::ManageState) -> Self {
-        let (confirming, add) = match &state.phase {
-            crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None),
-            crate::manage::Phase::List => (None, None),
+        let (confirming, add, edit) = match &state.phase {
+            crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None, None),
+            crate::manage::Phase::List => (None, None, None),
             crate::manage::Phase::Add(sequence) => (
                 None,
                 Some(AddFlow {
@@ -352,6 +354,17 @@ impl From<&crate::manage::ManageState> for FrameFlow {
                         .collect(),
                     last: sequence.field.next().is_none(),
                 }),
+                None,
+            ),
+            crate::manage::Phase::Edit(editor) => (
+                None,
+                None,
+                Some(EditFlow {
+                    target: editor.target.clone(),
+                    label: editor.field.label(),
+                    input: editor.input.clone(),
+                    error: editor.error.clone(),
+                }),
             ),
         };
 
@@ -359,8 +372,35 @@ impl From<&crate::manage::ManageState> for FrameFlow {
             confirming,
             trace: state.trace.clone(),
             add,
+            edit,
         }
     }
+}
+
+/// The in-place single-field editor as far as the frame can see it (#37).
+///
+/// The frame does not run the editor — [`crate::manage`] does. This is the
+/// projection of the one live field: which Connection is being changed,
+/// which of its fields is on the line, what is on that line, and what the
+/// last rejection said.
+///
+/// **Why the target is carried.** The add sequence can get away with
+/// naming only the field because there is nothing else in play. An edit is
+/// about a specific Connection, and the frame must say which one: the
+/// user is one Enter away from a write to `connections.json`, and "which
+/// Connection did I just change?" must be answerable from the line at the
+/// top of the frame rather than by scanning the list for a cursor that
+/// could have moved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditFlow {
+    /// The Connection being edited.
+    pub target: Connection,
+    /// The field on the line now.
+    pub label: &'static str,
+    /// What is on the line, seeded from the field's current value.
+    pub input: String,
+    /// The rejection shown under the header, if the last Enter was refused.
+    pub error: Option<String>,
 }
 
 /// The lines the flow draws between the header and the rows, capped at the
@@ -395,6 +435,24 @@ fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> 
         Some(crate::manage::Trace::Added { connection }) => {
             vec![note_line("added", connection, t)]
         }
+        // The edit's note: `◇ edited [prod] web-01`. One line, like the
+        // add's — there was no confirm question to settle first, only the
+        // write that happened.
+        Some(crate::manage::Trace::Edited { connection }) => {
+            vec![note_line("edited", connection, t)]
+        }
+        // Backing out of an edit. Worded to answer the one question the
+        // user has: did the half-typed field get saved? It did not.
+        Some(crate::manage::Trace::EditAbandoned) => {
+            vec![plain_note_line(EDIT_ABANDONED_NOTE, t)]
+        }
+        // The user pressed Enter on a Connection the store does not have.
+        // The note says the edit did not happen, because a `◇ edited`
+        // over a list still showing the old row would contradict the
+        // rows underneath it.
+        Some(crate::manage::Trace::EditFailed { connection }) => {
+            vec![note_line(EDIT_FAILED_NOTE, connection, t)]
+        }
         None => Vec::new(),
     };
 
@@ -411,11 +469,46 @@ fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> 
         }
     }
 
+    // The editor's own ask: the field on the line, and the rejection if
+    // the last Enter was refused. The ask comes before the error for the
+    // same reason the add sequence puts its reason last — when the budget
+    // cuts, the reason the user is stuck on survives.
+    if let Some(edit) = &flow.edit {
+        lines.push(edit_field_line(edit, t));
+        if let Some(error) = &edit.error {
+            lines.push(error_line(error, t));
+        }
+    }
+
     if lines.len() > budget {
         lines.drain(..lines.len() - budget);
     }
 
     lines
+}
+
+/// The live edit field: `◆ Alias  web-01_`.
+///
+/// The same shape the add step wears — the field word, the text on the
+/// line, the drawn caret — because it *is* the same kind of thing: one
+/// field, being filled in. What differs is that the line arrives already
+/// holding the value it was seeded from, so the user sees what they are
+/// changing rather than an empty slot, and the header above names the
+/// Connection it belongs to.
+///
+/// The typed text is bold and the caret dim: the text is the fact, the
+/// caret is chrome. Under `NO_COLOR` both survive as themselves.
+fn edit_field_line(edit: &EditFlow, t: &Theme) -> Line<'static> {
+    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+
+    Line::from(vec![
+        Span::styled(RAIL, Style::default().fg(t.border)),
+        Span::styled(GUTTER_PAD, dim),
+        Span::styled(format!("◆ {:<FIELD_LABEL_WIDTH$}  ", edit.label), dim),
+        Span::styled(edit.input.clone(), bold),
+        Span::styled(CARET, dim),
+    ])
 }
 
 /// A settled add step: `◇ Alias  web-01`.
@@ -488,6 +581,19 @@ fn plain_note_line(text: &str, t: &Theme) -> Line<'static> {
 /// note says so — no `Effect::Add` was ever emitted, so nothing was ever
 /// written.
 const ADD_ABANDONED_NOTE: &str = "add abandoned — nothing saved";
+
+/// The note an abandoned edit leaves.
+///
+/// The edit half of [`ADD_ABANDONED_NOTE`], worded the same way because
+/// it answers the same question: the field was half-typed and none of it
+/// was written.
+const EDIT_ABANDONED_NOTE: &str = "edit abandoned — nothing saved";
+
+/// The note an Enter on a Connection the store does not have leaves.
+///
+/// The edit half of [`DELETE_FAILED_NOTE`]. The word "edited" never
+/// appears on a frame where an edit did not happen.
+const EDIT_FAILED_NOTE: &str = "edit failed — no such Connection:";
 
 /// The note a `y` that removed nothing leaves.
 ///
@@ -1054,6 +1160,7 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
     // Declared out here so the borrow outlives the `match` that picks one.
     const ADD_MID: &[&str] = &["Esc back", "Enter next", "Ctrl+C quit"];
     const ADD_LAST: &[&str] = &["Esc back", "Enter add", "Ctrl+C quit"];
+    const EDITING: &[&str] = &["Esc back", "Enter save", "←→ field", "Ctrl+C quit"];
 
     let hints: &[&str] = if flow.confirming.is_some() {
         &["Esc back", "y confirm", "N abort", "Ctrl+C quit"]
@@ -1067,6 +1174,13 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
         } else {
             ADD_MID
         }
+    } else if flow.edit.is_some() {
+        // The editor's rail names the two things that are true only here:
+        // the arrows move the *field*, not the list cursor, and Enter
+        // saves rather than advances. Without `←→ field` on the rail the
+        // arrows would be a mystery — the list uses them for nothing else,
+        // and nothing else on screen says they do anything.
+        EDITING
     } else {
         match mode {
             FrameMode::Pick => &[
@@ -1078,18 +1192,27 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
                 // for, free here because the line was written in that order.
                 "sshm manage to add or edit",
             ],
-            // `Ctrl+A add` is back on the rail (#37): it now walks the
-            // five-step sequence and writes the Connection, which is the
-            // thing the label always promised. `Ctrl+E edit` is still
-            // absent — it leaves the frame exactly as Enter does, and the
-            // in-place single-field editor is the follow-on ticket, not
-            // this one.
+            // `Ctrl+A add` and `Ctrl+E edit` are both on the rail (#37):
+            // each chord now does the thing its label names — `Ctrl+A`
+            // walks the five-step sequence and writes the Connection,
+            // `Ctrl+E` opens the in-place single-field editor and writes
+            // through the store.
+            //
+            // `Enter edit` is off it. Six hints do not fit the 75 columns
+            // an 80-column terminal leaves the rail, and drop-from-the-end
+            // would cut `Ctrl+E` — the one hint this ticket exists to
+            // make discoverable — first. Between the two keys that claim
+            // "edit", the rail keeps the one that keeps its promise:
+            // `Ctrl+E` changes `connections.json`, while Enter only
+            // leaves the frame with the selection routed to the emit
+            // path, which writes nothing. Enter still works; it is just
+            // not what the manage frame's user is here to do.
             FrameMode::Manage => &[
                 "Esc cancel",
-                "Enter edit",
                 "↑↓ navigate",
                 "Ctrl+X delete",
                 "Ctrl+A add",
+                "Ctrl+E edit",
             ],
         }
     };
@@ -1151,6 +1274,36 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
             Span::raw(add.input.clone()),
             Span::styled(CARET, dim),
         ]);
+    }
+
+    // The edit: the header names the **target**, not the field.
+    //
+    // The add header wears the field word because the field is the whole
+    // ask. Here the field is drawn on its own line just below, and what
+    // the top of the frame must answer instead is "which Connection am I
+    // about to change?" — the one question that cannot be recovered from
+    // the field line, and the one that matters most before a write.
+    //
+    // Same shape as the delete confirm's header: `◆ Edit`, dim folder
+    // prefix, bold alias. The two chords that change a Connection read as
+    // the same kind of thing.
+    if let Some(edit) = &flow.edit {
+        let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+
+        let mut spans = vec![
+            Span::styled("◆", Style::default().fg(t.accent)),
+            Span::raw(" "),
+            Span::styled("Edit ", bold),
+        ];
+
+        if let Some(folder) = edit.target.folder.as_deref().filter(|f| !f.is_empty()) {
+            spans.push(Span::styled(format!("[{folder}] "), dim));
+        }
+
+        spans.push(Span::styled(edit.target.alias.clone(), bold));
+
+        return Line::from(spans);
     }
 
     let title = match mode {

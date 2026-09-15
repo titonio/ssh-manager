@@ -437,11 +437,9 @@ fn the_highlighted_columns_are_the_row_text_offsets_the_matcher_reports() {
 ///
 /// `Ctrl+A add` is back on the rail (#37): the chord walks the five-step
 /// sequence and writes the Connection, which is what its label names.
-/// `Ctrl+E edit` is still off it — it is read by `manage::step`, but what
-/// it does is leave the frame with the selection, identical to Enter, and
-/// the in-place single-field editor is the follow-on ticket. Being
-/// *handled* is not the bar; doing what the hint says is.
-/// `manage_frame_test.rs` pins that it stays off until then.
+/// `Ctrl+E edit` is back with it — the chord now opens the in-place
+/// single-field editor and writes through the store, so it does the thing
+/// the hint says rather than merely being handled.
 #[test]
 fn manage_frame_hints_lead_with_the_escape_hatch_and_carry_only_live_chords() {
     let frame = build_frame(&conns(), "", 0, FrameMode::Manage, wide());
@@ -449,7 +447,7 @@ fn manage_frame_hints_lead_with_the_escape_hatch_and_carry_only_live_chords() {
     assert_eq!(line_text(&frame.lines()[0]), "◆ Manage Connections");
     assert_eq!(
         hint_rail(&frame),
-        "│   Esc cancel · Enter edit · ↑↓ navigate · Ctrl+X delete · Ctrl+A add"
+        "│   Esc cancel · ↑↓ navigate · Ctrl+X delete · Ctrl+A add · Ctrl+E edit"
     );
     assert_advertised_chords_are_live(&frame);
 }
@@ -557,9 +555,10 @@ fn the_hint_rail_never_overflows_the_canvas() {
 /// A narrow terminal keeps the escape hatch and loses the tail — on a segment
 /// boundary, never mid-word.
 ///
-/// 50 columns, not 60: with the two unfulfilled chords off the manage rail
-/// the whole rail now fits 60, so the width that proves the drop-from-the-end
-/// rule had to come down to where the tail genuinely no longer fits.
+/// 50 columns: the full manage rail is 67 characters and an 80-column
+/// terminal leaves 75 for it, so the whole thing fits there and the width
+/// that proves the drop-from-the-end rule has to come down to where the
+/// tail genuinely no longer fits.
 #[test]
 fn a_narrow_canvas_keeps_the_escape_hatch_and_drops_the_tail_whole() {
     let frame = build_frame(&conns(), "", 0, FrameMode::Manage, canvas(50));
@@ -576,17 +575,62 @@ fn a_narrow_canvas_keeps_the_escape_hatch_and_drops_the_tail_whole() {
         "the escape hatch must survive a narrow terminal, got {rail:?}"
     );
     assert!(
-        rail.contains("Enter edit"),
-        "Enter is the primary action and must survive: {rail:?}"
+        rail.contains("↑↓ navigate"),
+        "movement is next-most-needed after the escape hatch and must survive: \
+         {rail:?}"
     );
     assert!(
-        !rail.contains("Ctrl+X delete"),
-        "the least-needed segment should have been dropped at 50 columns: {rail:?}"
+        !rail.contains("Ctrl+A add") && !rail.contains("Ctrl+E edit"),
+        "the two least-needed segments should have been dropped at 50 columns: \
+         {rail:?}"
     );
     assert!(
         !rail.ends_with('·') && !rail.ends_with(' ') && !rail.ends_with("dele"),
         "the rail must end on a segment boundary, not mid-word or with a dangling \
          separator: {rail:?}"
+    );
+}
+
+/// The whole manage rail must fit an 80-column terminal.
+///
+/// This is not a style preference. The rail drops from the end, so a rail
+/// that overflows 80 columns silently loses its last hint — and the last
+/// hint is `Ctrl+E edit`, the chord whose whole purpose is to be
+/// discovered. A feature nobody can see is a feature that does not exist,
+/// so the width is pinned here rather than left to be noticed in a
+/// terminal three tickets from now.
+#[test]
+fn the_full_manage_rail_fits_an_80_column_terminal() {
+    let frame = build_frame(
+        &conns(),
+        "",
+        0,
+        FrameMode::Manage,
+        Canvas::new(80, 24, ColorSupport::Truecolor),
+    );
+    let rail = line_text(
+        frame
+            .lines()
+            .iter()
+            .rev()
+            .nth(1)
+            .expect("frame has a hint rail"),
+    );
+
+    assert_eq!(
+        rail, "│   Esc cancel · ↑↓ navigate · Ctrl+X delete · Ctrl+A add · Ctrl+E edit",
+        "every manage hint must survive at 80 columns"
+    );
+    let rail_line = frame
+        .lines()
+        .iter()
+        .rev()
+        .nth(1)
+        .expect("frame has a hint rail");
+    assert!(
+        rail_line.width() <= 80,
+        "the rail must not exceed the terminal width: {}",
+        rail_line.width()
     );
 }
 

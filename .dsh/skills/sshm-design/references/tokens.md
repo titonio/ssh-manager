@@ -113,15 +113,15 @@ regression.
 
 | Glyph | Role | Carries | Notes |
 |---|---|---|---|
-| `◆` | `accent` | The step of the flow | Opens every frame: `◆ <question>`; also opens the settle traces (`◆ picked …`, `◆ cancelled`, `◆ error …`) |
+| `◆` | `accent` | The step of the flow | Opens every frame: `◆ <question>`; also opens the settle traces (`◆ picked …`, `◆ cancelled`, `◆ error …`). The two chords that change a Connection wear the same header shape — `◆ Delete [prod] web-01? (y/N)` and `◆ Edit [prod] web-01` — so they read as the same kind of thing before either writes. |
 | `│` | `border` | The rail every body line hangs off | Chrome; never carries state |
 | `❯` | `accent` + `BOLD` | **Selection** | Blank (same width) on unselected rows |
 | `└` | `border` | Closes the rail | Chrome; the frame's last line |
 | `·` | `fg_muted` + `DIM` | Separates hint segments | Dropped with its segment, never stranded |
 | `■` | `fg_muted` + `DIM`, with the alias and the answer in `BOLD` | **A question that has been answered** — the settled confirm step | `■ Delete [prod] web-01? Yes` / `? No`. `◆` asks, `■` has been answered: the glyph is the entire difference between a live confirm and a settled one, which is what keeps that difference readable with colour off. Both the yes and the no answer wear it — a declined delete leaves a trace too (story 22). |
-| `◇` | `fg_muted` + `DIM`, with the value in `BOLD` | **What the last action did** — the dim note above the rows; and each settled step of the add sequence | `◇ deleted [prod] web-01`, `◇ added [prod] web-01`. In the add sequence every answered step settles to a `◇ <label>  <value>` line (`◇ Alias  web-01`); an optional field left empty settles to `◇ <label>  —` rather than a blank, because a blank after `◇ Key` reads as a step that lost its answer, not one that deliberately has none. Backing out of the first step leaves `◇ add abandoned — nothing saved`. Also the note that contradicts the settled `■ Yes` when the store removed nothing (`◇ delete failed — no such Connection: …`). |
+| `◇` | `fg_muted` + `DIM`, with the value in `BOLD` | **What the last action did** — the dim note above the rows; and each settled step of the add sequence | `◇ deleted [prod] web-01`, `◇ added [prod] web-01`, `◇ edited [prod] web-01x`. In the add sequence every answered step settles to a `◇ <label>  <value>` line (`◇ Alias  web-01`); an optional field left empty settles to `◇ <label>  —` rather than a blank, because a blank after `◇ Key` reads as a step that lost its answer, not one that deliberately has none. Backing out of the first step leaves `◇ add abandoned — nothing saved`, and backing out of an edit leaves `◇ edit abandoned — nothing saved`. Also the note that contradicts the settled `■ Yes` when the store removed nothing (`◇ delete failed — no such Connection: …`), and the same refusal shape for an edit whose target vanished before the write (`◇ edit failed — no such Connection: …`). |
 | `!` | `warning` (the glyph `BOLD`) | **A refused answer** — the step stayed put and says why | `! alias is required`, `! port must be a number from 1 to 65535`. The state is carried by the glyph and the sentence, not the yellow, so it reads under `NO_COLOR`; the yellow is the `warning` role doing its job, never a literal. |
-| `_` | `fg_muted` | **The live text field** — where the keystrokes are going | Drawn by the frame because the hardware cursor is hidden for the frame's whole life; a field with no cursor and no echo of its own is a field the user cannot see themselves filling. ASCII on purpose: every font that renders the box-drawing renders `_`, and a caret that turns into tofu is worse than no caret. |
+| `_` | `fg_muted` | **The live text field** — where the keystrokes are going | Drawn by the frame because the hardware cursor is hidden for the frame's whole life; a field with no cursor and no echo of its own is a field the user cannot see themselves filling. ASCII on purpose: every font that renders the box-drawing renders `_`, and a caret that turns into tofu is worse than no caret. In the add sequence the live field rides the header (`◆ Alias  web-01_`); in the edit step it rides its own line under the target header (`◆ Alias   web-01_`), with the field's `◆` dim like the settled `◇` lines — the label recedes, the value is bold, the caret marks the live end. |
 
 ### The ask / answered / noted grammar
 
@@ -161,6 +161,24 @@ user has after backing out of a half-filled form. The gates are
 `an_add_the_store_wrote_earns_the_added_note`,
 `an_add_the_store_refused_does_not_claim_a_connection_was_added` and
 `nothing_claims_an_add_before_the_store_says_so`.
+
+The edit half holds the line the same way: `◇ edited` is a claim about
+`connections.json`, and `manage::settle_edit` creates a `Trace::Edited`
+only from a `Store::update` that returned the Connection it actually wrote.
+An update that found no such Connection settles to
+`◇ edit failed — no such Connection: …` — the word `edited` never appears
+on a frame where the write did not happen — and an Esc from the editor
+settles to `◇ edit abandoned — nothing saved`, because the field was
+half-typed and none of it was written. The target is captured by value at
+the `Ctrl+E` chord, so arrowing through the five fields afterwards cannot
+move the write onto a neighbour: the header and the write agree because
+they read the same captured Connection, not because the cursor says so.
+The gates are `settle_edit_grants_the_note_only_on_a_real_write`,
+`the_edit_outcome_classifies_the_store_answer` and
+`the_edit_target_is_captured_at_the_chord_and_never_moves` in
+`manage_test.rs`, with the frame-side mirror in `manage_frame_test.rs`
+(`an_edit_that_landed_on_nothing_says_so`,
+`an_abandoned_edit_says_nothing_was_saved`).
 
 `■` and `◇` are `fg_muted` + `DIM` rather than `accent` because they are
 history, not the live step: the frame's accent marks *where you are*, and a
