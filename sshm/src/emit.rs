@@ -73,3 +73,38 @@ impl Emit {
         }
     }
 }
+
+/// Which stream the live frame draws to.
+///
+/// The frame is made of control sequences — cursor hide/restore, row erases,
+/// the settle trace's SGR. Under `$(sshm pick)` stdout is the pipe that
+/// carries the emitted alias, so a single escape written there corrupts the
+/// captured selection. The frame therefore goes wherever the terminal is,
+/// and never to a captured stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameStream {
+    /// stdout is the terminal itself: draw the frame there.
+    Stdout,
+    /// stdout is captured: draw the frame to `/dev/tty` so the pipe keeps
+    /// only the emitted alias.
+    Tty,
+}
+
+/// Decide where the frame draws, given whether stdout is a terminal.
+///
+/// The whole routing policy in one pure function: a terminal stdout has no
+/// captured stream to protect, so the frame stays on it; anything else is a
+/// pipe or redirect reserved for the emit, so the frame goes to the tty.
+///
+/// This is orthogonal to [`Emit`]: all three commands draw the frame the
+/// same way, and only the Insert emit has a captured stdout to keep clean.
+/// Keeping the decision here — a function of the terminal alone, not of the
+/// command — is what stops a future `Emit` from quietly re-deriving the
+/// routing.
+pub fn frame_stream(stdout_is_terminal: bool) -> FrameStream {
+    if stdout_is_terminal {
+        FrameStream::Stdout
+    } else {
+        FrameStream::Tty
+    }
+}

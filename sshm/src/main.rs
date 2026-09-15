@@ -237,17 +237,22 @@ fn run_frame_command(
 /// The stream the frame draws to: stdout when it is a real terminal,
 /// `/dev/tty` when stdout is captured and reserved for the emitted
 /// selection.
+///
+/// The decision itself is [`emit::frame_stream`] — the emit axis's own
+/// seam — so the routing lives with the rest of the emit policy and this
+/// function only opens the stream that decision names. `run_inline` then
+/// draws to whatever it is handed (rule 4: one stream, both directions),
+/// which is what keeps the captured pipe free of control sequences.
 fn open_frame_stream() -> io::Result<Box<dyn Write>> {
     use std::io::IsTerminal;
-    if std::io::stdout().is_terminal() {
-        Ok(Box::new(io::stdout()))
-    } else {
-        Ok(Box::new(
+    match emit::frame_stream(std::io::stdout().is_terminal()) {
+        emit::FrameStream::Stdout => Ok(Box::new(io::stdout())),
+        emit::FrameStream::Tty => Ok(Box::new(
             std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open("/dev/tty")?,
-        ))
+        )),
     }
 }
 
@@ -595,8 +600,8 @@ fn print_init_bash_script() {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use sshm::config::Connection;
     use serial_test::serial;
+    use sshm::config::Connection;
 
     // The frame runner is a fn pointer, so it records into a thread-local
     // rather than a closure: the assertion is then about what each command

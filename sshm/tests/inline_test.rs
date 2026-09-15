@@ -26,8 +26,8 @@ use sshm::frame::{
     build_frame, fit_visible_rows, physical_rows, Canvas, FrameMode, FRAME_LINES, VISIBLE_ROWS,
 };
 use sshm::inline::{
-    diff_rows, edit_trace, plan_resize, settle_trace, CursorGuard, Live, LiveFrame, ResizePlan, RowOp,
-    Settle,
+    diff_rows, edit_trace, plan_resize, settle_trace, CursorGuard, Live, LiveFrame, ResizePlan,
+    RowOp, Settle,
 };
 use sshm::theme::ColorSupport;
 
@@ -408,7 +408,11 @@ fn the_edit_trace_omits_the_folder_prefix_when_there_is_none() {
 #[test]
 fn the_edit_trace_paints_no_background() {
     for span in &edit_trace(&web01(), canvas())[0].spans {
-        assert_eq!(span.style.bg, None, "span {:?} paints a background", span.content);
+        assert_eq!(
+            span.style.bg, None,
+            "span {:?} paints a background",
+            span.content
+        );
     }
 }
 

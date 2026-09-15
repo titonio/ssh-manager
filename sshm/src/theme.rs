@@ -384,7 +384,10 @@ mod tests {
 
     #[test]
     fn truecolor_resolution_is_a_no_op() {
-        assert_eq!(Theme::clack().resolve(ColorSupport::Truecolor), Theme::clack());
+        assert_eq!(
+            Theme::clack().resolve(ColorSupport::Truecolor),
+            Theme::clack()
+        );
     }
 
     #[test]
@@ -402,11 +405,7 @@ mod tests {
             let t = Theme::clack().resolve(support);
             assert_eq!(t.accent, Color::Cyan, "{support:?} rewrote the accent");
             assert_eq!(t.highlight, Color::Green, "{support:?} rewrote the hit");
-            assert_eq!(
-                t.border,
-                Color::DarkGray,
-                "{support:?} rewrote the rail"
-            );
+            assert_eq!(t.border, Color::DarkGray, "{support:?} rewrote the rail");
         }
     }
 

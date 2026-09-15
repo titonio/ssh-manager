@@ -536,7 +536,8 @@ pub fn fit_hints_with(hints: &[&str], width: usize, sep: &str) -> String {
 /// built, so the frame emits no colour rather than emitting cyan and hoping.
 /// The hint rail is fitted to `canvas.width`, dropping whole segments from the
 /// least-needed end rather than letting the terminal clip mid-word.
-pub fn build_frame(    connections: &[Connection],
+pub fn build_frame(
+    connections: &[Connection],
     query: &str,
     selection: usize,
     mode: FrameMode,

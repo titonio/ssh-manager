@@ -11,13 +11,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use sshm::config::Connection;
 use sshm::frame::{build_row_text, compute_field_offsets, compute_matches};
 
-fn make_conn(
-    alias: &str,
-    host: &str,
-    user: &str,
-    port: u16,
-    folder: Option<&str>,
-) -> Connection {
+fn make_conn(alias: &str, host: &str, user: &str, port: u16, folder: Option<&str>) -> Connection {
     Connection {
         id: String::new(),
         alias: alias.to_string(),
