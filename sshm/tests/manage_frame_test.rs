@@ -14,7 +14,7 @@ use ratatui::style::Modifier;
 use ratatui::text::Line;
 use sshm::config::Connection;
 use sshm::frame::{build_frame_with_flow, Canvas, FrameFlow, FrameMode, FRAME_LINES};
-use sshm::manage::{step, ManageState};
+use sshm::manage::{self, step, DeleteOutcome, ManageState};
 use sshm::theme::ColorSupport;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -79,6 +79,18 @@ fn render(state: &ManageState) -> sshm::frame::Frame {
         wide(),
         &FrameFlow::from(state),
     )
+}
+
+/// The state a real delete leaves behind: the confirm armed, answered `y`,
+/// and the store's answer folded back in.
+///
+/// The frame's claim about the deletion comes from the fold, not from the
+/// keystroke, so a frame built here is built the way the driver builds one.
+fn deleted_state() -> ManageState {
+    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
+    let answered = step(&armed.state, plain('y'), Some(&web01()));
+    manage::settle_delete(&answered.state, &web01(), DeleteOutcome::Removed(web01()))
+        .expect("a Connection that was really removed settles back onto the list")
 }
 
 /// The line of the frame that carries `glyph`, if any.
@@ -148,10 +160,9 @@ fn the_confirm_step_still_shows_the_list() {
 
 #[test]
 fn an_answered_confirm_settles_with_the_black_diamond() {
-    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
-    let deleted = step(&armed.state, plain('y'), Some(&web01()));
+    let deleted = deleted_state();
 
-    let frame = render(&deleted.state);
+    let frame = render(&deleted);
 
     assert!(
         frame_text(&frame)
@@ -183,12 +194,39 @@ fn a_declined_confirm_settles_with_the_black_diamond_too() {
     );
 }
 
+/// The frame-level half of the honest-note rule: a delete the store did not
+/// perform must not render as `◇ deleted`, in any wording, at any width.
+/// The Connection is still on disk, and the frame is the user's evidence of
+/// what just happened to it.
+#[test]
+fn a_delete_that_removed_nothing_never_renders_as_deleted() {
+    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
+    let answered = step(&armed.state, plain('y'), Some(&web01()));
+
+    let state = manage::settle_delete(&answered.state, &web01(), DeleteOutcome::Absent)
+        .expect("the frame stays up: nothing was destroyed");
+
+    let joined = frame_text(&render(&state)).join("\n");
+
+    assert!(
+        !joined.contains("deleted"),
+        "the frame claims a deletion the store never performed: {joined}"
+    );
+    assert!(
+        joined.contains("■ Delete [prod] web-01? Yes"),
+        "the question was answered yes, and that stays on the record: {joined}"
+    );
+    assert!(
+        joined.contains('◇') && joined.contains("no such Connection"),
+        "the note must say the delete did not happen and why: {joined}"
+    );
+}
+
 #[test]
 fn the_delete_leaves_a_dim_note_naming_the_connection() {
-    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
-    let deleted = step(&armed.state, plain('y'), Some(&web01()));
+    let deleted = deleted_state();
 
-    let frame = render(&deleted.state);
+    let frame = render(&deleted);
 
     let text = frame_text(&frame);
     let note = text
@@ -218,16 +256,15 @@ fn the_delete_leaves_a_dim_note_naming_the_connection() {
 /// and neither may be carried by colour alone.
 #[test]
 fn the_flow_glyphs_survive_monochrome() {
-    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
-    let deleted = step(&armed.state, plain('y'), Some(&web01()));
+    let deleted = deleted_state();
 
     let mono = build_frame_with_flow(
         &conns(),
-        &deleted.state.query,
-        deleted.state.selection,
+        &deleted.query,
+        deleted.selection,
         FrameMode::Manage,
         Canvas::new(120, 24, ColorSupport::Monochrome),
-        &FrameFlow::from(&deleted.state),
+        &FrameFlow::from(&deleted),
     );
     let text = frame_text(&mono);
     let joined = text.join("\n");
@@ -254,12 +291,12 @@ fn the_flow_lines_come_out_of_the_row_budget_not_out_of_the_frame() {
 
     let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
     let declined = step(&armed.state, plain('N'), Some(&web01()));
-    let deleted = step(&armed.state, plain('y'), Some(&web01()));
+    let deleted = deleted_state();
     let added = step(&ManageState::new(), ctrl('a'), Some(&web01()));
 
     for (label, state) in [
         ("declined (1 flow line)", &declined.state),
-        ("deleted (2 flow lines)", &deleted.state),
+        ("deleted (2 flow lines)", &deleted),
         ("add requested (1 flow line)", &added.state),
     ] {
         let frame = render(state);
@@ -276,8 +313,7 @@ fn the_flow_lines_come_out_of_the_row_budget_not_out_of_the_frame() {
 /// thing the ticket asks to be able to read.
 #[test]
 fn a_short_terminal_drops_the_settled_line_before_the_note() {
-    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
-    let deleted = step(&armed.state, plain('y'), Some(&web01()));
+    let deleted = deleted_state();
 
     let short = build_frame_with_flow(
         &conns(),
@@ -285,7 +321,7 @@ fn a_short_terminal_drops_the_settled_line_before_the_note() {
         0,
         FrameMode::Manage,
         Canvas::new(120, 5, ColorSupport::Truecolor),
-        &FrameFlow::from(&deleted.state),
+        &FrameFlow::from(&deleted),
     );
 
     assert_eq!(
@@ -322,7 +358,58 @@ fn the_add_route_answers_visibly() {
     );
 }
 
-/// A plain list frame — no flow at all — is what `build_frame` already
+/// The rail lists only keys that actually work in this build.
+///
+/// `Ctrl+A add` and `Ctrl+E edit` were advertised while neither performed
+/// the action its label names: `Ctrl+A` printed a "not built yet" note, and
+/// `Ctrl+E` exited with `◆ picked`, byte-identical to Enter. The rule this
+/// frame states for itself — *never hint a key the frame does not read* — is
+/// not satisfied by a key that is read and then answers "not built yet".
+/// A hint is a promise about what the key does, and both of these broke it.
+///
+/// #37 restores both when they do what they say. Until then the rail names
+/// `Ctrl+X delete`, which really deletes, and nothing else that is not real.
+#[test]
+fn the_manage_rail_advertises_only_the_keys_that_work() {
+    let frame = render(&ManageState::new());
+    let rail = line_text(
+        frame
+            .lines()
+            .iter()
+            .rev()
+            .nth(1)
+            .expect("the frame has a hint rail"),
+    );
+
+    for unfulfilled in ["Ctrl+A", "Ctrl+E"] {
+        assert!(
+            !rail.contains(unfulfilled),
+            "{unfulfilled} is advertised but does not perform its named action; \
+             it belongs back here when #37 builds it. Rail: {rail:?}"
+        );
+    }
+
+    for working in ["Esc cancel", "Enter edit", "↑↓ navigate", "Ctrl+X delete"] {
+        assert!(
+            rail.contains(working),
+            "{working:?} works in this build and must stay on the rail: {rail:?}"
+        );
+    }
+}
+
+/// The confirm rail is unchanged by this: it names the answers that step
+/// actually reads, and all of them work.
+#[test]
+fn the_confirm_rail_still_names_every_answer_it_reads() {
+    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
+    let frame = render(&armed.state);
+    let rail = line_text(frame.lines().iter().rev().nth(1).expect("hint rail"));
+
+    for answer in ["Esc back", "y confirm", "N abort", "Ctrl+C quit"] {
+        assert!(rail.contains(answer), "missing {answer:?} from {rail:?}");
+    }
+}
+
 /// produced, and must be byte-identical to the flow-aware builder handed an
 /// empty flow. The two entry points cannot drift.
 #[test]
@@ -367,9 +454,8 @@ fn the_pick_frame_ignores_the_manage_flow() {
 #[test]
 fn the_flow_lines_use_theme_roles_only() {
     let t = sshm::theme::Theme::clack();
-    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
-    let deleted = step(&armed.state, plain('y'), Some(&web01()));
-    let frame = render(&deleted.state);
+    let deleted = deleted_state();
+    let frame = render(&deleted);
 
     let settled = line_with(&frame, '■');
     let settled_glyph = settled

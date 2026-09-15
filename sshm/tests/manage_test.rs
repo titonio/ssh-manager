@@ -20,7 +20,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sshm::config::Connection;
 use sshm::inline::InlineOutcome;
-use sshm::manage::{step, Effect, ManageState, Phase, Trace};
+use sshm::manage::{self, step, DeleteOutcome, Effect, ManageState, Phase, Trace};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -115,17 +115,68 @@ fn the_chord_letters_are_still_search_text() {
     }
 }
 
-/// `hjkl` is the frame's existing movement binding and is carried over
-/// unchanged. It is movement, not a management action, so it sits outside
-/// rule 2 — but it does mean `j` and `k` are not filter text, and that is
-/// recorded here rather than discovered by surprise.
+/// User story 21, taken literally: the manage frame's filter accepts
+/// **every printable character**, and `j` and `k` are printable. They were
+/// bound to movement by the pick path and carried over here, which made
+/// `jakarta`, `kjell` and every other search containing them untypeable —
+/// a filter with two holes is not a live filter.
+///
+/// Movement in the manage frame is the arrow keys. The rail says `↑↓
+/// navigate` and nothing else, so nothing is advertised that does not work
+/// and nothing is stolen that the user needs for typing.
 #[test]
-fn hjkl_still_moves_the_cursor() {
-    let down = step(&ManageState::new(), plain('j'), Some(&web01()));
+fn j_and_k_type_into_the_filter_rather_than_moving_the_cursor() {
+    let mut state = ManageState::new();
+
+    for ch in "jakarta".chars() {
+        state = step(&state, plain(ch), Some(&web01())).state;
+    }
+
+    assert_eq!(
+        state.query, "jakarta",
+        "every character of the word must reach the filter"
+    );
+    assert_eq!(
+        state.selection, 0,
+        "and none of them may have moved the cursor: {:?}",
+        state
+    );
+
+    let k = step(&ManageState::new(), plain('k'), Some(&web01()));
+    assert_eq!(k.state.query, "k", "`k` is filter text too");
+    assert_eq!(k.state.selection, 0, "`k` must not move the cursor");
+}
+
+/// Arrows are the manage frame's movement, and the only thing that is.
+#[test]
+fn arrows_move_the_cursor_in_the_manage_frame() {
+    let down = step(&ManageState::new(), key(KeyCode::Down), Some(&web01()));
     assert_eq!(down.state.selection, 1);
 
-    let up = step(&down.state, plain('k'), Some(&web01()));
+    let up = step(&down.state, key(KeyCode::Up), Some(&web01()));
     assert_eq!(up.state.selection, 0);
+
+    let clamped = step(&ManageState::new(), key(KeyCode::Up), Some(&web01()));
+    assert_eq!(clamped.state.selection, 0, "up at the top stays at the top");
+}
+
+/// The whole printable range, asserted as filter text rather than movement:
+/// story 21 is about the set, not about three example letters.
+#[test]
+fn every_printable_character_lands_in_the_filter() {
+    for ch in (0x20u8..0x7f).map(|b| b as char) {
+        let step = step(&ManageState::new(), plain(ch), Some(&web01()));
+
+        assert_eq!(
+            step.state.query,
+            ch.to_string(),
+            "{ch:?} must reach the query, not be spent on movement or a chord"
+        );
+        assert_eq!(
+            step.state.selection, 0,
+            "{ch:?} must not move the cursor in the manage frame"
+        );
+    }
 }
 
 #[test]
@@ -202,19 +253,18 @@ fn ctrl_a_routes_to_the_add_path_and_leaves_a_note() {
 /// a stale result above a list that has since moved on.
 #[test]
 fn a_new_action_clears_the_previous_note() {
-    let deleted = step(
-        &step(&ManageState::new(), ctrl('x'), Some(&web01())).state,
-        plain('y'),
-        Some(&web01()),
-    );
+    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
+    let answered = step(&armed.state, plain('y'), Some(&web01()));
+    let deleted = manage::settle_delete(&answered.state, &web01(), DeleteOutcome::Removed(web01()))
+        .expect("a real removal settles onto the list");
     assert_eq!(
-        deleted.state.trace,
+        deleted.trace,
         Some(Trace::Deleted {
             connection: web01()
         })
     );
 
-    let next = step(&deleted.state, ctrl('a'), Some(&web02()));
+    let next = step(&deleted, ctrl('a'), Some(&web02()));
 
     assert_eq!(
         next.state.trace,
@@ -238,17 +288,13 @@ fn the_delete_is_scoped_to_the_connection_under_the_chord_not_the_cursor() {
 
     assert_eq!(
         step.effects,
-        vec![Effect::Delete {
-            id: "id-web-01".into()
-        }],
+        vec![Effect::Delete { target: web01() }],
         "the delete must name the Connection the confirm was raised on"
     );
     assert_eq!(
-        step.state.trace,
-        Some(Trace::Deleted {
-            connection: web01()
-        }),
-        "and the note must name the same one, not the one under the cursor now"
+        step.state.phase,
+        Phase::List,
+        "and the frame must come back to the list, still answering about that one"
     );
 }
 
@@ -281,16 +327,14 @@ fn movement_does_not_happen_while_the_confirm_is_open() {
 }
 
 #[test]
-fn answering_y_deletes_the_confirmed_connection_and_returns_to_the_list() {
+fn answering_y_asks_for_exactly_one_delete_and_returns_to_the_list() {
     let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
 
     let step = step(&armed.state, plain('y'), Some(&web01()));
 
     assert_eq!(
         step.effects,
-        vec![Effect::Delete {
-            id: "id-web-01".into()
-        }],
+        vec![Effect::Delete { target: web01() }],
         "`y` must ask for exactly one delete, of the Connection the confirm named"
     );
     assert_eq!(
@@ -299,11 +343,109 @@ fn answering_y_deletes_the_confirmed_connection_and_returns_to_the_list() {
         "the confirm is over once it has been answered"
     );
     assert_eq!(
-        step.state.trace,
-        Some(Trace::Deleted {
+        step.state.trace, None,
+        "the keystroke must not pre-commit a `deleted` note. The state machine \
+         owns no disk: the claim is earned by the store's answer, folded in by \
+         `settle_delete`"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 6 — the note reports what the store actually did
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `Store::remove` returning `Ok(None)` means *nothing was deleted and
+/// nothing was written*. A frame that answers that with `◇ deleted` is
+/// lying about the user's `connections.json`: the Connection is still
+/// there, and the next `sshm manage` will show it again.
+///
+/// This is the seam where the claim and the fact meet. The state machine
+/// asks for the delete; the driver runs it; `settle_delete` is the only
+/// place that decides what the frame is allowed to say afterwards.
+#[test]
+fn a_delete_that_removed_nothing_does_not_claim_a_deletion() {
+    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
+    let answered = step(&armed.state, plain('y'), Some(&web01()));
+
+    let state = manage::settle_delete(&answered.state, &web01(), DeleteOutcome::Absent)
+        .expect("a delete that found nothing is not a failure: the frame stays up");
+
+    assert!(
+        !matches!(state.trace, Some(Trace::Deleted { .. })),
+        "the frame may not claim a deletion the store never performed: {:?}",
+        state.trace
+    );
+    assert_eq!(
+        state.trace,
+        Some(Trace::DeleteFailed {
             connection: web01()
         }),
-        "the list must come back showing what was deleted"
+        "it must instead say that the delete did not happen"
+    );
+    assert_eq!(
+        state.phase,
+        Phase::List,
+        "and it must stay on the list rather than abandon or collapse the frame"
+    );
+}
+
+/// The mirror case: a real removal earns the `◇ deleted` note, and the note
+/// names the Connection the store handed back — the same one the confirm
+/// was raised on, because that is the id that was deleted.
+#[test]
+fn a_delete_that_removed_a_connection_earns_the_deleted_note() {
+    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
+    let answered = step(&armed.state, plain('y'), Some(&web01()));
+
+    let state = manage::settle_delete(&answered.state, &web01(), DeleteOutcome::Removed(web01()))
+        .expect("a delete that removed a Connection is the success path");
+
+    assert_eq!(
+        state.trace,
+        Some(Trace::Deleted {
+            connection: web01()
+        })
+    );
+}
+
+/// A store that refused the delete is not a note on a live frame: the list
+/// it is showing can no longer be trusted. #31's `Settled` set has an
+/// `error` arm for exactly this, and story 34 requires it be designed.
+#[test]
+fn a_store_failure_is_reported_as_a_failure_not_a_note() {
+    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
+    let answered = step(&armed.state, plain('y'), Some(&web01()));
+
+    let outcome = manage::settle_delete(
+        &answered.state,
+        &web01(),
+        DeleteOutcome::Failed("Permission denied (os error 13)".into()),
+    );
+
+    assert_eq!(
+        outcome,
+        Err("Permission denied (os error 13)".into()),
+        "the store's own message must survive to be reported, not be swallowed"
+    );
+}
+
+/// The classification of `Store::remove`'s three shapes is the whole
+/// contract between the driver and this module, so it is pinned here rather
+/// than left to be re-derived at the call site.
+#[test]
+fn the_store_answer_classifies_into_the_three_outcomes() {
+    assert_eq!(
+        DeleteOutcome::from_remove(Ok(Some(web01()))),
+        DeleteOutcome::Removed(web01())
+    );
+    assert_eq!(
+        DeleteOutcome::from_remove(Ok(None)),
+        DeleteOutcome::Absent,
+        "Ok(None) is the nothing-was-deleted shape, not a success"
+    );
+    assert_eq!(
+        DeleteOutcome::from_remove(Err("disk on fire".into())),
+        DeleteOutcome::Failed("disk on fire".into())
     );
 }
 

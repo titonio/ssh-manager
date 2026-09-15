@@ -23,9 +23,12 @@ states — and nothing else.
   nothing to fill, and a hue alone vanishes under `NO_COLOR`.
 - **The hint rail must be width-fitted.** `build_frame` runs it through
   `fit_hints_with` against `canvas.fit_width() - GUTTER`, dropping whole
-  segments from the least-needed end. The full Manage rail cannot fit an
-  80-column terminal; unfitted it clipped mid-word (`Ctrl+X dele`). Order is
-  the contract: escape hatch → Enter → movement → discovery.
+  segments from the least-needed end. The 87-column Manage rail that #36
+  first shipped could not fit an 80-column terminal and clipped mid-word
+  (`Ctrl+X dele`); the rail is short enough for 80 now, but the fitting
+  rule is what makes that safe at *any* width. Order is the contract:
+  escape hatch → Enter → movement → the action. And nothing on the rail
+  that does not do what its label says — see the manage bullets below.
 - **Colour is an input, not a constant.** The frame draws
   `Theme::clack().resolve(canvas.support)`. Under `NO_COLOR` or `TERM=dumb`
   the whole palette becomes `Reset` before a span exists. Glyphs and
@@ -70,11 +73,39 @@ exactly one thing: what Enter means. That difference is modelled once, in
 | `sshm pick` | `Insert` | Pick | Writes the alias alone to stdout, for the shell to insert |
 | `sshm manage` | `Edit` | Manage | Routes the selection to the edit path |
 
-- **`sshm manage` does not edit anything yet.** Enter resolves to
-  `Action::Edit(conn)` and the runner writes nothing: the edit itself is
-  #36/#37. The frame's `Enter edit` hint names the route, not a completed
-  change, and the runner deliberately adds no settle verb claiming a file
-  moved.
+- **`sshm manage` deletes for real; it still does not edit.** `Ctrl+X`
+  raises the inline `◆ Delete … ? (y/N)` confirm and a `y` answer persists
+  the removal through `connections::Store::remove` — the file on disk
+  changes, and the frame returns to the list with the settled
+  `■ Delete [prod] web-01? Yes` and the dim `◇ deleted [prod] web-01`
+  note. That is #36's whole write path, and it is the only one this surface
+  has.
+- **Enter and `Ctrl+E` still write nothing.** Enter resolves to
+  `Action::Edit(conn)` and the runner adds no settle verb claiming a file
+  moved: the `Enter edit` hint names the *route*, which is the `--emit`
+  axis, not a completed change. `Ctrl+E` is routed to the same place and is
+  byte-identical to Enter — which is precisely why it is **not** on the
+  hint rail. A label that promises "edit" on a chord that only repeats Enter
+  teaches a binding that does not do what it says. #37 builds the
+  single-field editor and puts the chord back on the rail with it.
+- **`Ctrl+A` is read and answered, but not advertised.** The chord reaches
+  the driver as an add request and the frame replies with the dim
+  `◇ add — not built yet; run sshm add for now` note rather than
+  swallowing the keystroke. It is off the rail for the same reason
+  `Ctrl+E` is: the named action — adding a Connection — does not happen.
+- **The manage rail lists only keys that work in the current build.**
+  `Esc cancel · Enter edit · ↑↓ navigate · Ctrl+X delete`. Two gates hold
+  that: `assert_advertised_chords_are_live` (a hinted chord must be one
+  `manage::step` acts on) and
+  `the_manage_rail_advertises_only_the_keys_that_work` (a hinted chord must
+  do the thing its label names).
+- **A failed delete collapses the frame; it does not abandon it.** When the
+  store refuses the removal the frame settles to
+  `◆ error  [prod] web-01  (deploy@10.0.0.4:22)  — <the store's reason>`
+  and the process exits non-zero. Before this the error escaped with
+  eleven painted rows and no trace, over a list the store had just proved
+  it could not vouch for. `error` is a state in #31's `Settled` set and
+  story 34 requires it be designed; this is that design.
 - **Cancel is a promise.** Esc or Ctrl-C resolves to `Cancelled` under every
   emit and exits 130. It must leave the shell buffer exactly as it was. Not
   "mostly". The user's half-typed command is the contract.
@@ -85,10 +116,10 @@ exactly one thing: what Enter means. That difference is modelled once, in
   and you corrupt the user's command line. Keys already come from the
   terminal: crossterm reads stdin when it is a tty and opens `/dev/tty`
   itself when it is not.
-- **One settle line.** Both a pick and a cancel leave a trace
-  (`◆ picked …` / `◆ cancelled`) — one line, for all three commands. The
-  emit axis decides what happens to the pick *after* the frame is gone; it
-  must not print a second one.
+- **One settle line.** Every exit leaves a trace
+  (`◆ picked …` / `◆ cancelled` / `◆ error …`) — one line, for all three
+  commands. The emit axis decides what happens to the pick *after* the
+  frame is gone; it must not print a second one.
 
 The remaining commands (`add`, `init <shell>`, `completions <shell>`,
 `check-update`) draw nothing.

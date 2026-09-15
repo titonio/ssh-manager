@@ -113,11 +113,46 @@ regression.
 
 | Glyph | Role | Carries | Notes |
 |---|---|---|---|
-| `◆` | `accent` | The step of the flow | Opens every frame: `◆ <question>`; also opens both settle traces (`◆ picked …`, `◆ cancelled`) |
+| `◆` | `accent` | The step of the flow | Opens every frame: `◆ <question>`; also opens the settle traces (`◆ picked …`, `◆ cancelled`, `◆ error …`) |
 | `│` | `border` | The rail every body line hangs off | Chrome; never carries state |
 | `❯` | `accent` + `BOLD` | **Selection** | Blank (same width) on unselected rows |
 | `└` | `border` | Closes the rail | Chrome; the frame's last line |
 | `·` | `fg_muted` + `DIM` | Separates hint segments | Dropped with its segment, never stranded |
+| `■` | `fg_muted` + `DIM`, with the alias and the answer in `BOLD` | **A question that has been answered** — the settled confirm step | `■ Delete [prod] web-01? Yes` / `? No`. `◆` asks, `■` has been answered: the glyph is the entire difference between a live confirm and a settled one, which is what keeps that difference readable with colour off. Both the yes and the no answer wear it — a declined delete leaves a trace too (story 22). |
+| `◇` | `fg_muted` + `DIM`, with the alias in `BOLD` | **What the last action did** — the dim note above the rows | `◇ deleted [prod] web-01`. Also the note with no Connection to name (`◇ add — not built yet; run sshm add for now`), and the note that contradicts the settled `■ Yes` when the store removed nothing (`◇ delete failed — no such Connection: …`). |
+
+### The ask / answered / noted grammar
+
+Three glyphs carry the manage frame's whole sense of time:
+
+- `◆` — **asking now**. The header is the question.
+- `■` — **answered**. The question is no longer live; the answer is on the record.
+- `◇` — **what happened as a result**. The note is a claim about the world, not
+  about the keystroke.
+
+The two are deliberately different glyphs because they are deliberately
+different *claims*, and the frame must be able to make one without the other.
+`■ Delete [prod] web-01? Yes` followed by
+`◇ delete failed — no such Connection: [prod] web-01` is a frame that
+records an answer the user gave and refuses to record an outcome the store
+never produced. Collapsing both onto one glyph is what let a delete that did
+not happen read as one that did.
+
+**The honesty rule for `◇`: the word `deleted` appears on a frame only when
+a Connection was really removed.** `Store::remove` returning `Ok(None)`
+means nothing was deleted and nothing was written, and the note for that is
+`delete failed — no such Connection`, worded so it cannot be scanned as
+`deleted`. The gate for this is
+`a_delete_that_removed_nothing_never_renders_as_deleted` in
+`manage_frame_test.rs`; the seam that enforces it is `manage::settle_delete`,
+which is the only place a `Trace::Deleted` may be created.
+
+`■` and `◇` are `fg_muted` + `DIM` rather than `accent` because they are
+history, not the live step: the frame's accent marks *where you are*, and a
+settled line that kept shouting in cyan would compete with the header for the
+one thing the accent role means. The state they carry is in the glyph and the
+words, so it survives `NO_COLOR` intact
+(`the_flow_glyphs_survive_monochrome`).
 
 `◆` is `accent` **wherever it appears**, including the cancel trace. That is
 not decoration: the cancel icon *is* state ("this step was abandoned"), and

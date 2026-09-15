@@ -423,8 +423,8 @@ fn the_highlighted_columns_are_the_row_text_offsets_the_matcher_reports() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The manage frame names itself, leads with the escape hatch (user story 23),
-/// and advertises the management chords — **only because #36 put handlers
-/// behind them**.
+/// and advertises only the management chord that actually performs its
+/// named action.
 ///
 /// This gate used to assert the opposite: that the manage frame carried **no**
 /// Ctrl chords, because `run_inline` read no Ctrl key but `Ctrl+C` and a
@@ -434,6 +434,13 @@ fn the_highlighted_columns_are_the_row_text_offsets_the_matcher_reports() {
 /// `Ctrl+<letter>` the frame prints must be one `manage::step` acts on,
 /// checked here rather than asserted by hand, so the hint cannot outlive its
 /// handler or the handler lose its hint without this failing.
+///
+/// `Ctrl+A add` and `Ctrl+E edit` are gone from the rail (#36 review): both
+/// were read by `manage::step` and neither did the thing its label named —
+/// `Ctrl+A` answered "not built yet" and `Ctrl+E` left the frame identical
+/// to Enter. Being *handled* is not the bar; doing what the hint says is.
+/// `manage_frame_test.rs` pins that they stay off the rail until #37 earns
+/// them back.
 #[test]
 fn manage_frame_hints_lead_with_the_escape_hatch_and_carry_only_live_chords() {
     let frame = build_frame(&conns(), "", 0, FrameMode::Manage, wide());
@@ -441,7 +448,7 @@ fn manage_frame_hints_lead_with_the_escape_hatch_and_carry_only_live_chords() {
     assert_eq!(line_text(&frame.lines()[0]), "◆ Manage Connections");
     assert_eq!(
         hint_rail(&frame),
-        "│   Esc cancel · Enter edit · ↑↓ navigate · Ctrl+A add · Ctrl+E edit · Ctrl+X delete"
+        "│   Esc cancel · Enter edit · ↑↓ navigate · Ctrl+X delete"
     );
     assert_advertised_chords_are_live(&frame);
 }
@@ -519,11 +526,13 @@ fn the_hint_rail_is_dim() {
     );
 }
 
-/// The full Manage rail is 84 columns and cannot fit an 80-column terminal.
+/// The rail is fitted, so it never overflows whatever canvas it is handed.
 ///
-/// Before the rail was fitted it was emitted whole and the terminal clipped the
-/// tail mid-word, so `Ctrl+X delete` arrived as `Ctrl+X dele`. Fitted, the
-/// least-needed segment goes and every surviving segment arrives intact.
+/// Before the rail was fitted it was emitted whole and the terminal clipped
+/// the tail mid-word, so `Ctrl+X delete` arrived as `Ctrl+X dele`. Fitted,
+/// the least-needed segment goes and every surviving segment arrives intact
+/// — at every width, including the 80-column terminal the old 87-column
+/// manage rail could not fit at all.
 #[test]
 fn the_hint_rail_never_overflows_the_canvas() {
     for width in [40usize, 60, 80, 100, 120] {
@@ -546,9 +555,13 @@ fn the_hint_rail_never_overflows_the_canvas() {
 
 /// A narrow terminal keeps the escape hatch and loses the tail — on a segment
 /// boundary, never mid-word.
+///
+/// 50 columns, not 60: with the two unfulfilled chords off the manage rail
+/// the whole rail now fits 60, so the width that proves the drop-from-the-end
+/// rule had to come down to where the tail genuinely no longer fits.
 #[test]
 fn a_narrow_canvas_keeps_the_escape_hatch_and_drops_the_tail_whole() {
-    let frame = build_frame(&conns(), "", 0, FrameMode::Manage, canvas(60));
+    let frame = build_frame(&conns(), "", 0, FrameMode::Manage, canvas(50));
     let rail = line_text(
         frame
             .lines()
@@ -567,7 +580,7 @@ fn a_narrow_canvas_keeps_the_escape_hatch_and_drops_the_tail_whole() {
     );
     assert!(
         !rail.contains("Ctrl+X delete"),
-        "the least-needed segment should have been dropped at 60 columns: {rail:?}"
+        "the least-needed segment should have been dropped at 50 columns: {rail:?}"
     );
     assert!(
         !rail.ends_with('·') && !rail.ends_with(' ') && !rail.ends_with("dele"),

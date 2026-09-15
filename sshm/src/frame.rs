@@ -326,6 +326,13 @@ fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> 
             settled_confirm_line(connection, true, t),
             note_line("deleted", connection, t),
         ],
+        // The user answered yes and the store had nothing to remove. The
+        // settled line still records the answer — it was given — but the
+        // note says the opposite of `deleted`, because nothing was.
+        Some(crate::manage::Trace::DeleteFailed { connection }) => vec![
+            settled_confirm_line(connection, true, t),
+            note_line(DELETE_FAILED_NOTE, connection, t),
+        ],
         Some(crate::manage::Trace::Declined { connection }) => {
             vec![settled_confirm_line(connection, false, t)]
         }
@@ -355,6 +362,14 @@ fn plain_note_line(text: &str, t: &Theme) -> Line<'static> {
 /// The note the add chord leaves: the route is real, the sequence is not
 /// built yet, and the frame says so instead of swallowing the keystroke.
 const ADD_NOTE: &str = "add — not built yet; run sshm add for now";
+
+/// The note a `y` that removed nothing leaves.
+///
+/// Worded so it cannot be misread as the `deleted` note above it: the store
+/// reported no such Connection, so nothing was removed and nothing was
+/// written. The word "deleted" never appears on a frame where a deletion
+/// did not happen — that is the whole rule this note exists to keep.
+const DELETE_FAILED_NOTE: &str = "delete failed — no such Connection:";
 
 /// The `■` line: the confirm's question, answered.
 ///
@@ -885,13 +900,20 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// The order is the contract, not a stylistic choice — on a narrow terminal the
 /// tail gets dropped, so what is listed first is what survives (user story 23).
 ///
-/// The manage frame advertises its Ctrl chords because #36 put handlers
-/// behind them. Until then it advertised none: `run_inline` read no Ctrl key
-/// but `Ctrl+C`, and a hint for a key that does nothing is worse than no
-/// hint at all — it teaches the user a binding that silently fails. The
-/// rule still holds and is the reason the chords are last in the list: they
-/// are the first thing a narrow terminal loses, and losing a hint is cheap
-/// while losing the escape hatch is not.
+/// **The rail lists only keys that actually work in this build.** That rule
+/// cut `Ctrl+A add` and `Ctrl+E edit` from the manage rail: `Ctrl+A`
+/// answered its own chord with "not built yet", and `Ctrl+E` left the frame
+/// byte-identical to Enter, so each advertised an action that does not
+/// happen. The chords stay wired — `manage::step` still routes both, and
+/// `Ctrl+A` still answers visibly — they are just not *hinted* until #37
+/// gives them the behaviour their labels promise. `Ctrl+X delete` stays
+/// because it really deletes.
+///
+/// The rule is the frame's own and it cuts both ways: `assert_advertised_
+/// chords_are_live` in `frame_test.rs` fails if a chord is hinted without a
+/// handler, and `the_manage_rail_advertises_only_the_keys_that_work` in
+/// `manage_frame_test.rs` fails if a chord is hinted whose named action is
+/// not the one that happens.
 ///
 /// While the delete confirm is open the rail changes to the answers that
 /// step actually reads, in the same order: the way out first.
@@ -915,14 +937,10 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
                 // for, free here because the line was written in that order.
                 "sshm manage to add or edit",
             ],
-            FrameMode::Manage => &[
-                "Esc cancel",
-                "Enter edit",
-                "↑↓ navigate",
-                "Ctrl+A add",
-                "Ctrl+E edit",
-                "Ctrl+X delete",
-            ],
+            // Only what works: `Ctrl+A`/`Ctrl+E` are deliberately absent until
+            // #37 makes them do what they would say. Dropping them also means
+            // the whole manage rail now fits an 80-column terminal.
+            FrameMode::Manage => &["Esc cancel", "Enter edit", "↑↓ navigate", "Ctrl+X delete"],
         }
     };
 

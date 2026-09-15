@@ -392,6 +392,21 @@ class Demo:
         print(f"    non-blank rows on screen: {self.screen.nonblank_height()}"
               f"   alternate screen: {self.screen.alt_screen}")
 
+    def exit_code(self, timeout=3.0):
+        """The child's exit status, or None if it is still running."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                pid, status = os.waitpid(self.pid, os.WNOHANG)
+            except ChildProcessError:
+                return None
+            if pid:
+                if os.WIFEXITED(status):
+                    return os.WEXITSTATUS(status)
+                return None
+            time.sleep(0.05)
+        return None
+
 
 def scenario_pick():
     d = Demo(["pick"])
@@ -677,6 +692,97 @@ def scenario_manage():
     check("Ctrl+C deleted nothing", sha() == h2)
     check("no alternate screen on any manage path", not d.screen.alt_screen)
 
+    # ── run 4: the rail lists only keys that work (#36 review) ─────────
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.dump("AC. the manage rail, as painted")
+    rail = d.screen.text()[FRAME_ROW + len(d.screen.frame_rows()) - 2]
+    check("the rail still names the chord that really deletes",
+          "Ctrl+X delete" in rail, repr(rail))
+    for unfulfilled in ("Ctrl+A", "Ctrl+E"):
+        check(f"the rail no longer advertises {unfulfilled}",
+              unfulfilled not in rail, repr(rail))
+    check("the rail keeps the escape hatch and movement",
+          "Esc cancel" in rail and "↑↓ navigate" in rail, repr(rail))
+    d.send(ESC, 0.4)
+
+    # ── run 5: `jakarta` — every printable reaches the filter ──────────
+    #
+    # `j` and `k` were bound to movement, carried over from the pick path,
+    # which made a search containing either untypeable. The frame echoes the
+    # query back in its no-match line, so the exact string on the glass is
+    # the proof: one missing or reordered character and it does not match.
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.send(b"jakarta", 0.6)
+    d.dump("AD. typed `jakarta` — j and k are filter text, not movement")
+    joined = "\n".join(d.screen.frame_rows())
+    check('the whole word reached the filter: No matches for "jakarta"',
+          'No matches for "jakarta"' in joined, joined)
+    check("typing it deleted nothing", sha() == h2)
+
+    # ...and it backspaces out to the full list again, so the word really
+    # was the only thing separating the user from their Connections.
+    for _ in range(7):
+        d.send(BACKSPACE, 0.12)
+    d.dump("AE. backspaced the word away — the list is whole again")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the list came back whole after clearing the filter",
+          "10.0.0.5" in joined and "No matches" not in joined, joined)
+    check("clearing the filter wrote nothing", sha() == h2)
+    d.send(ESC, 0.4)
+
+
+def scenario_manage_error():
+    """#36 review: a failed delete collapses the frame; it does not abandon it.
+
+    The Connections file is made read-only, so `Store::remove` removes the
+    Connection from the in-memory set and then fails to write it back. The
+    frame must settle to `◆ error …` with the store's own reason, leave no
+    rail or corner behind, and exit non-zero — not sit there painted with
+    eleven rows and no trace, which is what this path used to do.
+    """
+    home = tempfile.mkdtemp(prefix="sshm-pty-fail-")
+    os.makedirs(os.path.join(home, ".ssh"), exist_ok=True)
+    cfg = os.path.join(home, ".ssh", "connections.json")
+    with open(cfg, "w") as f:
+        json.dump(
+            {"connections": [
+                {"id": "id-web-01", "alias": "web-01", "host": "10.0.0.4",
+                 "user": "deploy", "port": 22, "folder": "prod"}
+            ]},
+            f, indent=2)
+    os.chmod(cfg, 0o444)
+
+    CTRL_X = b"\x18"
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.8)
+    d.dump("AF. frame open over a Connections file that cannot be written")
+    d.send(CTRL_X, 0.4)
+    d.send(b"y", 1.0)
+    d.dump("AG. y on a delete the store cannot persist")
+
+    text = d.screen.text()
+    errors = [r for r in text if r.startswith("◆ error")]
+    check("the failed delete settles to the `◆ error` trace",
+          len(errors) == 1, f"{errors}")
+    if errors:
+        check("the error trace names the Connection the action was about",
+              "web-01" in errors[0], errors[0])
+        check("the error trace carries the store's own reason",
+              "denied" in errors[0].lower(), errors[0])
+    below = "\n".join(text[PROMPT_ROW:])
+    check("no live frame was abandoned: no rail below the prompt", "│" not in below,
+          repr(below))
+    check("no live frame was abandoned: no corner left behind", "└" not in below,
+          repr(below))
+    code = d.exit_code()
+    check("the process exits non-zero so the failure is loud as well as visible",
+          code not in (None, 0), f"exit code: {code}")
+    check("no alternate screen on the error path", not d.screen.alt_screen)
+
+    os.chmod(cfg, 0o644)
+
 
 def main():
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
@@ -689,6 +795,7 @@ def main():
         "short": scenario_short_terminal,
         "too-short": scenario_too_short_at_open,
         "manage": scenario_manage,
+        "manage-error": scenario_manage_error,
     }
     if which == "all":
         for fn in scenarios.values():

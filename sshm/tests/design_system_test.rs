@@ -28,7 +28,7 @@
 //! gated in `frame_test.rs`, at the seam that produces them.
 
 use ratatui::style::Color;
-use sshm::frame::{build_frame, Canvas, FrameMode};
+use sshm::frame::{build_frame, build_frame_with_flow, Canvas, FrameFlow, FrameMode};
 use sshm::theme::{ColorSupport, Theme};
 
 fn conns() -> Vec<sshm::config::Connection> {
@@ -72,6 +72,12 @@ fn no_color_literals_outside_the_theme_module() {
         "src/frame.rs",
         "src/inline.rs",
         "src/main.rs",
+        // `manage.rs` feeds the rendered flow through `FrameFlow`, so it is
+        // render-adjacent code on the live path. It carries no colour today,
+        // but this whitelist *is* the enforcement mechanism: a module left
+        // off it is a module the gate does not read, and the day someone
+        // gives a trace a hue the test would say nothing.
+        "src/manage.rs",
     ];
     let forbidden = [
         "Color::Rgb(",
@@ -362,6 +368,56 @@ fn dump_frames_for_review() {
                 Canvas::new(80, 24, truecolor),
             ),
         ),
+        // The #36 flow glyphs: `◆` asks, `■` has been answered, `◇` says
+        // what happened. They are load-bearing state, so they get dumped for
+        // the same human read the rest of the grammar gets — including the
+        // one note whose whole job is *not* to claim a deletion.
+        (
+            "frame-manage-confirm",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: Some(c[0].clone()),
+                    trace: None,
+                },
+            ),
+        ),
+        (
+            "frame-manage-deleted",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    trace: Some(sshm::manage::Trace::Deleted {
+                        connection: c[0].clone(),
+                    }),
+                },
+            ),
+        ),
+        (
+            "frame-manage-delete-failed",
+            build_frame_with_flow(
+                &c,
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    trace: Some(sshm::manage::Trace::DeleteFailed {
+                        connection: c[0].clone(),
+                    }),
+                },
+            ),
+        ),
     ] {
         // The frame's own name already carries the support it was built with;
         // appending the *detected* mode here would mislabel a truecolour frame
@@ -370,4 +426,24 @@ fn dump_frames_for_review() {
         std::fs::write(&path, frame.to_ansi()).unwrap_or_else(|e| panic!("write {path}: {e}"));
         eprintln!("wrote {path}");
     }
+
+    // The `◆ error` settle is a single line, not a frame, so it is dumped
+    // beside them rather than as one.
+    let error_line = sshm::inline::settle_trace(
+        &sshm::inline::Settle::Error {
+            connection: c[0].clone(),
+            message: "Permission denied (os error 13)".into(),
+        },
+        Canvas::new(80, 24, truecolor),
+    );
+    let path = format!("{dir}/frame-manage-error-settle.ansi");
+    std::fs::write(
+        &path,
+        error_line
+            .iter()
+            .map(|l| sshm::theme::ansi::line_to_ansi(l))
+            .collect::<String>(),
+    )
+    .unwrap_or_else(|e| panic!("write {path}: {e}"));
+    eprintln!("wrote {path}");
 }

@@ -56,8 +56,20 @@ pub enum Phase {
 /// frame answers "what just happened" without scrolling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trace {
-    /// The confirm was answered `y`: this is the Connection that was removed.
+    /// The confirm was answered `y` **and the store really removed it**.
+    ///
+    /// Earned through [`settle_delete`], never set by the keystroke: this is
+    /// the frame telling the user their `connections.json` lost a
+    /// Connection, and only the store gets to say whether it did.
     Deleted { connection: Connection },
+    /// The confirm was answered `y` and the store had no such Connection:
+    /// nothing was deleted and nothing was written.
+    ///
+    /// Distinct from [`Trace::Declined`] — the user *did* say yes — and from
+    /// [`Trace::Deleted`], which this exists to forbid when the removal did
+    /// not happen. The frame says so rather than letting the list go on
+    /// showing a Connection it just claimed to have deleted.
+    DeleteFailed { connection: Connection },
     /// The confirm was answered no, or abandoned. Nothing changed.
     Declined { connection: Connection },
     /// `Ctrl+A` was routed to the add path.
@@ -73,6 +85,21 @@ pub enum Trace {
 ///
 /// The frame is a function of this value, and this value is a function of the
 /// keys, which is what makes the whole surface reviewable as data.
+///
+/// **The pick path drives this value too**, and only two of its four fields
+/// mean anything there: `run_inline`'s pick branch reads and writes
+/// `query`/`selection` and never touches `phase` or `trace`, which stay at
+/// their defaults — and `build_frame_with_flow` discards the flow projection
+/// for a pick frame anyway, because a pick frame asks no questions and
+/// leaves no notes. A shared `InlineState` would name that split better.
+/// It is not taken here because the rename is 58 sites across six files —
+/// including `manage_test.rs` and `manage_frame_test.rs`, where a
+/// flow-neutral type called `InlineState` reads worse than the honest
+/// `ManageState` in the file that tests the manage flow — and because the
+/// change would sit on top of this commit's behaviour changes and make
+/// *those* harder to review. The cheap half of the fix is this note; the
+/// expensive half is the pick path getting its own state, which is worth
+/// doing when it next has a reason to change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManageState {
     /// The live filter text.
@@ -121,10 +148,14 @@ impl ManageState {
 /// and of the disk while still driving both.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
-    /// Persist the removal of the Connection with this id.
+    /// Persist the removal of the Connection the confirm named.
     ///
     /// Emitted only from the confirm step, and only for the captured target.
-    Delete { id: String },
+    /// The whole Connection travels with the request rather than just its
+    /// id, because the answer the frame owes the user afterwards is about
+    /// *this* Connection — and if the store reports it never had one, the
+    /// id alone leaves the driver nothing honest to say.
+    Delete { target: Connection },
     /// Start adding a Connection.
     ///
     /// #37 replaces what the driver does with this — the `◆ Alias` →
@@ -133,6 +164,80 @@ pub enum Effect {
     BeginAdd,
     /// Leave the frame with this outcome.
     Exit(InlineOutcome),
+}
+
+/// What a [`Store::remove`] call actually did.
+///
+/// The state machine cannot know this: it owns no disk, and it must not
+/// guess. The driver runs the effect and hands the result back through
+/// [`settle_delete`], which is the one place the frame's claim about a
+/// deletion is checked against the deletion.
+///
+/// [`Store::remove`]: crate::connections::Store::remove
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteOutcome {
+    /// A Connection really was removed, and the store hands it back.
+    Removed(Connection),
+    /// No Connection had that id: nothing was deleted and nothing written.
+    Absent,
+    /// The store refused the delete and said why.
+    Failed(String),
+}
+
+impl DeleteOutcome {
+    /// Classify what [`Store::remove`] returned.
+    ///
+    /// `Ok(None)` is its own arm and not a success: the module's contract is
+    /// that nothing was written, and a frame that reads it as "deleted" is
+    /// describing a file it never touched.
+    ///
+    /// [`Store::remove`]: crate::connections::Store::remove
+    pub fn from_remove(result: Result<Option<Connection>, String>) -> Self {
+        match result {
+            Ok(Some(conn)) => DeleteOutcome::Removed(conn),
+            Ok(None) => DeleteOutcome::Absent,
+            Err(message) => DeleteOutcome::Failed(message),
+        }
+    }
+}
+
+/// Fold the store's answer to [`Effect::Delete`] into the state the frame is
+/// rebuilt from.
+///
+/// This is the seam that keeps the `◇ deleted` note honest. The keystroke
+/// says what the user asked for; only this function decides what the frame
+/// may then claim:
+///
+/// * [`DeleteOutcome::Removed`] — the note earns `deleted`.
+/// * [`DeleteOutcome::Absent`] — the frame stays up and says the delete did
+///   not happen. The Connection is still on disk and the list still shows
+///   it, so a `deleted` note here would be a flat contradiction of the
+///   rows underneath it.
+/// * [`DeleteOutcome::Failed`] — `Err`, and the caller collapses the frame:
+///   `error` from #31's `Settled` set (story 34). A live list of
+///   Connections the store cannot vouch for is worse than no list, and a
+///   painted frame the user cannot read the failure in is the failure this
+///   replaced.
+///
+/// [`Ok(None)`]: crate::connections::Store::remove
+pub fn settle_delete(
+    state: &ManageState,
+    target: &Connection,
+    outcome: DeleteOutcome,
+) -> Result<ManageState, String> {
+    match outcome {
+        DeleteOutcome::Removed(conn) => Ok(ManageState {
+            trace: Some(Trace::Deleted { connection: conn }),
+            ..state.clone()
+        }),
+        DeleteOutcome::Absent => Ok(ManageState {
+            trace: Some(Trace::DeleteFailed {
+                connection: target.clone(),
+            }),
+            ..state.clone()
+        }),
+        DeleteOutcome::Failed(message) => Err(message),
+    }
 }
 
 /// The outcome of one keystroke: the state to become, and the effects to run.
@@ -230,14 +335,14 @@ fn list_step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) 
         KeyCode::Backspace => {
             next.query.pop();
         }
-        // `hjkl` is the frame's existing movement binding, carried over from
-        // the pick loop unchanged. It is not a management action, so it does
-        // not collide with rule 2 — but it does mean `j` and `k` are not
-        // filter text, which the sweep test names explicitly.
-        KeyCode::Char('j') if key.modifiers.is_empty() => next.selection += 1,
-        KeyCode::Char('k') if key.modifiers.is_empty() => {
-            next.selection = next.selection.saturating_sub(1)
-        }
+        // Every remaining printable is filter text. `j` and `k` are **not**
+        // bound to movement here, deliberately: they were carried over from
+        // the pick path, and they made `jakarta` untypeable — a filter with
+        // two holes is not the "live filter field that accepts every
+        // printable character" user story 21 asks for. The manage frame
+        // moves with the arrows, which is what its hint rail names; the
+        // pick frame keeps `hjkl` because story 21 is a manage requirement
+        // and nothing here needs to win an argument with it.
         KeyCode::Char(ch) if key.modifiers.is_empty() => next.query.push(ch),
         _ => return Step::state_only(state.clone()),
     }
@@ -264,16 +369,19 @@ fn confirm_step(state: &ManageState, key: KeyEvent, target: &Connection) -> Step
     }
 
     if is_answer(key, 'y') {
+        // The ask, not the claim. `trace` deliberately stays empty: whether
+        // anything was deleted is a fact about the disk, and the disk has
+        // not been asked yet. The driver runs the effect and folds the
+        // answer back through [`settle_delete`], which is what puts
+        // `deleted` — or the honest substitute — on the frame.
         return Step {
             state: ManageState {
                 phase: Phase::List,
-                trace: Some(Trace::Deleted {
-                    connection: target.clone(),
-                }),
+                trace: None,
                 ..state.clone()
             },
             effects: vec![Effect::Delete {
-                id: target.id.clone(),
+                target: target.clone(),
             }],
         };
     }

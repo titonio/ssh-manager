@@ -329,11 +329,173 @@ fn the_cancel_trace_draws_its_step_icon_in_the_documented_role() {
     );
 }
 
+/// A failed action settles to an `error` trace.
+///
+/// #31's `Settled` set is `picked | cancelled | added | edited | deleted |
+/// error`, and story 34 requires every one of those states be designed.
+/// Before this, a `Store::remove` that failed escaped `run_inline` with the
+/// frame still painted: no collapse, no trace, a live list of Connections
+/// the store could not vouch for, and the user's shell left holding eleven
+/// rows that would never answer again.
+#[test]
+fn a_failed_action_settles_to_an_error_trace_that_reports_the_failure() {
+    let trace = settle_trace(
+        &Settle::Error {
+            connection: web01(),
+            message: "Permission denied (os error 13)".into(),
+        },
+        canvas(),
+    );
+
+    assert_eq!(trace.len(), 1, "one settle line, like every other settle");
+
+    let text = line_text(&trace[0]);
+    assert!(
+        text.starts_with("◆ error"),
+        "the trace must wear the `error` state from the spec's set: {text}"
+    );
+    assert!(
+        text.contains("[prod] web-01"),
+        "it must name the Connection the action was about: {text}"
+    );
+    assert!(
+        text.contains("Permission denied (os error 13)"),
+        "and carry the store's own reason, not a generic shrug: {text}"
+    );
+}
+
+/// The error line is the one settle trace whose text comes from outside the
+/// program, so it is the one that can overflow. A wrapped settle row breaks
+/// the collapse's one-line-per-row count and strands half a message on the
+/// glass, so the line is fitted to the canvas it settles into.
+#[test]
+fn a_long_failure_message_still_settles_to_one_fitted_line() {
+    let narrow = Canvas::new(40, 24, ColorSupport::Truecolor);
+    let trace = settle_trace(
+        &Settle::Error {
+            connection: web01(),
+            message: "the disk caught fire while writing connections.json and \
+                      no further detail is available from the operating system"
+                .into(),
+        },
+        narrow,
+    );
+
+    assert_eq!(trace.len(), 1);
+    assert!(
+        trace[0].width() <= narrow.fit_width(),
+        "the error line must fit the terminal it settles into: {} columns in a \
+         {}-column canvas",
+        trace[0].width(),
+        narrow.fit_width()
+    );
+    assert!(
+        line_text(&trace[0]).starts_with("◆ error"),
+        "fitting must not eat the state glyph: {}",
+        line_text(&trace[0])
+    );
+}
+
+/// The error trace obeys the frame's transparency and degradation rules like
+/// every other line the frame leaves behind.
+#[test]
+fn the_error_trace_is_transparent_and_degrades_to_monochrome() {
+    let error = Settle::Error {
+        connection: web01(),
+        message: "boom".into(),
+    };
+
+    for line in settle_trace(&error, canvas()) {
+        for span in &line.spans {
+            assert_eq!(span.style.bg, None, "the error trace paints a background");
+        }
+    }
+
+    let mono = Canvas::new(80, 24, ColorSupport::Monochrome);
+    let ansi = sshm::theme::ansi::line_to_ansi(&settle_trace(&error, mono)[0]);
+    let coloured: Vec<String> = sgr_params(&ansi)
+        .into_iter()
+        .filter(|p| !matches!(p.as_str(), "0" | "1" | "2" | "39" | "49"))
+        .collect();
+    assert!(
+        coloured.is_empty(),
+        "the monochrome error trace emitted colour: {coloured:?}"
+    );
+    assert!(
+        ansi.contains("error") && ansi.contains("boom"),
+        "the state and the reason must survive with colour off: {ansi}"
+    );
+}
+
+/// A failure reason that has to be cut must say it was cut.
+///
+/// `fit_line` will happily stop at the last whole character, which on a
+/// 60-column terminal turned "Permission denied (os error 13)" into
+/// "Permission denied (os " — a message that reads as a complete thought
+/// and then simply stops. The ellipsis is the difference between *truncated*
+/// and *broken*, and the full reason is still on stderr either way.
+#[test]
+fn a_failure_message_that_does_not_fit_is_marked_as_truncated() {
+    let narrow = Canvas::new(60, 24, ColorSupport::Truecolor);
+    let trace = settle_trace(
+        &Settle::Error {
+            connection: web01(),
+            message: "the disk caught fire while writing connections.json".into(),
+        },
+        narrow,
+    );
+
+    assert_eq!(trace.len(), 1);
+    let text = line_text(&trace[0]);
+    assert!(
+        text.ends_with('…'),
+        "a cut failure message must be visibly cut, not just end: {text:?}"
+    );
+    assert!(
+        text.starts_with("◆ error  [prod] web-01"),
+        "the state and the Connection survive before the reason: {text}"
+    );
+    assert!(
+        trace[0].width() <= narrow.fit_width(),
+        "and it still fits the canvas: {} columns",
+        trace[0].width()
+    );
+}
+
+/// A reason that does fit is left alone — no ellipsis on a whole message.
+#[test]
+fn a_failure_message_that_fits_is_left_whole() {
+    let trace = settle_trace(
+        &Settle::Error {
+            connection: web01_without_folder(),
+            message: "boom".into(),
+        },
+        Canvas::new(120, 24, ColorSupport::Truecolor),
+    );
+    let text = line_text(&trace[0]);
+
+    assert!(
+        text.ends_with("boom"),
+        "no ellipsis on a whole message: {text}"
+    );
+    assert!(
+        text.starts_with("◆ error  web-01"),
+        "a folder-less Connection leaves no empty brackets: {text}"
+    );
+}
+
 /// The settle trace is part of the user's scrollback now, so it obeys the
 /// frame's transparency rule: no span paints a background.
 #[test]
 fn the_settle_trace_paints_no_background() {
-    for settle in [Settle::Picked(web01()), Settle::Cancelled] {
+    for settle in [
+        Settle::Picked(web01()),
+        Settle::Cancelled,
+        Settle::Error {
+            connection: web01(),
+            message: "boom".into(),
+        },
+    ] {
         for line in settle_trace(&settle, canvas()) {
             for span in &line.spans {
                 assert_eq!(

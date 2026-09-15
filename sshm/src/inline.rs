@@ -41,7 +41,9 @@ use ratatui::text::{Line, Span};
 
 use crate::config::Connection;
 use crate::connections::Store;
-use crate::frame::{build_frame_with_flow, fit_visible_rows, Canvas, Frame, FrameFlow, FrameMode};
+use crate::frame::{
+    build_frame_with_flow, fit_line, fit_visible_rows, Canvas, Frame, FrameFlow, FrameMode,
+};
 use crate::manage::{self, Effect, ManageState};
 use crate::theme::{self, Theme};
 
@@ -67,6 +69,20 @@ pub enum Settle {
     Picked(Connection),
     /// The user left with `Esc`/`Ctrl+C`, or the frame could not be preserved.
     Cancelled,
+    /// An action the store refused.
+    ///
+    /// The `error` arm of #31's `Settled` set, which story 34 requires be
+    /// designed. A failed delete used to escape `run_inline` with the frame
+    /// still on screen — no collapse, no trace, and a live list of
+    /// Connections the store had just proved it could not vouch for. The
+    /// frame now collapses to this line and the process exits non-zero, so
+    /// the failure is both readable and loud.
+    Error {
+        /// The Connection the failed action was about.
+        connection: Connection,
+        /// The store's own reason, carried through verbatim.
+        message: String,
+    },
 }
 
 /// One row of the frame, as an instruction to the driver.
@@ -176,7 +192,52 @@ pub fn settle_trace(settle: &Settle, canvas: Canvas) -> Vec<Line<'static>> {
             icon(t.accent),
             Span::styled(" cancelled", dim),
         ])],
+        Settle::Error {
+            connection,
+            message,
+        } => {
+            // Built through `connection_trace` so the verb is read by the
+            // `#31 Settled set` gate in `design_system_test.rs` rather
+            // than sneaking past it.
+            let mut line = connection_trace("error", connection, &t);
+            let budget = canvas.fit_width();
+            // The reason is the only part of this line that comes from
+            // outside the program, so it is the only part that can arrive
+            // too long. It is cut to the room left over — with an ellipsis,
+            // because a message that simply stops reads as a message that
+            // finished — and the whole line is still fitted as a last
+            // defence: the collapse counts one settle line as one physical
+            // row, and a wrapped row strands half a message on the glass.
+            let reason = fit_reason(message, line.width(), budget);
+            if !reason.is_empty() {
+                line.spans.push(Span::styled(format!("  — {reason}"), dim));
+            }
+            vec![fit_line(line, budget)]
+        }
     }
+}
+
+/// Cut a settle-trace reason down to the room the canvas leaves.
+///
+/// `used` is what the line already spends before the reason; `budget` is
+/// the canvas's own fit width. A reason that fits comes back untouched; one
+/// that does not comes back with its last column spent on `…`, so the
+/// reader can see the cut rather than mistaking it for the end of the
+/// sentence. With no room at all the reason is dropped — `◆ error` plus the
+/// Connection still says what the frame needs to say, and the full text is
+/// on stderr regardless.
+fn fit_reason(message: &str, used: usize, budget: usize) -> String {
+    const SEP: usize = 4; // "  — "
+    if used + SEP + message.chars().count() <= budget {
+        return message.to_string();
+    }
+    let room = budget.saturating_sub(used + SEP);
+    if room == 0 {
+        return String::new();
+    }
+    let mut kept: String = message.chars().take(room - 1).collect();
+    kept.push('…');
+    kept
 }
 
 /// One `◆ <verb>  [folder] alias  (user@host:port)` line.
@@ -534,11 +595,33 @@ pub fn run_inline<W: Write>(
                         .selected_connection_index()
                         .map(|i| store.all()[i].clone());
                     let step = manage::step(&state, key, selected.as_ref());
+                    state = step.state;
 
                     for effect in step.effects {
                         match effect {
-                            Effect::Delete { id } => {
-                                store.remove(&id).map_err(io::Error::other)?;
+                            Effect::Delete { target } => {
+                                // The delete is performed here and its
+                                // result folded straight back through
+                                // [`manage::settle_delete`], so the note
+                                // the frame paints reports what the store
+                                // did rather than what was asked for.
+                                // `Ok(None)` in particular means nothing
+                                // was removed, and the frame says so.
+                                let outcome =
+                                    manage::DeleteOutcome::from_remove(store.remove(&target.id));
+                                match manage::settle_delete(&state, &target, outcome) {
+                                    Ok(next) => state = next,
+                                    // The store refused the delete. The
+                                    // frame collapses to `◆ error …` and
+                                    // the process exits non-zero: a
+                                    // painted frame the user cannot read
+                                    // the failure in, over a list the
+                                    // store just proved unreliable, is
+                                    // the state this replaces.
+                                    Err(message) => {
+                                        return settle_error(&mut live, canvas, &target, message)
+                                    }
+                                }
                             }
                             // #37 replaces this arm with the `◆ Alias` →
                             // `◆ Host` step-sequence. The chord is read and
@@ -552,7 +635,6 @@ pub fn run_inline<W: Write>(
                         }
                     }
 
-                    state = step.state;
                     let (next, synced) = build(store, &state, canvas);
                     frame = next;
                     state.selection = synced;
@@ -561,9 +643,9 @@ pub fn run_inline<W: Write>(
                 }
 
                 match key.code {
-                    KeyCode::Esc => return settle_cancel(&mut live, canvas),
+                    KeyCode::Esc => return settle(&mut live, canvas, InlineOutcome::Cancelled),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return settle_cancel(&mut live, canvas);
+                        return settle(&mut live, canvas, InlineOutcome::Cancelled);
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         state.selection = state.selection.saturating_sub(1);
@@ -613,7 +695,7 @@ pub fn run_inline<W: Write>(
                         // A cancel is a cancel: it leaves the same trace the
                         // `Esc` path leaves, so the user is never left
                         // wondering why the frame disappeared.
-                        return settle_cancel(&mut live, canvas);
+                        return settle(&mut live, canvas, InlineOutcome::Cancelled);
                     }
                 }
             }
@@ -636,13 +718,27 @@ fn settle<W: Write>(
     Ok(outcome)
 }
 
-/// Collapse the frame to the cancel trace and hand the shell back.
-fn settle_cancel<W: Write>(
+/// Collapse the frame on a failed action and hand the shell back **with an
+/// error**, so the failure is readable on the glass and loud in the exit
+/// code.
+///
+/// The collapse happens before the `Err` leaves, which is the whole point:
+/// the frame must never be abandoned mid-paint. The trace is written
+/// through the same settle path every other exit uses, so a failed delete
+/// leaves the shell exactly as clean as a cancel does — one line, no rail,
+/// no corner — and the line says what broke and to which Connection.
+fn settle_error<W: Write>(
     live: &mut LiveFrame<'_, W>,
     canvas: Canvas,
+    connection: &Connection,
+    message: String,
 ) -> io::Result<InlineOutcome> {
-    live.collapse(&settle_trace(&Settle::Cancelled, canvas))?;
-    Ok(InlineOutcome::Cancelled)
+    let trace = Settle::Error {
+        connection: connection.clone(),
+        message: message.clone(),
+    };
+    live.collapse(&settle_trace(&trace, canvas))?;
+    Err(io::Error::other(message))
 }
 
 /// Hide the cursor while the frame is live.
