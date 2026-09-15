@@ -9,7 +9,10 @@ A single SSH server the user can connect to — an alias, host, user, port, opti
 _Avoid_: entry, server, host (host is a field of a Connection, not the Connection itself)
 
 **Inline Picker**:
-The inline, filter-as-you-type selector that lists Connections below the cursor (not fullscreen) and emits the chosen one to the shell. Triggered from a shell widget, distinct from the fullscreen TUI that runs on a bare `sshm`.
+The inline, filter-as-you-type selector that lists Connections below the cursor
+(line, not fullscreen) and emits the chosen one to the shell. It is the one
+frame every command opens (#35): bare `sshm`, `sshm pick` and `sshm manage`
+all draw the same Clack grammar, differing only in what Enter means.
 _Avoid_: dropdown, popup, completion menu
 
 **Shell Widget**:

@@ -1,9 +1,10 @@
 //! Visual harness for the #34 inline mechanics — not a product command.
 //!
-//! The three command runners are what will own `sshm` / `sshm pick` /
-//! `sshm manage` (#35), and the `--emit` axis that decides what Enter means.
-//! None of that exists yet, so this is how the frame gets looked at in a real
-//! terminal — which is the only way this repo accepts a UI change as verified.
+//! The three command runners own `sshm` / `sshm pick` / `sshm manage` through
+//! `run_inline` + the `--emit` axis (#35/#36/#37); this example drives the same
+//! frame directly over an `Ephemeral` store so the mechanics can be looked at
+//! in a real terminal without touching the user's connections.json — which is
+//! the only way this repo accepts a UI change as verified.
 //!
 //! ```text
 //! cargo run --example inline_demo -- [pick|manage] [initial query]

@@ -1,9 +1,10 @@
-# The inline frame (#34) rendered in a real terminal
+# The inline picker (#34) rendered in a real terminal
 #
 # Drives the live inline picker — not a `cat` of a captured frame — so what
 # lands in this recording is the actual inline mechanics: the frame opening
 # below the prompt, the 8-row window sliding, and the settle-collapse erasing
-# the live list.
+# the live list. Its manage sibling (add/edit/delete chords) is
+# demo/inline-manage.tape.
 #
 # The binary is passed through the environment so the tape holds no absolute
 # paths (same convention as design-matrix.tape: the inner shell expands it):

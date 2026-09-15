@@ -6,10 +6,15 @@
 # design detector once per colour mode. No injection is needed: ColorSupport::detect()
 # reads COLORTERM / TERM / NO_COLOR, so the environment *is* the matrix.
 #
-# Each pass also dumps real ANSI frames, so the same run that proves the palette
+# Each pass also dumps real ANSI frames for the inline frame set — the picker,
+# manage, the add sequence and the states (see `dump_frames_for_review` in
+# tests/design_system_test.rs) — so the same run that proves the palette
 # arithmetic also produces something a human can look at:
 #
-#   cat sshm/target/design-frames/picker-Truecolor.ansi
+#   cat sshm/target/design-frames/frame-pick-80.ansi
+#
+# Rasterise a frame for review with demo/design-matrix.tape, which turns it
+# into a PNG under demo/rendered/.
 #
 # Usage: ./scripts/design-matrix.sh
 
