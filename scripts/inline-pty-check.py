@@ -692,16 +692,26 @@ def scenario_manage():
     check("Ctrl+C deleted nothing", sha() == h2)
     check("no alternate screen on any manage path", not d.screen.alt_screen)
 
-    # ── run 4: the rail lists only keys that work (#36 review) ─────────
+    # ── run 4: the rail lists only keys that work (#36 review, #37 update) ──
     d = Demo(["manage"], bin=SSH_BIN, home=home)
     d.pump(0.7)
     d.dump("AC. the manage rail, as painted")
     rail = d.screen.text()[FRAME_ROW + len(d.screen.frame_rows()) - 2]
     check("the rail still names the chord that really deletes",
           "Ctrl+X delete" in rail, repr(rail))
-    for unfulfilled in ("Ctrl+A", "Ctrl+E"):
-        check(f"the rail no longer advertises {unfulfilled}",
-              unfulfilled not in rail, repr(rail))
+    # `Ctrl+A add` is back on the rail (#37): the chord now walks the
+    # five-step sequence and writes the Connection, which is the thing the
+    # label promises. The #36-review check that demanded its absence was
+    # written when the chord answered "not built yet" — that excuse died
+    # with the checkpoint this scenario replaces.
+    check("the rail advertises the chord that now adds",
+          "Ctrl+A add" in rail, repr(rail))
+    # `Ctrl+E edit` stays off the rail: it still leaves the frame exactly
+    # as Enter does, and the in-place single-field editor is a follow-on
+    # ticket, not this one. Hinting it would name an action that does not
+    # happen.
+    check("the rail still does not advertise Ctrl+E",
+          "Ctrl+E" not in rail, repr(rail))
     check("the rail keeps the escape hatch and movement",
           "Esc cancel" in rail and "↑↓ navigate" in rail, repr(rail))
     d.send(ESC, 0.4)
@@ -784,6 +794,223 @@ def scenario_manage_error():
     os.chmod(cfg, 0o644)
 
 
+def scenario_manage_add():
+    """#37: the `Ctrl+A` add step-sequence on the real binary.
+
+    Same throwaway-HOME discipline as the delete scenario: every verdict
+    about persistence is a sha256 of the real `connections.json`, not a
+    claim. The chord byte is 0x01 — what a terminal sends for Ctrl+A.
+
+    The walk covers every way a step can answer: a required field refusing
+    empty, a port refusing out-of-range, an optional field settling as
+    *absent* rather than blank, the completed sequence earning its
+    `◇ added` note from a write that really happened, and an abandoned
+    sequence leaving the file byte-identical.
+    """
+    home = tempfile.mkdtemp(prefix="sshm-pty-add-")
+    cfg = os.path.join(home, ".ssh", "connections.json")
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+
+    def seed():
+        with open(cfg, "w") as f:
+            json.dump(
+                {
+                    "connections": [
+                        {"id": "id-web-01", "alias": "web-01", "host": "10.0.0.4",
+                         "user": "deploy", "port": 22, "folder": "prod"},
+                        {"id": "id-web-02", "alias": "web-02", "host": "10.0.0.5",
+                         "user": "deploy", "port": 22, "folder": "prod"},
+                    ]
+                },
+                f,
+                indent=2,
+            )
+
+    def sha():
+        with open(cfg, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    CTRL_A, CTRL_C = b"\x01", b"\x03"
+
+    # ── run 1: the full five-step walk, refusing where it should ──────
+    seed()
+    h0 = sha()
+    print(f"    seeded connections.json sha256: {h0}")
+
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.dump("CA. manage frame open — Ctrl+A on the rail")
+    height = len(d.screen.frame_rows())
+
+    d.send(CTRL_A, 0.4)
+    d.dump("CB. Ctrl+A — the sequence opens on the Alias step")
+    check("the first step is Alias, caret on the line",
+          d.screen.text()[FRAME_ROW] == "◆ Alias  _",
+          repr(d.screen.text()[FRAME_ROW]))
+    rail = d.screen.text()[FRAME_ROW + height - 2]
+    check("the step rail names what the step reads",
+          "Esc back" in rail and "Enter next" in rail and "Ctrl+C quit" in rail,
+          repr(rail))
+    check("the sequence did not grow the frame",
+          len(d.screen.frame_rows()) == height,
+          f"{height} -> {len(d.screen.frame_rows())}")
+
+    d.send(ENTER, 0.4)
+    d.dump("CC. Enter on an empty required Alias — refused, stays put")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the refusal names the field",
+          "│   ! alias is required" in joined, joined)
+    check("still on the Alias step", d.screen.text()[FRAME_ROW] == "◆ Alias  _",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("nothing settled behind the refusal", "◇ Alias" not in joined, joined)
+    check("a refused required field wrote nothing", sha() == h0)
+
+    d.send(b"db-01", 0.3)
+    d.dump("CD. typing echoes into the live field, not the filter behind it")
+    check("the field echoes what is typed",
+          d.screen.text()[FRAME_ROW] == "◆ Alias  db-01_",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("the keystrokes did not filter the list",
+          "No matches" not in "\n".join(d.screen.frame_rows()),
+          "the Connections behind the sequence are still listed")
+
+    d.send(ENTER, 0.4)
+    d.dump("CE. the Alias settles to ◇ and the header moves to Host")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the settled Alias leaves a ◇ trace",
+          "│   ◇ Alias   db-01" in joined, joined)
+    check("the next step is Host", d.screen.text()[FRAME_ROW] == "◆ Host  _",
+          repr(d.screen.text()[FRAME_ROW]))
+
+    d.send(ENTER, 0.4)
+    d.dump("CF. Enter on an empty required Host — refused, stays on Host")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the refusal names the field", "│   ! host is required" in joined, joined)
+    check("still on the Host step", d.screen.text()[FRAME_ROW] == "◆ Host  _",
+          repr(d.screen.text()[FRAME_ROW]))
+
+    d.send(b"10.1.1.7", 0.3)
+    d.send(ENTER, 0.4)
+    d.dump("CG. the Host settles and the Port step opens")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the settled Host leaves a ◇ trace",
+          "│   ◇ Host    10.1.1.7" in joined, joined)
+    check("the next step is Port", d.screen.text()[FRAME_ROW] == "◆ Port  _",
+          repr(d.screen.text()[FRAME_ROW]))
+
+    d.send(b"99999", 0.3)
+    d.send(ENTER, 0.4)
+    d.dump("CH. a port above the TCP range — refused, stays on Port")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the refusal states the range",
+          "│   ! port must be a number from 1 to 65535" in joined, joined)
+    check("still on the Port step with the bad input kept for fixing",
+          d.screen.text()[FRAME_ROW] == "◆ Port  99999_",
+          repr(d.screen.text()[FRAME_ROW]))
+
+    for _ in range(5):
+        d.send(BACKSPACE, 0.1)
+    d.send(b"2222", 0.3)
+    d.send(ENTER, 0.4)
+    d.dump("CI. a valid port settles; the Key step opens")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the settled Port leaves a ◇ trace",
+          "│   ◇ Port    2222" in joined, joined)
+    check("the next step is Key", d.screen.text()[FRAME_ROW] == "◆ Key  _",
+          repr(d.screen.text()[FRAME_ROW]))
+
+    d.send(ENTER, 0.4)
+    d.dump("CJ. the empty optional Key settles as absent, not blank")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the absent Key is drawn as — not as nothing",
+          "│   ◇ Key     —" in joined, joined)
+    check("the last step is Folder", d.screen.text()[FRAME_ROW] == "◆ Folder  _",
+          repr(d.screen.text()[FRAME_ROW]))
+    rail = d.screen.text()[FRAME_ROW + height - 2]
+    check("the last step's rail says what Enter means there",
+          "Enter add" in rail and "Enter next" not in rail, repr(rail))
+
+    d.send(b"staging", 0.3)
+    d.send(ENTER, 0.5)
+    d.dump("CK. Folder settles — the store wrote, the list returns with ◇ added")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the frame is back on the list",
+          d.screen.text()[FRAME_ROW] == "◆ Manage Connections",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("the dim note names the added Connection with its folder",
+          "│   ◇ added [staging] db-01" in joined, joined)
+    check("the new Connection is in the list",
+          "[staging] db-01 (@10.1.1.7:2222)" in joined, joined)
+    check("the whole sequence kept the frame at its constant height",
+          len(d.screen.frame_rows()) == height,
+          f"{height} -> {len(d.screen.frame_rows())}")
+    h1 = sha()
+    check("the completed add changed connections.json", h1 != h0, f"{h0} -> {h1}")
+    on_disk = open(cfg).read()
+    check("the added Connection is on disk with its settled fields",
+          '"alias": "db-01"' in on_disk and '"port": 2222' in on_disk
+          and '"folder": "staging"' in on_disk, on_disk)
+    check("the empty Key stayed absent — no empty key_path was written",
+          '"key_path": ""' not in on_disk, on_disk)
+    d.send(ESC, 0.4)
+
+    # ── run 2: walking all the way back abandons the sequence, and the
+    # ── file never learns it happened ──────────────────────────────────
+    seed()
+    h0b = sha()
+    print(f"    re-seeded connections.json sha256: {h0b}")
+
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.send(CTRL_A, 0.4)
+    d.send(b"db-01", 0.3)
+    d.send(ENTER, 0.3)
+    d.send(b"10.1.1.7", 0.3)
+    d.send(ENTER, 0.4)
+    d.dump("CL. mid-sequence at Port — two steps settled, nothing written yet")
+    joined = "\n".join(d.screen.frame_rows())
+    check("two steps are settled on the glass",
+          "◇ Alias   db-01" in joined and "◇ Host    10.1.1.7" in joined, joined)
+    check("two settled steps still wrote nothing", sha() == h0b)
+
+    d.send(ESC, 0.3)
+    d.dump("CM. Esc walks back to Host with its answer back on the line")
+    check("Host is live again with its answer re-seeded",
+          d.screen.text()[FRAME_ROW] == "◆ Host  10.1.1.7_",
+          repr(d.screen.text()[FRAME_ROW]))
+    d.send(ESC, 0.3)
+    d.dump("CN. Esc walks back to Alias with its answer back on the line")
+    check("Alias is live again with its answer re-seeded",
+          d.screen.text()[FRAME_ROW] == "◆ Alias  db-01_",
+          repr(d.screen.text()[FRAME_ROW]))
+    d.send(ESC, 0.4)
+    d.dump("CO. Esc off the first step abandons the sequence — nothing saved")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the frame is back on the list",
+          d.screen.text()[FRAME_ROW] == "◆ Manage Connections",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("the note answers the only question the user has",
+          "│   ◇ add abandoned — nothing saved" in joined, joined)
+    check("no ◇ added note — the write never happened",
+          "added" not in joined, joined)
+    h2 = sha()
+    check("abandoning mid-sequence left connections.json byte-identical",
+          h2 == h0b, f"{h0b} -> {h2}")
+
+    # ── run 3: Ctrl+C mid-sequence cancels the frame and writes nothing ──
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.send(CTRL_A, 0.4)
+    d.send(b"half-typed", 0.3)
+    d.send(CTRL_C, 0.5)
+    d.dump("CP. Ctrl+C mid-sequence — the frame cancels clean")
+    check("Ctrl+C leaves the cancel trace",
+          d.screen.text()[FRAME_ROW] == "◆ cancelled",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("Ctrl+C mid-sequence wrote nothing", sha() == h0b)
+    check("no alternate screen on any add path", not d.screen.alt_screen)
+
+
 def main():
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     scenarios = {
@@ -796,6 +1023,7 @@ def main():
         "too-short": scenario_too_short_at_open,
         "manage": scenario_manage,
         "manage-error": scenario_manage_error,
+        "manage-add": scenario_manage_add,
     }
     if which == "all":
         for fn in scenarios.values():

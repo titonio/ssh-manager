@@ -706,9 +706,7 @@ pub fn run_inline<W: Write>(
                                     // contract as a refused delete:
                                     // collapse, report, exit non-zero.
                                     Err(message) => {
-                                        return settle_add_error(
-                                            &mut live, canvas, &draft, message,
-                                        )
+                                        return settle_add_error(&mut live, canvas, &draft, message)
                                     }
                                 }
                             }

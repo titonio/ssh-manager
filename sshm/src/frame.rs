@@ -461,7 +461,10 @@ fn error_line(message: &str, t: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled(RAIL, Style::default().fg(t.border)),
         Span::styled(GUTTER_PAD, dim),
-        Span::styled("! ", Style::default().fg(t.warning).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "! ",
+            Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(message.to_string(), Style::default().fg(t.warning)),
     ])
 }
@@ -1059,7 +1062,11 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
         // while there are steps left, `add` on the last one, where the
         // same keypress commits the Connection. A rail that said `next`
         // there would be hinting a step that does not exist.
-        if add.last { ADD_LAST } else { ADD_MID }
+        if add.last {
+            ADD_LAST
+        } else {
+            ADD_MID
+        }
     } else {
         match mode {
             FrameMode::Pick => &[
@@ -1136,7 +1143,10 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
         return Line::from(vec![
             Span::styled("◆", Style::default().fg(t.accent)),
             Span::raw(" "),
-            Span::styled(add.label.to_string(), Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                add.label.to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
             Span::raw("  "),
             Span::raw(add.input.clone()),
             Span::styled(CARET, dim),

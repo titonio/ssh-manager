@@ -431,12 +431,18 @@ fn the_settled_steps_line_up_down_the_sequence() {
         .iter()
         .find(|l| l.contains("Alias"))
         .expect("Alias settled line");
-    let host = text.iter().find(|l| l.contains("Host")).expect("Host settled line");
+    let host = text
+        .iter()
+        .find(|l| l.contains("Host"))
+        .expect("Host settled line");
 
     // `◇ Alias   web-01` / `◇ Host    10.0.0.4` — the values start in
     // the same column, so the eye reads down a column of answers rather
     // than chasing a ragged right edge of labels.
-    assert_eq!(alias.find("web-01").unwrap(), host.find("10.0.0.4").unwrap());
+    assert_eq!(
+        alias.find("web-01").unwrap(),
+        host.find("10.0.0.4").unwrap()
+    );
 }
 
 /// An optional field the user left empty is drawn as *absent*, not as
@@ -543,7 +549,11 @@ fn nothing_claims_an_add_before_the_store_says_so() {
 
     // A sequence backed off its first step with a partial answer in it.
     let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
-    let abandoned = step(&typed(&adding.state, "web"), key(KeyCode::Esc), Some(&web01()));
+    let abandoned = step(
+        &typed(&adding.state, "web"),
+        key(KeyCode::Esc),
+        Some(&web01()),
+    );
 
     let joined = frame_text(&render(&abandoned.state)).join("\n");
     assert!(
@@ -598,16 +608,16 @@ fn the_add_sequence_survives_monochrome() {
     );
     let joined = frame_text(&mono).join("\n");
 
-    assert!(joined.contains('◆'), "the live step glyph vanished: {joined}");
+    assert!(
+        joined.contains('◆'),
+        "the live step glyph vanished: {joined}"
+    );
     assert!(joined.contains('◇'), "the settled trace vanished: {joined}");
     assert!(
         joined.contains('!') && joined.contains("host is required"),
         "the refusal vanished: {joined}"
     );
-    assert!(
-        joined.contains('_'),
-        "the caret vanished: {joined}"
-    );
+    assert!(joined.contains('_'), "the caret vanished: {joined}");
 }
 
 /// The rail during a step names only what that step reads, escape hatch
@@ -639,7 +649,10 @@ fn the_last_step_s_rail_says_what_enter_does_there() {
     let frame = render(&at_folder());
     let rail = line_text(frame.lines().iter().rev().nth(1).expect("hint rail"));
 
-    assert!(rail.contains("Enter add"), "the last step commits: {rail:?}");
+    assert!(
+        rail.contains("Enter add"),
+        "the last step commits: {rail:?}"
+    );
     assert!(!rail.contains("Enter next"), "there is no next: {rail:?}");
 }
 
@@ -647,7 +660,6 @@ fn the_last_step_s_rail_says_what_enter_does_there() {
 // The add route's note
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[test]
 /// `Ctrl+A` answers its chord by putting the first step on the glass.
 /// The visible answer to the chord *is* the live step now (#37), not a
 /// note about one.

@@ -29,7 +29,7 @@ background token on.
 | `border` | `DarkGray` | The `│` rail and `└` corner — chrome, no state |
 | `highlight` | `Green` | Fuzzy-matched characters |
 | `success` | `Green` | Declared, not drawn: no live surface paints a positive signal yet |
-| `warning` | `Yellow` | Declared, not drawn: reserved so a warning never invents a hue |
+| `warning` | `Yellow` | The `!` line a refused add step shows under the header (`! alias is required`). Reserved in #33 so a warning never invents a hue; first drawn by the #37 add sequence. |
 
 What *is* enforceable about this table: no token is a fixed RGB
 (`the_clack_palette_is_named_ansi_only`, `clack_tokens_are_named_ansi_or_reset`),
@@ -119,7 +119,9 @@ regression.
 | `└` | `border` | Closes the rail | Chrome; the frame's last line |
 | `·` | `fg_muted` + `DIM` | Separates hint segments | Dropped with its segment, never stranded |
 | `■` | `fg_muted` + `DIM`, with the alias and the answer in `BOLD` | **A question that has been answered** — the settled confirm step | `■ Delete [prod] web-01? Yes` / `? No`. `◆` asks, `■` has been answered: the glyph is the entire difference between a live confirm and a settled one, which is what keeps that difference readable with colour off. Both the yes and the no answer wear it — a declined delete leaves a trace too (story 22). |
-| `◇` | `fg_muted` + `DIM`, with the alias in `BOLD` | **What the last action did** — the dim note above the rows | `◇ deleted [prod] web-01`. Also the note with no Connection to name (`◇ add — not built yet; run sshm add for now`), and the note that contradicts the settled `■ Yes` when the store removed nothing (`◇ delete failed — no such Connection: …`). |
+| `◇` | `fg_muted` + `DIM`, with the value in `BOLD` | **What the last action did** — the dim note above the rows; and each settled step of the add sequence | `◇ deleted [prod] web-01`, `◇ added [prod] web-01`. In the add sequence every answered step settles to a `◇ <label>  <value>` line (`◇ Alias  web-01`); an optional field left empty settles to `◇ <label>  —` rather than a blank, because a blank after `◇ Key` reads as a step that lost its answer, not one that deliberately has none. Backing out of the first step leaves `◇ add abandoned — nothing saved`. Also the note that contradicts the settled `■ Yes` when the store removed nothing (`◇ delete failed — no such Connection: …`). |
+| `!` | `warning` (the glyph `BOLD`) | **A refused answer** — the step stayed put and says why | `! alias is required`, `! port must be a number from 1 to 65535`. The state is carried by the glyph and the sentence, not the yellow, so it reads under `NO_COLOR`; the yellow is the `warning` role doing its job, never a literal. |
+| `_` | `fg_muted` | **The live text field** — where the keystrokes are going | Drawn by the frame because the hardware cursor is hidden for the frame's whole life; a field with no cursor and no echo of its own is a field the user cannot see themselves filling. ASCII on purpose: every font that renders the box-drawing renders `_`, and a caret that turns into tofu is worse than no caret. |
 
 ### The ask / answered / noted grammar
 
@@ -138,14 +140,27 @@ records an answer the user gave and refuses to record an outcome the store
 never produced. Collapsing both onto one glyph is what let a delete that did
 not happen read as one that did.
 
-**The honesty rule for `◇`: the word `deleted` appears on a frame only when
-a Connection was really removed.** `Store::remove` returning `Ok(None)`
-means nothing was deleted and nothing was written, and the note for that is
-`delete failed — no such Connection`, worded so it cannot be scanned as
-`deleted`. The gate for this is
+**The honesty rule for `◇`: the words `deleted` and `added` appear on a
+frame only when the store really changed the file.** `Store::remove`
+returning `Ok(None)` means nothing was deleted and nothing was written, and
+the note for that is `delete failed — no such Connection`, worded so it
+cannot be scanned as `deleted`. The gate for this is
 `a_delete_that_removed_nothing_never_renders_as_deleted` in
 `manage_frame_test.rs`; the seam that enforces it is `manage::settle_delete`,
 which is the only place a `Trace::Deleted` may be created.
+
+The add half is held to the same discipline by the same shape: the sequence
+finishing is what the user *did*, and `◇ added` is a claim about
+`connections.json`. `manage::settle_add` is the only place a
+`Trace::Added` may be created, and it creates one only from a
+`Store::add` that returned the Connection it actually wrote. A refused add
+collapses the frame to `◆ error …` instead — the same contract a refused
+delete has. An abandoned sequence goes the other way: it leaves
+`◇ add abandoned — nothing saved`, worded to answer the one question the
+user has after backing out of a half-filled form. The gates are
+`an_add_the_store_wrote_earns_the_added_note`,
+`an_add_the_store_refused_does_not_claim_a_connection_was_added` and
+`nothing_claims_an_add_before_the_store_says_so`.
 
 `■` and `◇` are `fg_muted` + `DIM` rather than `accent` because they are
 history, not the live step: the frame's accent marks *where you are*, and a

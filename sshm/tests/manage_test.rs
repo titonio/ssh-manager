@@ -290,8 +290,7 @@ fn a_new_action_clears_the_previous_note() {
     let next = step(&deleted, ctrl('a'), Some(&web02()));
 
     assert_eq!(
-        next.state.trace,
-        None,
+        next.state.trace, None,
         "the delete note must not survive on top of a different action"
     );
 }
@@ -656,7 +655,10 @@ fn enter_with_an_answer_settles_the_field_and_moves_to_the_next_step() {
         "the settled value is trimmed — a leading space in an alias is a typo, not content"
     );
     assert_eq!(sequence.input, "", "the new step starts blank");
-    assert_eq!(sequence.error, None, "and carries no complaint from the last one");
+    assert_eq!(
+        sequence.error, None,
+        "and carries no complaint from the last one"
+    );
     assert!(
         advanced.effects.is_empty(),
         "settling a field writes nothing: {:?}",
@@ -859,8 +861,7 @@ fn finishing_the_sequence_asks_for_the_add_without_claiming_it_happened() {
         "the sequence is over; the frame is back on the list"
     );
     assert_eq!(
-        finalised.state.trace,
-        None,
+        finalised.state.trace, None,
         "the keystroke must not pre-commit an `added` note. The claim is \
          earned by the store's answer, folded in by `settle_add`"
     );
@@ -897,7 +898,10 @@ fn an_add_the_store_wrote_earns_the_added_note() {
 fn an_add_the_store_refused_does_not_claim_a_connection_was_added() {
     let finalised = step(&at_folder(), key(KeyCode::Enter), Some(&web01()));
 
-    let outcome = manage::settle_add(&finalised.state, Err("Permission denied (os error 13)".into()));
+    let outcome = manage::settle_add(
+        &finalised.state,
+        Err("Permission denied (os error 13)".into()),
+    );
 
     assert_eq!(
         outcome,

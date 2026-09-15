@@ -130,20 +130,32 @@ impl AddField {
     /// port step the empty answer already replaced with the SSH default.
     /// `Err(message)` is the sentence the frame shows while the user stays
     /// on this step with what they typed still there.
+    ///
+    /// The empty-answer rule is asked of [`AddField::required`], not
+    /// re-decided here: a required field never settles empty, and an
+    /// optional one falls through to its own default — the port to the
+    /// SSH default, everything else to absent. One field list stating
+    /// which-is-which, in one place; a second `matches!` here would be a
+    /// second answer that the two could silently disagree about.
     fn settle(self, raw: &str) -> Result<String, String> {
         let value = raw.trim();
 
-        match self {
-            AddField::Alias | AddField::Host if value.is_empty() => {
-                Err(format!("{} is required", self.label().to_lowercase()))
+        if value.is_empty() {
+            if self.required() {
+                return Err(format!("{} is required", self.label().to_lowercase()));
             }
-            AddField::Alias | AddField::Host => Ok(value.to_string()),
-            AddField::Port if value.is_empty() => Ok(DEFAULT_PORT.to_string()),
+            return match self {
+                AddField::Port => Ok(DEFAULT_PORT.to_string()),
+                _ => Ok(String::new()),
+            };
+        }
+
+        match self {
             AddField::Port => match value.parse::<u16>() {
                 Ok(0) | Err(_) => Err("port must be a number from 1 to 65535".to_string()),
                 Ok(port) => Ok(port.to_string()),
             },
-            AddField::Key | AddField::Folder => Ok(value.to_string()),
+            _ => Ok(value.to_string()),
         }
     }
 
@@ -234,7 +246,6 @@ impl AddSequence {
         })
     }
 }
-
 
 ///
 /// Rendered by the frame as the settled `■` line plus the dim `◇` note
@@ -449,7 +460,10 @@ pub fn settle_delete(
 /// * `Err(message)` — the store refused. The caller collapses the frame
 ///   to `◆ error …`, the same way a refused delete does: a live list the
 ///   store cannot vouch for is worse than no list.
-pub fn settle_add(state: &ManageState, outcome: Result<Connection, String>) -> Result<ManageState, String> {
+pub fn settle_add(
+    state: &ManageState,
+    outcome: Result<Connection, String>,
+) -> Result<ManageState, String> {
     match outcome {
         Ok(connection) => Ok(ManageState {
             phase: Phase::List,
