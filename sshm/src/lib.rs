@@ -3,6 +3,7 @@ pub mod connections;
 pub mod emit;
 pub mod frame;
 pub mod inline;
+pub mod manage;
 pub mod ssh;
 pub mod theme;
 pub mod update;

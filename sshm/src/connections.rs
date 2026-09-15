@@ -122,6 +122,65 @@ pub fn remove(config: &mut Config, id: &str) -> Result<Option<Connection>, Strin
     Ok(removed)
 }
 
+/// The live set of Connections a frame lists, and the seam a manage action
+/// persists through (#36).
+///
+/// The frame driver needs two things and nothing else: what to list, and a
+/// way to make a delete stick. Naming them as one small trait is what lets
+/// the driver hold a `&mut dyn Store` instead of reaching for `Config` and
+/// the filesystem itself — and it is what keeps
+/// [`remove`] as the only implementation of "delete a Connection", which
+/// the module already owns.
+pub trait Store {
+    /// The Connections the frame lists.
+    fn all(&self) -> &[Connection];
+
+    /// Delete the Connection with `id` and persist the set.
+    ///
+    /// `Ok(None)` means no Connection had that id, so nothing was deleted
+    /// and nothing was written — the same contract [`remove`] has.
+    fn remove(&mut self, id: &str) -> Result<Option<Connection>, String>;
+}
+
+impl Store for Config {
+    fn all(&self) -> &[Connection] {
+        &self.connections
+    }
+
+    fn remove(&mut self, id: &str) -> Result<Option<Connection>, String> {
+        remove(self, id)
+    }
+}
+
+/// A set that is real for the frame and persisted by nobody.
+///
+/// The visual harness needs deletes to actually remove rows so the frame can
+/// be looked at doing it, without that delete reaching the user's
+/// `connections.json`. The removal is not a fake: the Connection really is
+/// gone from the set the frame is showing. Only the durability is absent.
+#[derive(Debug, Clone, Default)]
+pub struct Ephemeral {
+    connections: Vec<Connection>,
+}
+
+impl Ephemeral {
+    /// An ephemeral set seeded from `connections`.
+    pub fn new(connections: Vec<Connection>) -> Self {
+        Self { connections }
+    }
+}
+
+impl Store for Ephemeral {
+    fn all(&self) -> &[Connection] {
+        &self.connections
+    }
+
+    fn remove(&mut self, id: &str) -> Result<Option<Connection>, String> {
+        let position = self.connections.iter().position(|c| c.id == id);
+        Ok(position.map(|i| self.connections.remove(i)))
+    }
+}
+
 /// Import Connections from the user's `~/.ssh/config`, persist the set, and
 /// return how many Connections were added. Connections already in the set are
 /// left alone, so importing twice adds nothing the second time — and when

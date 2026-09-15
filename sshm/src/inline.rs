@@ -466,13 +466,20 @@ pub enum InlineOutcome {
 /// The frame is drawn to `out`, which is the user's terminal (or, under a
 /// captured stdout, whatever the caller has redirected there). Keys come from
 /// the terminal's own event stream.
+///
+/// In [`FrameMode::Manage`] the keystrokes are not decided here: they are
+/// handed to [`crate::manage::step`], and this function performs what that
+/// returns through the [`Store`] it was given. That split is the whole point
+/// of #36 — the delete confirm's decisions are unit-testable because they
+/// are not written in this loop, and what is left here is the part that
+/// genuinely needs a terminal.
 pub fn run_inline<W: Write>(
     out: &mut W,
-    connections: &[Connection],
+    store: &mut dyn Store,
     initial_query: String,
     mode: FrameMode,
 ) -> io::Result<InlineOutcome> {
-    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+    use crossterm::event::{self, Event, KeyEventKind};
 
     let (width, height) = crossterm::terminal::size()?;
     let mut canvas = Canvas::detect(width as usize, height as usize);
@@ -488,21 +495,27 @@ pub fn run_inline<W: Write>(
         return Ok(InlineOutcome::Cancelled);
     }
 
-    let mut query = initial_query;
-    let mut selection = 0usize;
+    let mut state = ManageState::with_query(initial_query);
 
-    // One place assembles the five inputs a frame is built from, and one
+    // One place assembles the inputs a manage frame is built from, and one
     // place re-syncs the selection to whatever the frame clamped it to.
     // Without it every call site re-typed the quintuple and had to remember
     // that the selection it passed in is not necessarily the one it gets.
-    let build = |query: &str, selection: usize, canvas: Canvas| {
-        let frame = build_frame(connections, query, selection, mode, canvas);
+    let build = |store: &dyn Store, state: &ManageState, canvas: Canvas| {
+        let frame = build_frame_with_flow(
+            store.all(),
+            &state.query,
+            state.selection,
+            mode,
+            canvas,
+            &FrameFlow::from(state),
+        );
         let selection = frame.selection();
         (frame, selection)
     };
 
-    let (mut frame, synced) = build(&query, selection, canvas);
-    selection = synced;
+    let (mut frame, synced) = build(store, &state, canvas);
+    state.selection = synced;
 
     crossterm::terminal::enable_raw_mode()?;
     let _raw = RawModeGuard;
@@ -514,36 +527,67 @@ pub fn run_inline<W: Write>(
     loop {
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
+                if mode == FrameMode::Manage {
+                    let selected = frame
+                        .selected_connection_index()
+                        .map(|i| store.all()[i].clone());
+                    let step = manage::step(&state, key, selected.as_ref());
+
+                    for effect in step.effects {
+                        match effect {
+                            Effect::Delete { id } => {
+                                store.remove(&id).map_err(io::Error::other)?;
+                            }
+                            // #37 replaces this arm with the `◆ Alias` →
+                            // `◆ Host` step-sequence. The chord is read and
+                            // the frame has already answered it with the dim
+                            // note the state carries; there is nothing to
+                            // perform until that sequence exists.
+                            Effect::BeginAdd => {}
+                            Effect::Exit(outcome) => {
+                                return settle(&mut live, canvas, outcome)?;
+                            }
+                        }
+                    }
+
+                    state = step.state;
+                    let (next, synced) = build(store, &state, canvas);
+                    frame = next;
+                    state.selection = synced;
+                    live.redraw(&frame)?;
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Esc => return settle_cancel(&mut live, canvas),
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         return settle_cancel(&mut live, canvas);
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        selection = selection.saturating_sub(1);
+                        state.selection = state.selection.saturating_sub(1);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        selection = selection.saturating_add(1);
+                        state.selection = state.selection.saturating_add(1);
                     }
                     KeyCode::Enter => {
                         if let Some(index) = frame.selected_connection_index() {
-                            let conn = connections[index].clone();
+                            let conn = store.all()[index].clone();
                             live.collapse(&settle_trace(&Settle::Picked(conn.clone()), canvas))?;
                             return Ok(InlineOutcome::Picked(conn));
                         }
                     }
                     KeyCode::Backspace => {
-                        query.pop();
+                        state.query.pop();
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        query.push(c);
+                        state.query.push(c);
                     }
                     _ => continue,
                 }
 
-                let (next, synced) = build(&query, selection, canvas);
+                let (next, synced) = build(store, &state, canvas);
                 frame = next;
-                selection = synced;
+                state.selection = synced;
                 live.redraw(&frame)?;
             }
             Event::Resize(width, height) => {
@@ -558,9 +602,9 @@ pub fn run_inline<W: Write>(
                 match plan_resize(live.geometry(), width, height) {
                     ResizePlan::Reopen { .. } => {
                         canvas = Canvas::detect(width, height);
-                        let (next, synced) = build(&query, selection, canvas);
+                        let (next, synced) = build(store, &state, canvas);
                         frame = next;
-                        selection = synced;
+                        state.selection = synced;
                         live.reopen(&frame)?;
                     }
                     ResizePlan::CancelAndRestore => {
@@ -574,6 +618,20 @@ pub fn run_inline<W: Write>(
             _ => {}
         }
     }
+}
+
+/// Collapse the frame to the trace this outcome leaves and hand the shell back.
+fn settle<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    canvas: Canvas,
+    outcome: InlineOutcome,
+) -> io::Result<InlineOutcome> {
+    let trace = match &outcome {
+        InlineOutcome::Picked(conn) => Settle::Picked(conn.clone()),
+        InlineOutcome::Cancelled => Settle::Cancelled,
+    };
+    live.collapse(&settle_trace(&trace, canvas))?;
+    Ok(outcome)
 }
 
 /// Collapse the frame to the cancel trace and hand the shell back.

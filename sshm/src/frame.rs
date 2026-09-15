@@ -283,6 +283,131 @@ pub enum FrameMode {
     Manage,
 }
 
+/// Where the manage interaction has got to, as far as the frame cares (#36).
+///
+/// The frame does not run the interaction — [`crate::manage`] does. This is
+/// the projection of that state into the handful of facts that change what
+/// the frame draws: whether it is asking a question right now, and what the
+/// last answer left behind.
+///
+/// Defaulting to nothing is the whole of the pick frame's relationship with
+/// it, and the whole of a manage frame that has not acted yet.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FrameFlow {
+    /// The Connection the inline delete confirm is asking about.
+    pub confirming: Option<Connection>,
+    /// What the last management action did, rendered as the lines above the
+    /// rows.
+    pub trace: Option<crate::manage::Trace>,
+}
+
+impl From<&crate::manage::ManageState> for FrameFlow {
+    fn from(state: &crate::manage::ManageState) -> Self {
+        Self {
+            confirming: match &state.phase {
+                crate::manage::Phase::ConfirmDelete { target } => Some(target.clone()),
+                crate::manage::Phase::List => None,
+            },
+            trace: state.trace.clone(),
+        }
+    }
+}
+
+/// The lines the flow draws between the header and the rows, capped at the
+/// room the frame can spare.
+///
+/// The cap is what keeps the frame's height constant (#34). When it bites,
+/// the settled confirm line is dropped before the note: after a delete the
+/// user needs to see *what happened*, and the settled question is the
+/// redundant half.
+fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> {
+    let mut lines = match &flow.trace {
+        Some(crate::manage::Trace::Deleted { connection }) => vec![
+            settled_confirm_line(connection, true, t),
+            note_line("deleted", connection, t),
+        ],
+        Some(crate::manage::Trace::Declined { connection }) => {
+            vec![settled_confirm_line(connection, false, t)]
+        }
+        Some(crate::manage::Trace::AddRequested) => vec![plain_note_line(ADD_NOTE, t)],
+        None => Vec::new(),
+    };
+
+    if lines.len() > budget {
+        lines.drain(..lines.len() - budget);
+    }
+
+    lines
+}
+
+/// A `◇` note with no Connection to name — for the routes that ask for
+/// something other than a delete and so have no row to point at.
+fn plain_note_line(text: &str, t: &Theme) -> Line<'static> {
+    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+
+    Line::from(vec![
+        Span::styled(RAIL, Style::default().fg(t.border)),
+        Span::styled(GUTTER_PAD, dim),
+        Span::styled(format!("◇ {text}"), dim),
+    ])
+}
+
+/// The note the add chord leaves: the route is real, the sequence is not
+/// built yet, and the frame says so instead of swallowing the keystroke.
+const ADD_NOTE: &str = "add — not built yet; run sshm add for now";
+
+/// The `■` line: the confirm's question, answered.
+///
+/// `◆` asks and `■` has been answered — the glyph is the whole of the
+/// difference between a live confirm and a settled one, which is what keeps
+/// the distinction readable with colour off. The line recedes with
+/// `fg_muted` + `DIM`; the alias and the answer stay bold so the two facts
+/// a user scans for survive the recession.
+fn settled_confirm_line(conn: &Connection, answered: bool, t: &Theme) -> Line<'static> {
+    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+
+    let mut spans = vec![
+        Span::styled(RAIL, Style::default().fg(t.border)),
+        Span::styled(GUTTER_PAD, dim),
+        Span::styled("■ ", dim),
+        Span::styled("Delete ", dim),
+    ];
+
+    if let Some(folder) = conn.folder.as_deref().filter(|f| !f.is_empty()) {
+        spans.push(Span::styled(format!("[{folder}] "), dim));
+    }
+
+    spans.push(Span::styled(conn.alias.clone(), bold));
+    spans.push(Span::styled("? ", dim));
+    spans.push(Span::styled(
+        if answered { "Yes" } else { "No" },
+        bold,
+    ));
+
+    Line::from(spans)
+}
+
+/// The dim `◇` note: what the last action did.
+fn note_line(verb: &str, conn: &Connection, t: &Theme) -> Line<'static> {
+    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+
+    let mut spans = vec![
+        Span::styled(RAIL, Style::default().fg(t.border)),
+        Span::styled(GUTTER_PAD, dim),
+        Span::styled(format!("◇ {verb} "), dim),
+    ];
+
+    if let Some(folder) = conn.folder.as_deref().filter(|f| !f.is_empty()) {
+        spans.push(Span::styled(format!("[{folder}] "), dim));
+    }
+
+    spans.push(Span::styled(conn.alias.clone(), bold));
+
+    Line::from(spans)
+}
+
 /// Which layout the frame took, given its inputs.
 ///
 /// The three states are the whole of the frame's branching, and each is carried
@@ -598,9 +723,42 @@ pub fn build_frame(
     mode: FrameMode,
     canvas: Canvas,
 ) -> Frame {
+    build_frame_with_flow(connections, query, selection, mode, canvas, &FrameFlow::default())
+}
+
+/// [`build_frame`] with the manage flow layered on.
+///
+/// The flow is what #36 adds to the frame: the inline delete confirm's
+/// question in the header, the `■` line the confirm leaves when it is
+/// answered, and the dim `◇` note the last action left above the rows. A
+/// default `FrameFlow` is no flow at all, which is what the pick frame and
+/// every pre-#36 caller pass — so this stays *the* frame seam, with one
+/// argument that says where the interaction has got to.
+///
+/// The flow lines are drawn **inside** the row budget, never on top of it.
+/// The frame's height is the invariant #34's settle-collapse counts on, and
+/// a note that pushed a row off the bottom of the frame would break it. When
+/// the terminal is too short to hold the flow and a row, the settled line is
+/// dropped before the note: the note is the thing worth reading.
+pub fn build_frame_with_flow(
+    connections: &[Connection],
+    query: &str,
+    selection: usize,
+    mode: FrameMode,
+    canvas: Canvas,
+    flow: &FrameFlow,
+) -> Frame {
     let t = Theme::clack().resolve(canvas.support);
     let matcher = SkimMatcherV2::default();
     let matches = compute_matches(connections, &matcher, query);
+
+    // The flow is a manage-frame idea. A pick frame has no confirm to ask
+    // and no action to leave a note about, so it renders with none.
+    let empty = FrameFlow::default();
+    let flow = match mode {
+        FrameMode::Manage => flow,
+        FrameMode::Pick => &empty,
+    };
 
     let state = if connections.is_empty() {
         FrameState::Empty
@@ -614,33 +772,38 @@ pub fn build_frame(
     let selection = selection.min(matched.len().saturating_sub(1));
     let visible = canvas.visible_rows().unwrap_or(0);
 
-    let mut lines = vec![header_line(mode, &t)];
+    let mut lines = vec![header_line(mode, flow, &t)];
+
+    // The flow lines come out of the row budget, not on top of it.
+    let above = flow_lines(flow, visible, &t);
+    let rows = visible.saturating_sub(above.len());
+    lines.extend(above);
 
     match state {
         FrameState::Empty => {
             lines.push(state_line(empty_message(mode), &t));
-            pad_rows(&mut lines, visible.saturating_sub(1), &t);
+            pad_rows(&mut lines, rows.saturating_sub(1), &t);
         }
         FrameState::NoMatch => {
             lines.push(state_line(&format!("No matches for {query:?}"), &t));
-            pad_rows(&mut lines, visible.saturating_sub(1), &t);
+            pad_rows(&mut lines, rows.saturating_sub(1), &t);
         }
         FrameState::Rows => {
             // The list area is the window, not the list: the frame emits the
-            // `visible` rows the window covers and pads the rest with bare
+            // `rows` lines the window covers and pads the rest with bare
             // rail, so narrowing the query changes which rows are there but
             // never how many lines the frame takes.
-            let window = visible_window(matches.len(), selection, visible);
+            let window = visible_window(matches.len(), selection, rows);
             for (i, (conn_idx, _score, hits)) in matches.iter().enumerate() {
                 if window.contains(&i) {
                     lines.push(row_line(&connections[*conn_idx], i == selection, hits, &t));
                 }
             }
-            pad_rows(&mut lines, visible.saturating_sub(window.len()), &t);
+            pad_rows(&mut lines, rows.saturating_sub(window.len()), &t);
         }
     }
 
-    lines.push(hint_rail_line(mode, canvas.fit_width(), &t));
+    lines.push(hint_rail_line(mode, flow, canvas.fit_width(), &t));
     lines.push(corner_line(&t));
 
     // Nothing the frame emits may exceed the frame's own budget. The inline
@@ -718,29 +881,45 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// The order is the contract, not a stylistic choice — on a narrow terminal the
 /// tail gets dropped, so what is listed first is what survives (user story 23).
 ///
-/// No mode advertises a Ctrl chord. The manage chords the spec calls for
-/// (`Ctrl+A`/`Ctrl+E`/`Ctrl+X`, stories 18-20) are #36's work: `run_inline`
-/// reads no Ctrl key but `Ctrl+C`, so a hint naming them would teach a
-/// binding that silently does nothing. They come back here when the handlers
-/// do.
+/// The manage frame advertises its Ctrl chords because #36 put handlers
+/// behind them. Until then it advertised none: `run_inline` read no Ctrl key
+/// but `Ctrl+C`, and a hint for a key that does nothing is worse than no
+/// hint at all — it teaches the user a binding that silently fails. The
+/// rule still holds and is the reason the chords are last in the list: they
+/// are the first thing a narrow terminal loses, and losing a hint is cheap
+/// while losing the escape hatch is not.
+///
+/// While the delete confirm is open the rail changes to the answers that
+/// step actually reads, in the same order: the way out first.
 ///
 /// The rail is fitted with the shared drop-from-the-end rule
 /// ([`fit_hints_with`], the same one [`fit_hints`] is built on), against the
 /// width left after the gutter. That is what turns "82 columns of hints in an
 /// 80-column terminal" from a mid-word clip into a clean loss of the
 /// least-needed segment.
-fn hint_rail_line(mode: FrameMode, width: usize, t: &Theme) -> Line<'static> {
-    let hints: &[&str] = match mode {
-        FrameMode::Pick => &[
-            "Esc cancel",
-            "Enter select",
-            "↑↓ navigate",
-            // Already last, which under drop-from-the-end ordering means it is
-            // the first thing a narrow terminal loses — the ordering #39 asks
-            // for, free here because the line was written in that order.
-            "sshm manage to add or edit",
-        ],
-        FrameMode::Manage => &["Esc cancel", "Enter edit", "↑↓ navigate"],
+fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) -> Line<'static> {
+    let hints: &[&str] = if flow.confirming.is_some() {
+        &["Esc back", "y confirm", "N abort", "Ctrl+C quit"]
+    } else {
+        match mode {
+            FrameMode::Pick => &[
+                "Esc cancel",
+                "Enter select",
+                "↑↓ navigate",
+                // Already last, which under drop-from-the-end ordering means it is
+                // the first thing a narrow terminal loses — the ordering #39 asks
+                // for, free here because the line was written in that order.
+                "sshm manage to add or edit",
+            ],
+            FrameMode::Manage => &[
+                "Esc cancel",
+                "Enter edit",
+                "↑↓ navigate",
+                "Ctrl+A add",
+                "Ctrl+E edit",
+                "Ctrl+X delete",
+            ],
+        }
     };
 
     let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
@@ -753,7 +932,34 @@ fn hint_rail_line(mode: FrameMode, width: usize, t: &Theme) -> Line<'static> {
 }
 
 /// The `◆ <question>` line that opens every frame.
-fn header_line(mode: FrameMode, t: &Theme) -> Line<'static> {
+///
+/// While the delete confirm is open the question *is* the header — that is
+/// the Clack grammar for a step: one line, one ask. The folder prefix and
+/// the `(y/N)` answer hint are dim and the alias is bold, exactly as they
+/// are in the row the confirm is about, so the two read as the same
+/// Connection.
+fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
+    if let Some(target) = &flow.confirming {
+        let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+
+        let mut spans = vec![
+            Span::styled("◆", Style::default().fg(t.accent)),
+            Span::raw(" "),
+            Span::styled("Delete ", bold),
+        ];
+
+        if let Some(folder) = target.folder.as_deref().filter(|f| !f.is_empty()) {
+            spans.push(Span::styled(format!("[{folder}] "), dim));
+        }
+
+        spans.push(Span::styled(target.alias.clone(), bold));
+        spans.push(Span::styled("? ", bold));
+        spans.push(Span::styled("(y/N)", dim));
+
+        return Line::from(spans);
+    }
+
     let title = match mode {
         FrameMode::Pick => "Select a Connection",
         FrameMode::Manage => "Manage Connections",

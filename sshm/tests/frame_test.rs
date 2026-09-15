@@ -422,28 +422,71 @@ fn the_highlighted_columns_are_the_row_text_offsets_the_matcher_reports() {
 // The hint rail
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The manage frame names itself and leads with the escape hatch (user
-/// story 23) — and carries **no** Ctrl chords.
+/// The manage frame names itself, leads with the escape hatch (user story 23),
+/// and advertises the management chords — **only because #36 put handlers
+/// behind them**.
 ///
-/// `run_inline` has no Ctrl-chord handlers: every `Ctrl+<letter>` but `Ctrl+C`
-/// falls through to `_ => continue`, so `Ctrl+A`, `Ctrl+E` and `Ctrl+X` do
-/// nothing today. A hint for a key that does nothing is worse than no hint at
-/// all — it teaches the user a binding that silently fails. #36 restores this
-/// tail with handlers behind it.
+/// This gate used to assert the opposite: that the manage frame carried **no**
+/// Ctrl chords, because `run_inline` read no Ctrl key but `Ctrl+C` and a
+/// hint for a key that does nothing is worse than no hint at all. The rule
+/// was never "no Ctrl chords"; it was "never hint a key the frame does not
+/// read". So the ban is replaced with the pairing it was protecting: every
+/// `Ctrl+<letter>` the frame prints must be one `manage::step` acts on,
+/// checked here rather than asserted by hand, so the hint cannot outlive its
+/// handler or the handler lose its hint without this failing.
 #[test]
-fn manage_frame_hints_lead_with_the_escape_hatch_and_carry_no_dead_chords() {
+fn manage_frame_hints_lead_with_the_escape_hatch_and_carry_only_live_chords() {
     let frame = build_frame(&conns(), "", 0, FrameMode::Manage, wide());
 
     assert_eq!(line_text(&frame.lines()[0]), "◆ Manage Connections");
     assert_eq!(
         hint_rail(&frame),
-        "│   Esc cancel · Enter edit · ↑↓ navigate"
+        "│   Esc cancel · Enter edit · ↑↓ navigate · Ctrl+A add · Ctrl+E edit · Ctrl+X delete"
     );
+    assert_advertised_chords_are_live(&frame);
+}
+
+/// Pull every `Ctrl+<letter>` the frame prints and ask the manage state
+/// machine whether it acts on it.
+///
+/// The chord is exercised with a Connection selected, because that is the
+/// situation the hint is aimed at. A chord that returns the state unchanged
+/// and asks for nothing is a dead key, and a dead key must not be advertised.
+fn assert_advertised_chords_are_live(frame: &sshm::frame::Frame) {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use sshm::manage::{ManageState, step};
+
+    let text = frame_text(frame).join("\n");
+    let mut advertised: Vec<char> = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(idx) = rest.find("Ctrl+") {
+        let after = &rest[idx + "Ctrl+".len()..];
+        if let Some(ch) = after.chars().find(|c| !c.is_whitespace()) {
+            if ch.is_ascii_alphabetic() {
+                advertised.push(ch.to_ascii_lowercase());
+            }
+        }
+        rest = after;
+    }
+
     assert!(
-        !frame_text(&frame).join("\n").contains("Ctrl+"),
-        "the manage frame advertises a Ctrl chord no handler reads: {:?}",
-        frame_text(&frame)
+        !advertised.is_empty(),
+        "no Ctrl chord advertised — this gate has gone blind, update it rather \
+         than trust a vacuous pass. Frame: {text}"
     );
+
+    for ch in advertised {
+        let key = KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL);
+        let step = step(&ManageState::new(), key, Some(&conns()[0]));
+
+        assert!(
+            step.state != ManageState::new() || !step.effects.is_empty(),
+            "the frame advertises Ctrl+{} but the manage state machine does \
+             nothing with it: {:?}",
+            ch.to_ascii_uppercase(),
+            step.effects
+        );
+    }
 }
 
 /// The pick frame keeps the same order but has no chords; the management entry
@@ -763,11 +806,10 @@ fn the_manage_empty_state_points_at_a_command_that_works() {
         line_text(&frame.lines()[1]),
         "│   No Connections yet — run sshm add to create one"
     );
-    assert!(
-        !frame_text(&frame).join("\n").contains("Ctrl+"),
-        "the empty manage frame must not advertise a dead chord: {:?}",
-        frame_text(&frame)
-    );
+    // The chords this frame advertises are live as of #36, so the empty
+    // state is allowed to name them — and is checked for naming only live
+    // ones by the same gate the populated manage frame goes through.
+    assert_advertised_chords_are_live(&frame);
 }
 
 /// The empty message is a state line, so it is muted — and it is the glyph and
