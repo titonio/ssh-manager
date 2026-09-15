@@ -1,9 +1,11 @@
 //! Seam tests for the Connection manager.
 //!
-//! The seam under test is `sshm::connections`: the operations every surface
-//! (fullscreen TUI today, inline frames tomorrow) calls to change the Connection
-//! set. These tests go through that public interface only — no rendering, no
-//! private helpers — and assert the Connection set that comes back out.
+//! The seam under test is `sshm::connections`: the operations any caller goes
+//! through to change the Connection set. These tests go through that public
+//! interface only — no rendering, no private helpers — and assert the
+//! Connection set that comes back out. The frame's manage paths (#36/#37)
+//! are the consumers still to come; until they land this is what keeps the
+//! seam honest.
 
 use std::ffi::OsString;
 

@@ -8,8 +8,12 @@
 //! filtering is still very much live.
 
 use fuzzy_matcher::skim::SkimMatcherV2;
+use ratatui::text::Line;
 use sshm::config::Connection;
-use sshm::frame::{build_row_text, compute_field_offsets, compute_matches};
+use sshm::frame::{
+    build_frame, build_row_text, compute_field_offsets, compute_matches, Canvas, FrameMode,
+};
+use sshm::theme::ColorSupport;
 
 fn make_conn(alias: &str, host: &str, user: &str, port: u16, folder: Option<&str>) -> Connection {
     Connection {
@@ -173,11 +177,9 @@ fn field_offsets_with_folder() {
     assert_eq!(offsets[1], ("alias", 7, 10));
 }
 
-#[test]
-fn field_offsets_stay_in_sync_with_row_text() {
-    // compute_field_offsets and build_row_text must agree on row layout.
-    // If build_row_text changes, this test catches drift.
-    let cases = vec![
+/// The Connections every row-layout case runs over.
+fn cases() -> Vec<Connection> {
+    vec![
         make_conn("web", "example.com", "www", 22, None),
         make_conn(
             "prod-web",
@@ -187,8 +189,31 @@ fn field_offsets_stay_in_sync_with_row_text() {
             Some("production"),
         ),
         make_conn("dev", "localhost", "dev", 2222, Some("staging")),
-    ];
-    for conn in cases {
+    ]
+}
+
+/// The value a searchable field name refers to on this Connection.
+fn field_value(conn: &Connection, name: &str) -> String {
+    match name {
+        "folder" => conn.folder.as_deref().unwrap_or("").to_string(),
+        "alias" => conn.alias.clone(),
+        "user" => conn.user.clone(),
+        "host" => conn.host.clone(),
+        "port" => conn.port.to_string(),
+        other => panic!("unknown field: {other}"),
+    }
+}
+
+/// Flatten a rendered line back to plain text.
+fn line_text(line: &Line<'static>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+fn field_offsets_stay_in_sync_with_row_text() {
+    // compute_field_offsets and build_row_text must agree on row layout.
+    // If build_row_text changes, this test catches drift.
+    for conn in cases() {
         let text = build_row_text(&conn);
         let offsets = compute_field_offsets(&conn);
 
@@ -224,18 +249,55 @@ fn field_offsets_stay_in_sync_with_row_text() {
         // Each field's substring in the display text must match the actual value.
         for (name, s, e) in &offsets {
             let display_field = &text[*s..*e];
-            let actual: &str = match *name {
-                "folder" => conn.folder.as_deref().unwrap_or(""),
-                "alias" => &conn.alias,
-                "user" => &conn.user,
-                "host" => &conn.host,
-                "port" => &conn.port.to_string(),
-                _ => panic!("unknown field: {}", name),
-            };
+            let actual = field_value(&conn, name);
             assert_eq!(
                 display_field, actual,
                 "field {:?} text drift: display={:?}, actual={:?}",
                 name, display_field, actual
+            );
+        }
+    }
+}
+
+/// The offsets index the row the frame **renders**, not just the string they
+/// were computed against.
+///
+/// The pairing above was the whole gate before, and it was not enough:
+/// `row_line` formatted the row a second time by hand, so the text the
+/// matcher scored and the text the user saw could drift while every assertion
+/// here still passed. `row_line` now slices `build_row_text` at these same
+/// boundaries, and this test pins the pairing the offsets actually depend on:
+/// a field's range has to land on that field's characters in the drawn row.
+#[test]
+fn field_offsets_land_on_the_rendered_row() {
+    for conn in cases() {
+        let frame = build_frame(
+            std::slice::from_ref(&conn),
+            "",
+            0,
+            FrameMode::Pick,
+            Canvas::new(120, 24, ColorSupport::Truecolor),
+        );
+        let rendered = line_text(&frame.lines()[1]);
+        let row = build_row_text(&conn);
+
+        assert_eq!(
+            rendered,
+            format!("│ ❯ {row}"),
+            "the rendered row must be the rail, the cursor and build_row_text — \
+             nothing else"
+        );
+
+        // The gutter is whatever the line spends before the row text. With the
+        // line pinned above, an offset into the row text is that offset
+        // `gutter` into the rendered line.
+        let gutter = rendered.len() - row.len();
+        for (name, s, e) in compute_field_offsets(&conn) {
+            assert_eq!(
+                &rendered[gutter + s..gutter + e],
+                field_value(&conn, name),
+                "field {name:?} does not sit where its offset puts it in the \
+                 rendered row"
             );
         }
     }

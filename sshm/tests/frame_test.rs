@@ -8,11 +8,13 @@
 //! `◆ Delete [prod] web-01? (y/N)` both name these Connections, so the
 //! expectations below come from the spec rather than from the code under test.
 
+use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 use sshm::config::Connection;
 use sshm::frame::{
-    build_frame, visible_window, Canvas, FrameMode, FrameState, FRAME_LINES, VISIBLE_ROWS,
+    build_frame, build_row_text, compute_matches, visible_window, Canvas, FrameMode, FrameState,
+    FRAME_LINES, VISIBLE_ROWS,
 };
 use sshm::theme::{ColorSupport, Theme};
 
@@ -321,6 +323,99 @@ fn highlighted_text(frame: &sshm::frame::Frame) -> Vec<String> {
         .iter()
         .map(|s| s.content.to_string())
         .collect()
+}
+
+/// The byte offsets into a row's display text that the frame painted with the
+/// highlight role.
+///
+/// `gutter` is how many bytes the line spends before its row text starts
+/// (`│ ` + cursor + ` `), so the offsets that come back are in
+/// [`build_row_text`] coordinates — the same coordinates
+/// [`compute_matches`] reports hits in.
+fn highlighted_offsets_in_row(line: &Line<'static>, gutter: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut pos = 0usize;
+
+    for span in &line.spans {
+        let start = pos.saturating_sub(gutter);
+        if span.style.fg == Some(t().highlight) {
+            out.extend(start..start + span.content.len());
+        }
+        pos += span.content.len();
+    }
+
+    out.sort_unstable();
+    out
+}
+
+/// The row the frame draws **is** [`build_row_text`] — not a second copy of
+/// the same shape.
+///
+/// This is the half of the pairing that used to be missing. The highlight
+/// indices `compute_matches` returns are offsets into `build_row_text`, but
+/// `row_line` formatted the Connection a second time by hand, so nothing
+/// joined the two: the matcher's coordinate system and the drawn pixels could
+/// drift apart while every rendered string still looked right. With one
+/// function owning the text, an offset is an offset into what the user sees.
+#[test]
+fn the_rendered_row_is_the_row_text_the_offsets_index() {
+    for conn in conns() {
+        let frame = build_frame(std::slice::from_ref(&conn), "", 0, FrameMode::Pick, wide());
+        let rendered = line_text(&frame.lines()[1]);
+        let row = build_row_text(&conn);
+
+        assert_eq!(
+            rendered,
+            format!("│ ❯ {row}"),
+            "the selected row must be the rail, the cursor and build_row_text — \
+             nothing else: {rendered:?} vs {row:?}"
+        );
+    }
+}
+
+/// Every highlighted column in a rendered row is a byte the matcher called,
+/// counted in `build_row_text` — across the folder, the alias *and* the meta.
+///
+/// The two highlight tests above pin one shape each: a hit in the alias, a hit
+/// in the folder. Neither covers the `user@host:port` tail, which is exactly
+/// where a hand-counted segment offset in the renderer goes wrong — the drawn
+/// text stays identical, so no string assertion notices, while the hit lands
+/// one column off and lights up `eploy` instead of `deploy`.
+#[test]
+fn the_highlighted_columns_are_the_row_text_offsets_the_matcher_reports() {
+    let matcher = SkimMatcherV2::default();
+
+    for query in ["web", "prod", "deploy", "10.0.0", "db-01", "pos"] {
+        let frame = build_frame(&conns(), query, 0, FrameMode::Pick, wide());
+        assert!(
+            !frame.matched().is_empty(),
+            "query {query:?} matches nothing, so this test would assert nothing"
+        );
+        let conn_idx = frame.matched()[0];
+        let conn = &conns()[conn_idx];
+        let hits = compute_matches(&conns(), &matcher, query)
+            .into_iter()
+            .find(|(i, _, _)| *i == conn_idx)
+            .map(|(_, _, hits)| hits)
+            .unwrap_or_default();
+
+        let rendered = line_text(&frame.lines()[1]);
+        let row = build_row_text(conn);
+        assert_eq!(
+            rendered,
+            format!("│ ❯ {row}"),
+            "query {query:?}: the rendered row is not build_row_text, so its \
+             offsets cannot describe it"
+        );
+
+        let gutter = rendered.len() - row.len();
+        assert_eq!(
+            highlighted_offsets_in_row(&frame.lines()[1], gutter),
+            hits,
+            "query {query:?}: the columns the frame highlighted are not the \
+             offsets compute_matches reports into build_row_text"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

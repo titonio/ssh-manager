@@ -44,6 +44,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::ops::Range;
 
 /// The `│` rail glyph that every body line hangs off.
 const RAIL: &str = "│";
@@ -349,9 +350,10 @@ impl Frame {
     /// result leaves the terminal's own background untouched — the frame stays
     /// transparent all the way to the bytes.
     ///
-    /// The escape codes come from the same [`RunWriter`] the fullscreen
-    /// serializer uses, so the same `Style` produces the same bytes on both
-    /// surfaces.
+    /// The escape codes come from the same [`crate::theme::ansi::RunWriter`]
+    /// the inline driver draws its rows through (`ansi::line_to_ansi`), so
+    /// the same `Style` produces the same bytes whichever of the two
+    /// serializes it.
     pub fn to_ansi(&self) -> String {
         let mut out = String::new();
         let mut runs = crate::theme::ansi::RunWriter::new(&mut out);
@@ -441,11 +443,17 @@ pub fn compute_matches(
     results
 }
 
-/// Build the display text for a frame row (without the rail or cursor).
+/// The display text of a frame row (without the rail or cursor) — the single
+/// source of truth for what a row says.
 ///
 /// Format:
 ///   `[folder] alias (user@host:port)` when folder is present,
 ///   `alias (user@host:port)` when it is not.
+///
+/// [`compute_field_offsets`] indexes into this string and [`row_line`] draws
+/// its content spans as slices of it, so the text the matcher scores and the
+/// text the user reads are the same bytes. A row is not formatted anywhere
+/// else.
 pub fn build_row_text(conn: &Connection) -> String {
     let folder = conn.folder.as_deref().unwrap_or("");
     if folder.is_empty() {
@@ -458,31 +466,80 @@ pub fn build_row_text(conn: &Connection) -> String {
     }
 }
 
+/// The three segments a row is drawn from, as byte ranges into the row's
+/// display text ([`build_row_text`]).
+///
+/// The folder segment carries its brackets and the meta segment carries its
+/// parentheses. The single space between segments belongs to neither: it is
+/// drawn as a raw span.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RowSegments {
+    /// `[folder]` — absent when the Connection has no folder.
+    folder: Option<Range<usize>>,
+    /// The alias.
+    alias: Range<usize>,
+    /// `(user@host:port)`.
+    meta: Range<usize>,
+}
+
+/// The row's geometry: where each drawn segment sits inside
+/// [`build_row_text`]'s output.
+///
+/// One function owns the `[folder] alias (user@host:port)` layout.
+/// [`compute_field_offsets`] derives the matcher's field offsets from these
+/// ranges and [`row_line`] cuts its spans out of the row text at them, so the
+/// text the highlight indices count into and the text the frame draws are the
+/// same bytes. Before this, `row_line` formatted the row a second time by
+/// hand and nothing joined the two — see the note on [`row_line`].
+fn row_segments(conn: &Connection) -> RowSegments {
+    let folder = conn.folder.as_deref().filter(|f| !f.is_empty());
+    let port = conn.port.to_string();
+
+    // `[folder] ` is the folder name wrapped in brackets plus a space; a row
+    // with no folder starts straight at the alias.
+    let alias_start = folder.map_or(0, |f| f.len() + 3);
+    let alias_end = alias_start + conn.alias.len();
+
+    // ` (user@host:port)` — the `(` is the segment's first byte, the `)` its
+    // last, with one separator column between each of the three fields.
+    let meta_start = alias_end + 1;
+    let meta_end = meta_start + 1 + conn.user.len() + 1 + conn.host.len() + 1 + port.len() + 1;
+
+    RowSegments {
+        folder: folder.map(|f| 0..f.len() + 2),
+        alias: alias_start..alias_end,
+        meta: meta_start..meta_end,
+    }
+}
+
 /// Compute the start/end character-offsets of each searchable field within the
 /// row display text produced by [`build_row_text`].
+///
+/// The boundaries come from [`row_segments`], the one place the row's layout
+/// is written down, so these offsets cannot land on a different row than the
+/// one [`row_line`] draws.
 pub fn compute_field_offsets(conn: &Connection) -> Vec<(&str, usize, usize)> {
+    let segs = row_segments(conn);
     let folder = conn.folder.as_deref().unwrap_or("");
+    let port = conn.port.to_string();
     let mut offsets: Vec<(&str, usize, usize)> = Vec::new();
 
     if !folder.is_empty() {
         offsets.push(("folder", 1, 1 + folder.len()));
     }
 
-    let alias_start = if folder.is_empty() {
-        0
-    } else {
-        folder.len() + 3
-    };
-    offsets.push(("alias", alias_start, alias_start + conn.alias.len()));
+    offsets.push(("alias", segs.alias.start, segs.alias.end));
 
-    let user_start = alias_start + conn.alias.len() + 2; // " (" is 2 chars
+    // Inside the meta segment `(user@host:port)`: one past the `(` is the
+    // user, one past the `@` is the host, one past the `:` is the port.
+    let user_start = segs.meta.start + 1;
     offsets.push(("user", user_start, user_start + conn.user.len()));
 
     let host_start = user_start + conn.user.len() + 1;
     offsets.push(("host", host_start, host_start + conn.host.len()));
 
     let port_start = host_start + conn.host.len() + 1;
-    offsets.push(("port", port_start, port_start + conn.port.to_string().len()));
+    offsets.push(("port", port_start, port_start + port.len()));
 
     offsets
 }
@@ -667,10 +724,11 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// binding that silently does nothing. They come back here when the handlers
 /// do.
 ///
-/// The rail is fitted with the same drop-from-the-end rule the fullscreen footer
-/// uses ([`fit_hints_with`]), against the width left after the
-/// gutter. That is what turns "82 columns of hints in an 80-column terminal"
-/// from a mid-word clip into a clean loss of the least-needed segment.
+/// The rail is fitted with the shared drop-from-the-end rule
+/// ([`fit_hints_with`], the same one [`fit_hints`] is built on), against the
+/// width left after the gutter. That is what turns "82 columns of hints in an
+/// 80-column terminal" from a mid-word clip into a clean loss of the
+/// least-needed segment.
 fn hint_rail_line(mode: FrameMode, width: usize, t: &Theme) -> Line<'static> {
     let hints: &[&str] = match mode {
         FrameMode::Pick => &[
@@ -730,14 +788,23 @@ fn cursor_span(selected: bool, t: &Theme) -> Span<'static> {
 ///
 /// The folder segment is emitted only when the Connection has one, so rows
 /// without a folder start at the alias and stay compact.
+///
+/// This function does not format a row. Every content span is a slice of
+/// [`build_row_text`] cut at the boundaries [`row_segments`] reports, which
+/// are the same byte coordinates [`compute_matches`] reports hits in — so the
+/// characters a hit lights up are characters of the one text the matcher
+/// scored. `row_line` used to build the row string a second time by hand,
+/// and with nothing joining the two, the drawn characters and the matcher's
+/// offsets were free to disagree while every rendered string still looked
+/// right.
 fn row_line(conn: &Connection, selected: bool, hits: &[usize], t: &Theme) -> Line<'static> {
     // The ticket asks for *dim* meta, and the hint rail already spells "dim" as
     // `DIM` on `fg_muted`. Muted-without-`DIM` is a different claim — it is
     // just a darker colour, and on a terminal with a bright bright-black it
     // does not recede at all. One word, one spelling.
-    let meta = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-    let alias = Style::default().add_modifier(Modifier::BOLD);
-    let hit = Style::default()
+    let meta_style = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let alias_style = Style::default().add_modifier(Modifier::BOLD);
+    let hit_style = Style::default()
         .fg(t.highlight)
         .add_modifier(Modifier::BOLD);
 
@@ -748,26 +815,42 @@ fn row_line(conn: &Connection, selected: bool, hits: &[usize], t: &Theme) -> Lin
         Span::raw(" "),
     ];
 
-    // Segment offsets are byte offsets into the row's display text — the same
-    // coordinate system `compute_matches` reports hit positions in, so a hit
-    // needs no translation to land on the right character here.
-    let mut pos = 0usize;
+    let text = build_row_text(conn);
+    let segs = row_segments(conn);
 
-    if let Some(folder) = conn.folder.as_deref().filter(|f| !f.is_empty()) {
-        let seg = format!("[{folder}]");
-        push_split(&mut spans, &seg, pos, meta, hit, hits);
-        pos += seg.len();
+    if let Some(folder) = segs.folder {
+        let start = folder.start;
+        push_split(
+            &mut spans,
+            &text[folder],
+            start,
+            meta_style,
+            hit_style,
+            hits,
+        );
         spans.push(Span::raw(" "));
-        pos += 1;
     }
 
-    push_split(&mut spans, &conn.alias, pos, alias, hit, hits);
-    pos += conn.alias.len();
+    let alias_start = segs.alias.start;
+    push_split(
+        &mut spans,
+        &text[segs.alias],
+        alias_start,
+        alias_style,
+        hit_style,
+        hits,
+    );
     spans.push(Span::raw(" "));
-    pos += 1;
 
-    let meta_seg = format!("({}@{}:{})", conn.user, conn.host, conn.port);
-    push_split(&mut spans, &meta_seg, pos, meta, hit, hits);
+    let meta_start = segs.meta.start;
+    push_split(
+        &mut spans,
+        &text[segs.meta],
+        meta_start,
+        meta_style,
+        hit_style,
+        hits,
+    );
 
     Line::from(spans)
 }

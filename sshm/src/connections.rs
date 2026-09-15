@@ -7,8 +7,11 @@
 //!
 //! This is business logic only. Nothing here knows how a Connection is drawn,
 //! filtered or selected — a caller passes the draft it collected and the id it
-//! is acting on, and gets the changed Connection out. That is what lets the
-//! fullscreen TUI and the inline frames share one implementation.
+//! is acting on, and gets the changed Connection out. That is what lets one
+//! implementation serve every caller. Note that as of the #35 cut-over no
+//! live command calls into it: `sshm add` writes through `config` directly,
+//! and the manage paths that will are #36/#37. The seam is exercised by
+//! `tests/connections_test.rs` until they land.
 
 use crate::config::{Config, Connection};
 
