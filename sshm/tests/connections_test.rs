@@ -10,7 +10,7 @@
 use std::ffi::OsString;
 
 use sshm::config::Config;
-use sshm::connections::{self, ConnectionDraft};
+use sshm::connections::{self, ConnectionDraft, Ephemeral, Store};
 
 /// Point `HOME` at a throwaway directory so a test never touches the real
 /// `~/.ssh/connections.json`, and put it back on the way out.
@@ -256,4 +256,122 @@ fn user_can_import_connections_from_the_ssh_config() {
         config.connections[1].port, 22,
         "a Host with no Port line lands on the SSH default"
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The `Store` seam (#36) — what the frame driver actually holds
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The manage driver deletes through `&mut dyn Store`, never through
+/// `Config` directly. This test pins the contract at that seam: the delete
+/// removes exactly the named Connection and the listed set is what the
+/// frame would show next.
+#[test]
+#[serial_test::serial]
+fn the_store_deletes_exactly_the_named_connection() {
+    let _home = TempHome::new();
+    let mut config = Config::new();
+    let doomed =
+        connections::add(&mut config, &draft("web-01", "10.0.0.4", "deploy", "22")).unwrap();
+    let kept = connections::add(&mut config, &draft("db-01", "10.0.0.9", "dba", "5432")).unwrap();
+
+    let store: &mut dyn Store = &mut config;
+    let removed = store
+        .remove(&doomed.id)
+        .expect("deleting a known Connection should succeed")
+        .expect("the Connection was there to be deleted");
+
+    assert_eq!(
+        removed.id, doomed.id,
+        "the named Connection is what came back"
+    );
+    assert_eq!(store.all().len(), 1, "exactly one Connection was removed");
+    assert_eq!(store.all()[0].id, kept.id, "the neighbour survives");
+}
+
+/// The driver's `y` must be durable: a delete through the trait changes the
+/// file on disk, because the trait's `Config` impl goes through
+/// `connections::remove`, which is the one implementation of "delete a
+/// Connection" the module owns.
+#[test]
+#[serial_test::serial]
+fn the_store_persists_the_delete_it_makes() {
+    let home = TempHome::new();
+    let mut config = Config::new();
+    let doomed =
+        connections::add(&mut config, &draft("web-01", "10.0.0.4", "deploy", "22")).unwrap();
+    connections::add(&mut config, &draft("db-01", "10.0.0.9", "dba", "5432")).unwrap();
+    let stored = home.path().join(".ssh").join("connections.json");
+
+    let store: &mut dyn Store = &mut config;
+    store.remove(&doomed.id).expect("delete should succeed");
+
+    let on_disk = std::fs::read_to_string(&stored).expect("the set is on disk");
+    assert!(
+        !on_disk.contains("web-01"),
+        "the deleted Connection must be gone from the persisted set: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("db-01"),
+        "the untouched Connection must survive on disk: {on_disk}"
+    );
+}
+
+/// The visual harness deletes through `Ephemeral`: the row really leaves
+/// the set the frame is showing — otherwise the harness would not be
+/// looking at a real delete — but nothing reaches the user's
+/// `connections.json`.
+#[test]
+fn ephemeral_really_removes_the_connection_from_the_set() {
+    let mut store = Ephemeral::new(vec![
+        connection("id-web-01", "web-01"),
+        connection("id-web-02", "web-02"),
+    ]);
+
+    let removed = store
+        .remove("id-web-01")
+        .expect("removing a known Connection should succeed")
+        .expect("the Connection was there to be removed");
+
+    assert_eq!(removed.alias, "web-01");
+    assert_eq!(store.all().len(), 1, "the set really shrank");
+    assert_eq!(store.all()[0].alias, "web-02", "the right one survived");
+}
+
+#[test]
+fn ephemeral_unknown_id_removes_nothing() {
+    let mut store = Ephemeral::new(vec![connection("id-web-01", "web-01")]);
+
+    let removed = store
+        .remove("no-such-id")
+        .expect("an unknown id is not a failure");
+
+    assert_eq!(removed, None);
+    assert_eq!(store.all().len(), 1, "the set is left as it was");
+}
+
+#[test]
+fn ephemeral_deletes_never_reach_the_users_file() {
+    let home = TempHome::new();
+    let mut store = Ephemeral::new(vec![connection("id-web-01", "web-01")]);
+
+    store.remove("id-web-01").expect("removal should succeed");
+
+    let stored = home.path().join(".ssh").join("connections.json");
+    assert!(
+        !stored.exists(),
+        "the harness store must never write the user's connections.json"
+    );
+}
+
+fn connection(id: &str, alias: &str) -> sshm::config::Connection {
+    sshm::config::Connection {
+        id: id.to_string(),
+        alias: alias.to_string(),
+        host: "10.0.0.4".to_string(),
+        user: "deploy".to_string(),
+        port: 22,
+        key_path: None,
+        folder: Some("prod".to_string()),
+    }
 }

@@ -235,7 +235,9 @@ fn list_step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) 
         // not collide with rule 2 — but it does mean `j` and `k` are not
         // filter text, which the sweep test names explicitly.
         KeyCode::Char('j') if key.modifiers.is_empty() => next.selection += 1,
-        KeyCode::Char('k') if key.modifiers.is_empty() => next.selection = next.selection.saturating_sub(1),
+        KeyCode::Char('k') if key.modifiers.is_empty() => {
+            next.selection = next.selection.saturating_sub(1)
+        }
         KeyCode::Char(ch) if key.modifiers.is_empty() => next.query.push(ch),
         _ => return Step::state_only(state.clone()),
     }
@@ -270,7 +272,9 @@ fn confirm_step(state: &ManageState, key: KeyEvent, target: &Connection) -> Step
                 }),
                 ..state.clone()
             },
-            effects: vec![Effect::Delete { id: target.id.clone() }],
+            effects: vec![Effect::Delete {
+                id: target.id.clone(),
+            }],
         };
     }
 
@@ -309,12 +313,6 @@ fn declined(state: &ManageState, target: &Connection) -> ManageState {
 fn is_answer(key: KeyEvent, ch: char) -> bool {
     key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
         && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&ch))
-}
-
-/// A key with no modifiers at all — the shape of an answer typed at the
-/// `(y/N)` prompt, as opposed to a chord.
-fn plain(ch: char) -> KeyEvent {
-    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE)
 }
 
 /// Is this key the Ctrl chord `ch`?

@@ -40,7 +40,9 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::config::Connection;
-use crate::frame::{build_frame, fit_visible_rows, Canvas, Frame, FrameMode};
+use crate::connections::Store;
+use crate::frame::{build_frame_with_flow, fit_visible_rows, Canvas, Frame, FrameFlow, FrameMode};
+use crate::manage::{self, Effect, ManageState};
 use crate::theme::{self, Theme};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -479,7 +481,7 @@ pub fn run_inline<W: Write>(
     initial_query: String,
     mode: FrameMode,
 ) -> io::Result<InlineOutcome> {
-    use crossterm::event::{self, Event, KeyEventKind};
+    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
     let (width, height) = crossterm::terminal::size()?;
     let mut canvas = Canvas::detect(width as usize, height as usize);
@@ -545,7 +547,7 @@ pub fn run_inline<W: Write>(
                             // perform until that sequence exists.
                             Effect::BeginAdd => {}
                             Effect::Exit(outcome) => {
-                                return settle(&mut live, canvas, outcome)?;
+                                return settle(&mut live, canvas, outcome);
                             }
                         }
                     }

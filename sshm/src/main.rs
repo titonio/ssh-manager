@@ -1,6 +1,6 @@
 // The bin is a thin CLI over the library: it uses the same modules the tests
 // drive, rather than compiling a second private copy of them.
-use sshm::{config, emit, inline, ssh, update};
+use sshm::{config, connections, emit, inline, ssh, update};
 
 use std::io::{self, Write};
 
@@ -92,7 +92,7 @@ fn main() -> io::Result<()> {
 }
 
 fn run_main(
-    run_frame_fn: fn(Emit, Vec<config::Connection>, String) -> io::Result<()>,
+    run_frame_fn: fn(Emit, &mut dyn connections::Store, String) -> io::Result<()>,
     check_update_fn: fn() -> UpdateResult,
 ) -> io::Result<()> {
     let cli = Cli::parse();
@@ -106,10 +106,12 @@ fn run_main(
 ///
 /// Bare `sshm`, `sshm pick` and `sshm manage` all open the same inline
 /// frame; they differ only in the [`Emit`] they hand it, which is what
-/// Enter then means (#35).
+/// Enter then means (#35). The frame is handed the whole `Config` as a
+/// [`Store`]: a manage delete must persist through the one implementation
+/// `connections.rs` owns, so the seam carries the live set, not a snapshot.
 fn dispatch(
     cli: Cli,
-    run_frame_fn: fn(Emit, Vec<config::Connection>, String) -> io::Result<()>,
+    run_frame_fn: fn(Emit, &mut dyn connections::Store, String) -> io::Result<()>,
     check_update_fn: fn() -> UpdateResult,
 ) -> io::Result<()> {
     // Handle completions command
@@ -140,14 +142,14 @@ fn dispatch(
     // captured stdout is never polluted by it, and returns straight from
     // the frame.
     if let Some(Commands::Pick { query }) = cli.command {
-        let connections = config::Config::load().connections;
-        return run_frame_fn(Emit::Insert, connections, query.unwrap_or_default());
+        let mut config = config::Config::load();
+        return run_frame_fn(Emit::Insert, &mut config, query.unwrap_or_default());
     }
 
     // `sshm manage` — the edit emit, in the manage frame.
     if let Some(Commands::Manage) = cli.command {
-        let connections = config::Config::load().connections;
-        return run_frame_fn(Emit::Edit, connections, String::new());
+        let mut config = config::Config::load();
+        return run_frame_fn(Emit::Edit, &mut config, String::new());
     }
 
     // Handle check-update flag or command
@@ -184,8 +186,8 @@ fn dispatch(
 
     // Bare `sshm` — the execute emit. There is no fullscreen to fall
     // through to: the frame is the whole surface now.
-    let connections = config::Config::load().connections;
-    run_frame_fn(Emit::Execute, connections, String::new())
+    let mut config = config::Config::load();
+    run_frame_fn(Emit::Execute, &mut config, String::new())
 }
 
 /// The real frame command: open the shared inline frame, resolve the
@@ -198,12 +200,12 @@ fn dispatch(
 /// it is a tty and opens `/dev/tty` itself when it is not.
 fn run_frame_command(
     emit: Emit,
-    connections: Vec<config::Connection>,
+    store: &mut dyn connections::Store,
     query: String,
 ) -> io::Result<()> {
     let mut frame_out = open_frame_stream()?;
 
-    let outcome = inline::run_inline(&mut frame_out, &connections, query, emit.frame_mode())?;
+    let outcome = inline::run_inline(&mut frame_out, store, query, emit.frame_mode())?;
 
     match emit.resolve(outcome) {
         Action::Execute(args) => {
@@ -599,7 +601,6 @@ fn print_init_bash_script() {
 pub mod tests {
     use super::*;
     use serial_test::serial;
-    use sshm::config::Connection;
 
     // The frame runner is a fn pointer, so it records into a thread-local
     // rather than a closure: the assertion is then about what each command
@@ -615,7 +616,11 @@ pub mod tests {
             const { std::cell::RefCell::new(Vec::new()) };
     }
 
-    fn record_frame(emit: Emit, _connections: Vec<Connection>, query: String) -> io::Result<()> {
+    fn record_frame(
+        emit: Emit,
+        _store: &mut dyn connections::Store,
+        query: String,
+    ) -> io::Result<()> {
         FRAME_CALLS.with(|c| c.borrow_mut().push(FrameCall { emit, query }));
         Ok(())
     }

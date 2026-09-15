@@ -13,6 +13,7 @@
 //! route it per its emit mode instead.
 
 use sshm::config::Connection;
+use sshm::connections::Ephemeral;
 use sshm::frame::FrameMode;
 use sshm::inline::run_inline;
 
@@ -73,10 +74,14 @@ fn main() -> std::io::Result<()> {
         _ => FrameMode::Pick,
     };
     let query = args.next().unwrap_or_default();
-    let connections = fixture();
+    // The demo deletes for real — off the fixture, never the user's
+    // connections.json. That is what `Ephemeral` is for: the row the frame
+    // drops under `y` is genuinely gone from the set being shown, and only
+    // the durability is absent.
+    let mut store = Ephemeral::new(fixture());
 
     let mut out = std::io::stdout();
-    let outcome = run_inline(&mut out, &connections, query, mode)?;
+    let outcome = run_inline(&mut out, &mut store, query, mode)?;
 
     eprintln!("[demo] {outcome:?}");
     Ok(())

@@ -380,10 +380,7 @@ fn settled_confirm_line(conn: &Connection, answered: bool, t: &Theme) -> Line<'s
 
     spans.push(Span::styled(conn.alias.clone(), bold));
     spans.push(Span::styled("? ", dim));
-    spans.push(Span::styled(
-        if answered { "Yes" } else { "No" },
-        bold,
-    ));
+    spans.push(Span::styled(if answered { "Yes" } else { "No" }, bold));
 
     Line::from(spans)
 }
@@ -723,7 +720,14 @@ pub fn build_frame(
     mode: FrameMode,
     canvas: Canvas,
 ) -> Frame {
-    build_frame_with_flow(connections, query, selection, mode, canvas, &FrameFlow::default())
+    build_frame_with_flow(
+        connections,
+        query,
+        selection,
+        mode,
+        canvas,
+        &FrameFlow::default(),
+    )
 }
 
 /// [`build_frame`] with the manage flow layered on.

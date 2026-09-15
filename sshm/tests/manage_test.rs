@@ -263,7 +263,12 @@ fn the_delete_is_scoped_to_the_connection_under_the_chord_not_the_cursor() {
 fn movement_does_not_happen_while_the_confirm_is_open() {
     let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
 
-    for code in [KeyCode::Down, KeyCode::Up, KeyCode::Enter, KeyCode::Backspace] {
+    for code in [
+        KeyCode::Down,
+        KeyCode::Up,
+        KeyCode::Enter,
+        KeyCode::Backspace,
+    ] {
         let step = step(&armed.state, key(code), Some(&web01()));
 
         assert_eq!(

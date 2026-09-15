@@ -454,7 +454,7 @@ fn manage_frame_hints_lead_with_the_escape_hatch_and_carry_only_live_chords() {
 /// and asks for nothing is a dead key, and a dead key must not be advertised.
 fn assert_advertised_chords_are_live(frame: &sshm::frame::Frame) {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-    use sshm::manage::{ManageState, step};
+    use sshm::manage::{step, ManageState};
 
     let text = frame_text(frame).join("\n");
     let mut advertised: Vec<char> = Vec::new();

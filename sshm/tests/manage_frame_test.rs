@@ -10,7 +10,7 @@
 //! state, not a cosmetic loss, so each one is checked under monochrome too.
 
 use crossterm::event::KeyCode;
-use ratatui::style::{Color, Modifier};
+use ratatui::style::Modifier;
 use ratatui::text::Line;
 use sshm::config::Connection;
 use sshm::frame::{build_frame_with_flow, Canvas, FrameFlow, FrameMode, FRAME_LINES};
@@ -62,10 +62,7 @@ fn frame_text(frame: &sshm::frame::Frame) -> Vec<String> {
 }
 
 fn ctrl(ch: char) -> crossterm::event::KeyEvent {
-    crossterm::event::KeyEvent::new(
-        KeyCode::Char(ch),
-        crossterm::event::KeyModifiers::CONTROL,
-    )
+    crossterm::event::KeyEvent::new(KeyCode::Char(ch), crossterm::event::KeyModifiers::CONTROL)
 }
 
 fn plain(ch: char) -> crossterm::event::KeyEvent {
@@ -85,7 +82,7 @@ fn render(state: &ManageState) -> sshm::frame::Frame {
 }
 
 /// The line of the frame that carries `glyph`, if any.
-fn line_with<'a>(frame: &'a sshm::frame::Frame, glyph: char) -> &'a Line<'static> {
+fn line_with(frame: &sshm::frame::Frame, glyph: char) -> &Line<'static> {
     let text = frame_text(frame);
     let idx = text
         .iter()
@@ -237,7 +234,10 @@ fn the_flow_glyphs_survive_monochrome() {
 
     assert!(joined.contains('■'), "the settled glyph vanished: {joined}");
     assert!(joined.contains('◇'), "the note glyph vanished: {joined}");
-    assert!(joined.contains("deleted"), "the note word vanished: {joined}");
+    assert!(
+        joined.contains("deleted"),
+        "the note word vanished: {joined}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

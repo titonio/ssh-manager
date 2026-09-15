@@ -28,17 +28,21 @@ non-zero if any of them fails, so this is a gate as well as a look.
 """
 
 import fcntl
+import hashlib
+import json
 import os
 import pty
 import select
 import struct
 import sys
+import tempfile
 import termios
 import time
 import unicodedata
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BIN = os.path.join(REPO, "sshm", "target", "debug", "examples", "inline_demo")
+SSH_BIN = os.path.join(REPO, "sshm", "target", "debug", "sshm")
 
 SCROLLBACK = [
     "prior scrollback: cargo build --release",
@@ -303,9 +307,10 @@ class Screen:
 
 
 class Demo:
-    def __init__(self, args, rows=24, cols=80):
-        if not os.path.exists(BIN):
-            raise SystemExit(f"build the demo first: {BIN}")
+    def __init__(self, args, rows=24, cols=80, bin=None, home=None, env=None):
+        bin = bin or BIN
+        if not os.path.exists(bin):
+            raise SystemExit(f"build the demo first: {bin}")
         master, slave = pty.openpty()
         self._set_size(slave, rows, cols)
         pid = os.fork()
@@ -317,9 +322,16 @@ class Demo:
             os.dup2(slave, 2)
             os.close(master)
             os.close(slave)
-            script = "".join(f"printf '%s\\n' {line!r};" for line in SCROLLBACK)
+            script = ""
+            if home:
+                # The manage scenario runs the real binary against a throwaway
+                # HOME so deletes land on a real connections.json we can hash.
+                script += f"export HOME={home!r}; "
+            for k, v in (env or {}).items():
+                script += f"export {k}={v!r}; "
+            script += "".join(f"printf '%s\\n' {line!r};" for line in SCROLLBACK)
             script += "printf '$ ';"
-            script += f" exec {BIN} {' '.join(args)}"
+            script += f" exec {bin} {' '.join(args)}"
             os.execvp("/bin/bash", ["bash", "-c", script])
             os._exit(127)
         os.close(slave)
@@ -537,6 +549,135 @@ def scenario_too_short_at_open():
     check("no alternate screen on the too-short path", not d.screen.alt_screen)
 
 
+def scenario_manage():
+    """#36: in-list delete with an inline (y/N) confirm, on the real binary.
+
+    Runs `sshm manage` against a throwaway HOME holding a seeded
+    `~/.ssh/connections.json`, so every verdict about persistence is a
+    sha256 of the real file, not a claim. The chord bytes are the raw
+    control characters a terminal sends for Ctrl+X (0x18) and Ctrl+C (0x03).
+    """
+    home = tempfile.mkdtemp(prefix="sshm-pty-manage-")
+    cfg = os.path.join(home, ".ssh", "connections.json")
+    os.makedirs(os.path.dirname(cfg), exist_ok=True)
+    with open(cfg, "w") as f:
+        json.dump(
+            {
+                "connections": [
+                    {"id": "id-web-01", "alias": "web-01", "host": "10.0.0.4",
+                     "user": "deploy", "port": 22, "folder": "prod"},
+                    {"id": "id-web-02", "alias": "web-02", "host": "10.0.0.5",
+                     "user": "deploy", "port": 22, "folder": "prod"},
+                ]
+            },
+            f,
+            indent=2,
+        )
+
+    def sha():
+        with open(cfg, "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+
+    h0 = sha()
+    print(f"    seeded connections.json sha256: {h0}")
+
+    CTRL_X, CTRL_C = b"\x18", b"\x03"
+
+    # ── run 1: Ctrl+X raises the confirm; N declines; hash unchanged ────
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.dump("U. `sshm manage` — frame open over two Connections")
+    height = len(d.screen.frame_rows())
+    check("both Connections listed",
+          "10.0.0.4" in "\n".join(d.screen.frame_rows())
+          and "10.0.0.5" in "\n".join(d.screen.frame_rows()))
+
+    d.send(CTRL_X, 0.4)
+    d.dump("V. Ctrl+X — the inline confirm is raised in the header")
+    check("confirm header is the ticket's string, verbatim",
+          d.screen.text()[FRAME_ROW] == "◆ Delete [prod] web-01? (y/N)",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("the confirm does not grow the frame",
+          len(d.screen.frame_rows()) == height,
+          f"{height} -> {len(d.screen.frame_rows())}")
+    rail = d.screen.text()[FRAME_ROW + height - 2]
+    check("the confirm rail names the answers it reads",
+          "y confirm" in rail and "N abort" in rail and "Esc back" in rail,
+          repr(rail))
+
+    d.send(b"N", 0.4)
+    d.dump("W. N at the confirm — declined, settled with ■, nothing deleted")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the declined confirm settles with ■",
+          "│   ■ Delete [prod] web-01? No" in joined, joined)
+    check("nothing claims a delete happened", "deleted" not in joined, joined)
+    check("web-01 is still in the list", "10.0.0.4" in joined)
+    d.send(ESC, 0.5)
+    d.dump("X. Esc leaves the declined run")
+    h1 = sha()
+    check("N left connections.json byte-identical", h1 == h0, f"{h0} -> {h1}")
+
+    # ── run 1b: Esc at the confirm declines it too — never deletes ─────
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.send(CTRL_X, 0.4)
+    d.send(ESC, 0.4)
+    d.dump("X2. Esc at the confirm — backs out of the step, still no delete")
+    joined = "\n".join(d.screen.frame_rows())
+    check("Esc closed the confirm without a Yes",
+          d.screen.text()[FRAME_ROW] == "◆ Manage Connections"
+          and "Yes" not in joined, joined)
+    check("the decline still leaves its ■ No trace",
+          "■ Delete [prod] web-01? No" in joined, joined)
+    check("web-01 still on the glass", "10.0.0.4" in joined)
+    d.send(ESC, 0.5)
+    d.dump("X3. second Esc exits the frame")
+    check("the second Esc leaves the cancel trace",
+          d.screen.text()[FRAME_ROW] == "◆ cancelled",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("Esc at the confirm deleted nothing", sha() == h0)
+
+    # ── run 2: y deletes exactly one, settles ■, note ◇, hash changes ──
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.send(CTRL_X, 0.4)
+    d.send(b"y", 0.4)
+    d.dump("Y. y at the confirm — settled ■ Yes, dim ◇ note, list returns")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the answered confirm settles with ■ Yes",
+          "│   ■ Delete [prod] web-01? Yes" in joined, joined)
+    check("the dim note names the deleted Connection",
+          "◇ deleted [prod] web-01" in joined, joined)
+    check("exactly one Connection left the list (web-01's host gone)",
+          "10.0.0.4" not in joined, joined)
+    check("the neighbour survives in the list (web-02's host present)",
+          "10.0.0.5" in joined, joined)
+    d.send(ESC, 0.5)
+    d.dump("Z. Esc after the delete")
+    h2 = sha()
+    check("y changed connections.json", h2 != h0, f"{h0} -> {h2}")
+    on_disk = open(cfg).read()
+    check("web-01 is gone from the file", "web-01" not in on_disk, on_disk)
+    check("web-02 survives in the file", "web-02" in on_disk)
+
+    # ── run 3: a printable filters and never deletes; Ctrl+C cancels ────
+    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d.pump(0.7)
+    d.send(b"x", 0.4)
+    d.dump("AA. printable 'x' — the chord letter typed into the filter")
+    joined = "\n".join(d.screen.frame_rows())
+    check("typing 'x' searched instead of deleting (no-match state)",
+          'No matches for "x"' in joined, joined)
+    check("the printable left the file untouched", sha() == h2)
+    d.send(CTRL_C, 0.5)
+    d.dump("AB. Ctrl+C — the frame cancels clean")
+    check("Ctrl+C leaves the cancel trace",
+          d.screen.text()[FRAME_ROW] == "◆ cancelled",
+          repr(d.screen.text()[FRAME_ROW]))
+    check("Ctrl+C deleted nothing", sha() == h2)
+    check("no alternate screen on any manage path", not d.screen.alt_screen)
+
+
 def main():
     which = sys.argv[1] if len(sys.argv) > 1 else "all"
     scenarios = {
@@ -547,6 +688,7 @@ def main():
         "wide": scenario_wide_chars,
         "short": scenario_short_terminal,
         "too-short": scenario_too_short_at_open,
+        "manage": scenario_manage,
     }
     if which == "all":
         for fn in scenarios.values():
