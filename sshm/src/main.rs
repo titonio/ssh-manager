@@ -1,6 +1,6 @@
 // The bin is a thin CLI over the library: it uses the same modules the tests
 // drive, rather than compiling a second private copy of them.
-use sshm::{config, emit, frame, inline, ssh, theme, update};
+use sshm::{config, emit, inline, ssh, update};
 
 use std::io::{self, Write};
 
@@ -215,18 +215,16 @@ fn run_frame_command(
             println!("{alias}");
             Ok(())
         }
-        Action::Edit(conn) => {
-            // The edit path's sight-line, written to the frame's own stream
-            // so a captured stdout stays clean. The rich edit interaction
-            // is #36/#37; the cut-over's contract is that Enter edits, not
-            // connects.
-            let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
-            let canvas = frame::Canvas::detect(width as usize, height as usize);
-            for line in inline::edit_trace(&conn, canvas) {
-                frame_out.write_all(theme::ansi::line_to_ansi(&line).as_bytes())?;
-                frame_out.write_all(b"\n")?;
-            }
-            frame_out.flush()
+        Action::Edit(_) => {
+            // Nothing to write. The frame's own collapse already left the
+            // single settle line story 13 asks for, and this is the whole
+            // cut-over contract for `sshm manage`: Enter routes the
+            // selection to the edit path instead of to `ssh`. The edit
+            // itself is #36/#37 — until they land no file is written here,
+            // so the runner adds no verb claiming that something changed
+            // (the `◆ editing` it used to print sat on top of the frame's
+            // own `◆ picked`: one keystroke, two settle lines).
+            Ok(())
         }
         Action::Cancelled => {
             std::process::exit(130);

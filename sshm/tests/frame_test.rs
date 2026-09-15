@@ -327,16 +327,27 @@ fn highlighted_text(frame: &sshm::frame::Frame) -> Vec<String> {
 // The hint rail
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The manage frame names itself and offers the management chords, ordered
-/// escape hatch → Enter → movement → management (user stories 23 and 47-50).
+/// The manage frame names itself and leads with the escape hatch (user
+/// story 23) — and carries **no** Ctrl chords.
+///
+/// `run_inline` has no Ctrl-chord handlers: every `Ctrl+<letter>` but `Ctrl+C`
+/// falls through to `_ => continue`, so `Ctrl+A`, `Ctrl+E` and `Ctrl+X` do
+/// nothing today. A hint for a key that does nothing is worse than no hint at
+/// all — it teaches the user a binding that silently fails. #36 restores this
+/// tail with handlers behind it.
 #[test]
-fn manage_frame_hints_lead_with_the_escape_hatch_and_end_with_the_chords() {
+fn manage_frame_hints_lead_with_the_escape_hatch_and_carry_no_dead_chords() {
     let frame = build_frame(&conns(), "", 0, FrameMode::Manage, wide());
 
     assert_eq!(line_text(&frame.lines()[0]), "◆ Manage Connections");
     assert_eq!(
         hint_rail(&frame),
-        "│   Esc cancel · Enter edit · ↑↓ navigate · Ctrl+A add · Ctrl+E edit · Ctrl+X delete"
+        "│   Esc cancel · Enter edit · ↑↓ navigate"
+    );
+    assert!(
+        !frame_text(&frame).join("\n").contains("Ctrl+"),
+        "the manage frame advertises a Ctrl chord no handler reads: {:?}",
+        frame_text(&frame)
     );
 }
 
@@ -644,16 +655,23 @@ fn an_empty_connection_set_renders_a_call_to_action_behind_the_rail() {
     );
 }
 
-/// The call to action is mode-specific: a manage user has the chord in the
-/// frame, a pick user does not.
+/// The call to action is mode-specific, and in both modes it points at
+/// something that actually works. The manage frame used to say `Ctrl+A to add
+/// one`; no handler reads that chord yet (#36), so the empty frame now names
+/// the command that does add a Connection today.
 #[test]
-fn the_manage_empty_state_points_at_the_add_chord() {
+fn the_manage_empty_state_points_at_a_command_that_works() {
     let frame = build_frame(&[], "", 0, FrameMode::Manage, canvas(80));
 
     assert_eq!(frame.state(), FrameState::Empty);
     assert_eq!(
         line_text(&frame.lines()[1]),
-        "│   No Connections yet — Ctrl+A to add one"
+        "│   No Connections yet — run sshm add to create one"
+    );
+    assert!(
+        !frame_text(&frame).join("\n").contains("Ctrl+"),
+        "the empty manage frame must not advertise a dead chord: {:?}",
+        frame_text(&frame)
     );
 }
 

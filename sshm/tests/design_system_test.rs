@@ -134,17 +134,13 @@ fn the_clack_palette_is_named_ansi_only() {
     let fixed = |c: Color| matches!(c, Color::Rgb(..) | Color::Indexed(..));
 
     for (role, color) in [
-        ("bg", t.bg),
         ("fg", t.fg),
-        ("fg_bright", t.fg_bright),
         ("fg_muted", t.fg_muted),
         ("accent", t.accent),
         ("border", t.border),
         ("highlight", t.highlight),
         ("success", t.success),
         ("warning", t.warning),
-        ("selection_bg", t.selection_bg),
-        ("selection_fg", t.selection_fg),
     ] {
         assert!(
             !fixed(color),
@@ -175,18 +171,68 @@ fn the_clack_palette_hues_are_cyan_and_green() {
 fn the_clack_palette_leaves_the_surface_to_the_terminal() {
     let t = Theme::clack();
 
-    assert_eq!(t.bg, Color::Reset, "the frame must not own a background");
     assert_eq!(
         t.fg,
         Color::Reset,
         "body text is the terminal's own foreground, so it is readable on the \
          terminal's own background by construction"
     );
-    assert_eq!(
-        t.selection_bg,
-        Color::Reset,
-        "selection is carried by the ❯ glyph plus a bold alias, never by a filled row"
+    // There is no background role left to assert on: `bg`, `selection_bg`
+    // and `selection_fg` were deleted with the fullscreen TUI (#35)
+    // because no live render path read them. A transparent frame cannot
+    // own a background even by accident now — and what it actually emits
+    // is gated where it is produced, by
+    // `no_span_in_any_frame_sets_a_background` and
+    // `the_serialized_frame_asks_for_no_background_colour` in `frame_test.rs`.
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule H — a settle trace may only name a state the spec has
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The `Settled` state set from the parent spec (#31):
+/// `picked | cancelled | added | edited | deleted | error`.
+///
+/// A settle trace is the user's last sight of the frame, so the verb it
+/// carries is a claim about what the command *did*. `editing` is not one of
+/// the six — and the #35 cut-over changes nothing on disk: Enter in
+/// `sshm manage` routes the selection to the edit path and leaves
+/// `connections.json` byte-identical. A trace that said `editing` would
+/// describe the interaction #36/#37 have not built yet.
+///
+/// The gate reads the verbs out of the source that emits them, the same way
+/// the colour-literal gate above does, so a new verb cannot slip in
+/// unreviewed.
+#[test]
+fn every_settle_verb_is_a_state_from_the_spec_state_set() {
+    const SPEC_STATES: [&str; 6] = ["picked", "cancelled", "added", "edited", "deleted", "error"];
+    const EMITTER: &str = "connection_trace(\"";
+
+    let crate_dir = env!("CARGO_MANIFEST_DIR");
+    let path = format!("{crate_dir}/src/inline.rs");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+
+    let verbs: Vec<&str> = text
+        .match_indices(EMITTER)
+        .map(|(i, _)| {
+            let rest = &text[i + EMITTER.len()..];
+            let end = rest.find('"').expect("unterminated settle-verb literal");
+            &rest[..end]
+        })
+        .collect();
+
+    assert!(
+        !verbs.is_empty(),
+        "no settle verb found through `{EMITTER}` — the emitter moved and this \
+         gate is now blind; update it rather than trust a vacuous pass"
     );
+    for verb in &verbs {
+        assert!(
+            SPEC_STATES.contains(verb),
+            "the settle trace emits `{verb}`, which is not a state in #31's \
+             Settled set {SPEC_STATES:?}"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -223,7 +269,15 @@ fn fit_hints_drops_whole_labels_only() {
 #[test]
 fn no_color_suppresses_color_not_structure() {
     let t = Theme::clack().resolve(ColorSupport::Monochrome);
-    for color in [t.bg, t.fg, t.accent, t.highlight, t.selection_bg] {
+    for color in [
+        t.fg,
+        t.fg_muted,
+        t.accent,
+        t.border,
+        t.highlight,
+        t.success,
+        t.warning,
+    ] {
         assert_eq!(color, Color::Reset, "monochrome theme still emits color");
     }
 }

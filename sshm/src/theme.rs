@@ -83,14 +83,8 @@ impl ColorSupport {
 /// UI grows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
-    /// The frame's background — `Reset`, because the inline frame never paints
-    /// one; it borrows the user's terminal.
-    pub bg: Color,
     /// Primary body text: row content that carries no other state.
     pub fg: Color,
-    /// Highest-emphasis text role. In the Clack palette emphasis is carried by
-    /// the `BOLD` modifier rather than a hue, so this stays `Reset`.
-    pub fg_bright: Color,
     /// De-emphasised text: the dim meta, placeholders, empty-state copy.
     pub fg_muted: Color,
     /// Interactive accent: the `◆` step icon, the active step.
@@ -104,11 +98,6 @@ pub struct Theme {
     /// Caution signal: reserved for warning states; no live surface paints it
     /// yet, but the role exists so a warning never invents a hue.
     pub warning: Color,
-    /// Background of the highlighted/selected row — `Reset`: selection is the
-    /// `❯` glyph plus a bold alias, never a fill.
-    pub selection_bg: Color,
-    /// Foreground of the highlighted/selected row — `Reset`, same reason.
-    pub selection_fg: Color,
 }
 
 impl Theme {
@@ -126,22 +115,21 @@ impl Theme {
     /// * **Only state gets a hue**, and only from the two named colours Clack
     ///   uses: `Cyan` for the active step, `Green` for a match.
     ///
-    /// `bg`, `selection_bg` and `selection_fg` are `Reset` because the frame
-    /// never paints a background. Selection is carried by the `❯` glyph plus a
+    /// The palette owns **no background role**. `bg`, `selection_bg`,
+    /// `selection_fg` and `fg_bright` were deleted with the fullscreen TUI
+    /// (#35): no live render path read them, and a transparent frame that
+    /// cannot measure the surface it borrows has nothing to spend a
+    /// background token on. Selection is carried by the `❯` glyph plus a
     /// bold alias, not by a filled row.
     pub const fn clack() -> Self {
         Self {
-            bg: Color::Reset,
             fg: Color::Reset,
-            fg_bright: Color::Reset,
             fg_muted: Color::DarkGray,
             accent: Color::Cyan,
             border: Color::DarkGray,
             highlight: Color::Green,
             success: Color::Green,
             warning: Color::Yellow,
-            selection_bg: Color::Reset,
-            selection_fg: Color::Reset,
         }
     }
 
@@ -152,17 +140,13 @@ impl Theme {
     /// on color to carry meaning.
     pub const fn monochrome() -> Self {
         Self {
-            bg: Color::Reset,
             fg: Color::Reset,
-            fg_bright: Color::Reset,
             fg_muted: Color::Reset,
             accent: Color::Reset,
             border: Color::Reset,
             highlight: Color::Reset,
             success: Color::Reset,
             warning: Color::Reset,
-            selection_bg: Color::Reset,
-            selection_fg: Color::Reset,
         }
     }
 
@@ -362,17 +346,13 @@ mod tests {
         let named_or_reset = |c: Color| !matches!(c, Color::Rgb(..) | Color::Indexed(..));
         let t = Theme::clack();
         for (role, color) in [
-            ("bg", t.bg),
             ("fg", t.fg),
-            ("fg_bright", t.fg_bright),
             ("fg_muted", t.fg_muted),
             ("accent", t.accent),
             ("border", t.border),
             ("highlight", t.highlight),
             ("success", t.success),
             ("warning", t.warning),
-            ("selection_bg", t.selection_bg),
-            ("selection_fg", t.selection_fg),
         ] {
             assert!(
                 named_or_reset(color),

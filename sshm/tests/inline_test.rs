@@ -26,8 +26,7 @@ use sshm::frame::{
     build_frame, fit_visible_rows, physical_rows, Canvas, FrameMode, FRAME_LINES, VISIBLE_ROWS,
 };
 use sshm::inline::{
-    diff_rows, edit_trace, plan_resize, settle_trace, CursorGuard, Live, LiveFrame, ResizePlan,
-    RowOp, Settle,
+    diff_rows, plan_resize, settle_trace, CursorGuard, Live, LiveFrame, ResizePlan, RowOp, Settle,
 };
 use sshm::theme::ColorSupport;
 
@@ -368,52 +367,29 @@ fn the_settle_trace_degrades_with_the_canvas() {
     );
 }
 
-/// The manage frame's Enter (#35, `Emit::Edit`) leaves an editing trace in
-/// the same Clack grammar as the picked trace:
-/// `◆ editing  [prod] web-01  (deploy@10.0.0.4:22)`.
+/// One settle line, not one per command (#35).
 ///
-/// The rich edit interaction is #36/#37; this trace is the cut-over's
-/// honest sight-line: the manage command took the selection and is on the
-/// edit path, and it did **not** connect.
+/// `sshm manage`'s Enter settles to the *same* `◆ picked` line bare `sshm`
+/// does: the frame's own state is "a Connection was chosen", and the
+/// `--emit` axis decides what happens to it afterwards. The `◆ editing`
+/// line this file used to pin was a second settle line for one keystroke,
+/// and it claimed a change the cut-over does not make — `connections.json`
+/// is byte-identical after `sshm manage` + Enter. The verb gate in
+/// `design_system_test.rs` keeps the claim from coming back.
 #[test]
-fn the_edit_trace_names_the_connection_being_edited() {
-    let trace = edit_trace(&web01(), canvas());
+fn the_manage_enter_settles_to_the_same_picked_line_as_every_other_emit() {
+    let trace = settle_trace(&Settle::Picked(web01()), canvas());
 
-    assert_eq!(trace.len(), 1, "the edit trace is one line");
+    assert_eq!(trace.len(), 1, "one keystroke, one settle line");
     assert_eq!(
         line_text(&trace[0]),
-        "◆ editing  [prod] web-01  (deploy@10.0.0.4:22)"
+        "◆ picked  [prod] web-01  (deploy@10.0.0.4:22)"
     );
-    assert_eq!(
-        trace[0].spans[0].style.fg,
-        Some(sshm::theme::Theme::clack().accent),
-        "the `◆` step icon carries the accent role, as every other trace"
+    assert!(
+        !line_text(&trace[0]).contains("edit"),
+        "a trace may not claim an edit that has not happened: {}",
+        line_text(&trace[0])
     );
-}
-
-/// A Connection with no folder gets no folder prefix — story 8 again, and
-/// the same rule the picked trace obeys.
-#[test]
-fn the_edit_trace_omits_the_folder_prefix_when_there_is_none() {
-    let trace = edit_trace(&web01_without_folder(), canvas());
-
-    assert_eq!(
-        line_text(&trace[0]),
-        "◆ editing  web-01  (deploy@10.0.0.4:22)"
-    );
-}
-
-/// The edit trace is scrollback, so it obeys the transparency rule: no
-/// span paints a background.
-#[test]
-fn the_edit_trace_paints_no_background() {
-    for span in &edit_trace(&web01(), canvas())[0].spans {
-        assert_eq!(
-            span.style.bg, None,
-            "span {:?} paints a background",
-            span.content
-        );
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

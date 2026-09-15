@@ -52,6 +52,13 @@ use crate::theme::{self, Theme};
 /// Both arms leave a trace, because both are the user's last sight of the
 /// frame: a pick says what was chosen, a cancel says the frame was left on
 /// purpose rather than having vanished.
+///
+/// This is the **one** settle line, for all three commands. The `--emit`
+/// axis decides what happens to the pick *after* the frame is gone
+/// (execute / insert / edit); it must not print a second one. Story 13
+/// asks for a single settle line, and under `sshm manage` the runner used
+/// to add `◆ editing` on top of the frame's own `◆ picked` — one
+/// keystroke reading as two events (#35).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Settle {
     /// A Connection was chosen.
@@ -170,21 +177,14 @@ pub fn settle_trace(settle: &Settle, canvas: Canvas) -> Vec<Line<'static>> {
     }
 }
 
-/// The one line the manage frame's Enter leaves behind (#35, `Emit::Edit`).
+/// One `◆ <verb>  [folder] alias  (user@host:port)` line.
 ///
-/// Same Clack grammar as the settle trace — accent `◆`, bold alias, dim
-/// meta, folder only when there is one — with the verb changed to `editing`
-/// so the scrollback says what the command is about to do rather than what
-/// a pick did. The rich edit interaction lands in #36/#37; this trace is
-/// the cut-over's sight-line that the selection went to the edit path and
-/// not to `ssh`.
-pub fn edit_trace(conn: &Connection, canvas: Canvas) -> Vec<Line<'static>> {
-    let t = Theme::clack().resolve(canvas.support);
-    vec![connection_trace("editing", conn, &t)]
-}
-
-/// One `◆ <verb>  [folder] alias  (user@host:port)` line, shared by the
-/// picked and editing traces so the two can never drift apart in grammar.
+/// The single shape every settle trace takes, so two verbs can never drift
+/// apart in grammar. The verb is a state from #31's `Settled` set
+/// (`picked | cancelled | added | edited | deleted | error`): the gate in
+/// `tests/design_system_test.rs` reads the verbs out of this call site, so
+/// a verb the spec does not have fails the build instead of shipping a
+/// scrollback that claims something the command never did.
 fn connection_trace(verb: &str, conn: &Connection, t: &Theme) -> Line<'static> {
     let icon = |role: ratatui::style::Color| Span::styled("◆", Style::default().fg(role));
     let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);

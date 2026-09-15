@@ -203,10 +203,6 @@ pub mod fit {
     }
 }
 
-// Re-exported for the crate's consumers; the bin target compiles this module
-// privately and drives `build_frame` directly, so the re-exports are dead
-// there.
-#[allow(unused_imports)]
 pub use fit::{
     fit_line, fit_visible_rows, physical_rows, visible_window, CHROME_LINES, FRAME_LINES,
     VISIBLE_ROWS,
@@ -275,7 +271,9 @@ impl Canvas {
 /// does, so the difference has to be a domain concept on the seam rather than
 /// a boolean a caller has to remember the polarity of. `Pick` is the
 /// choose-a-Connection frame (bare `sshm` and `sshm pick`); `Manage` is
-/// `sshm manage`, where Enter edits and the Ctrl chords add and delete.
+/// `sshm manage`, where Enter means the edit path rather than a session. The
+/// management chords that go with it are #36's; until they land the manage
+/// frame hints nothing it cannot honour.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameMode {
     /// Choose a Connection.
@@ -635,10 +633,15 @@ fn pad_rows(lines: &mut Vec<Line<'static>>, rows: usize, t: &Theme) {
 const CORNER: &str = "└";
 
 /// What the empty frame tells the user to do next.
+///
+/// Both arms name a *command*, because a command is what works today. The
+/// manage arm used to say `Ctrl+A to add one`; no handler reads that chord
+/// until #36, and an empty frame is exactly where a hint the user tries
+/// first has to be true.
 fn empty_message(mode: FrameMode) -> &'static str {
     match mode {
         FrameMode::Pick => "No Connections yet — run sshm manage to add one",
-        FrameMode::Manage => "No Connections yet — Ctrl+A to add one",
+        FrameMode::Manage => "No Connections yet — run sshm add to create one",
     }
 }
 
@@ -653,13 +656,16 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
     ])
 }
 
-/// The dim hint line: the escape hatch first, then Enter, then movement, then
-/// management.
+/// The dim hint line: the escape hatch first, then Enter, then movement.
 ///
 /// The order is the contract, not a stylistic choice — on a narrow terminal the
 /// tail gets dropped, so what is listed first is what survives (user story 23).
-/// The chords only appear in `Manage`; a pick frame points at the command
-/// instead, because its Enter chooses rather than edits.
+///
+/// No mode advertises a Ctrl chord. The manage chords the spec calls for
+/// (`Ctrl+A`/`Ctrl+E`/`Ctrl+X`, stories 18-20) are #36's work: `run_inline`
+/// reads no Ctrl key but `Ctrl+C`, so a hint naming them would teach a
+/// binding that silently does nothing. They come back here when the handlers
+/// do.
 ///
 /// The rail is fitted with the same drop-from-the-end rule the fullscreen footer
 /// uses ([`fit_hints_with`]), against the width left after the
@@ -676,14 +682,7 @@ fn hint_rail_line(mode: FrameMode, width: usize, t: &Theme) -> Line<'static> {
             // for, free here because the line was written in that order.
             "sshm manage to add or edit",
         ],
-        FrameMode::Manage => &[
-            "Esc cancel",
-            "Enter edit",
-            "↑↓ navigate",
-            "Ctrl+A add",
-            "Ctrl+E edit",
-            "Ctrl+X delete",
-        ],
+        FrameMode::Manage => &["Esc cancel", "Enter edit", "↑↓ navigate"],
     };
 
     let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
