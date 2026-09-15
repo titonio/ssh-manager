@@ -1,20 +1,11 @@
-mod app;
-mod config;
-mod connections;
-mod picker;
-mod runtime;
-mod ssh;
-#[allow(dead_code)] // full palette + a11y math live here; the bin uses only roles
-mod theme;
-mod update;
+// The bin is a thin CLI over the library: it uses the same modules the tests
+// drive, rather than compiling a second private copy of them.
+use sshm::{config, emit, frame, inline, ssh, theme, update};
 
-use std::io;
+use std::io::{self, Write};
 
 use clap::{CommandFactory, Parser, Subcommand};
-use picker::build_ssh_command;
-use picker::run_pick;
-use runtime::{cleanup_and_exit, run_app_inner};
-use ssh::build_ssh_args;
+use emit::{Action, Emit};
 use update::UpdateResult;
 
 #[derive(Parser)]
@@ -85,6 +76,9 @@ enum Commands {
         #[arg(long)]
         query: Option<String>,
     },
+
+    /// Open the shared inline frame in manage mode (Enter edits the Connection)
+    Manage,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -94,24 +88,29 @@ enum ShellType {
 }
 
 fn main() -> io::Result<()> {
-    run_main(run_app_inner, run_pick)
+    run_main(run_frame_command, update::force_check_for_update)
 }
 
 fn run_main(
-    run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>,
-    run_pick_fn: fn(Vec<config::Connection>, String) -> io::Result<picker::PickerOutcome>,
+    run_frame_fn: fn(Emit, Vec<config::Connection>, String) -> io::Result<()>,
+    check_update_fn: fn() -> UpdateResult,
 ) -> io::Result<()> {
     let cli = Cli::parse();
-    dispatch(cli, run_app_fn, run_pick_fn)
+    dispatch(cli, run_frame_fn, check_update_fn)
 }
 
 /// Dispatch on an already-parsed CLI. Separated from `run_main` so tests can
-/// drive the pick path (and assert the update checker is never reached)
-/// without relying on `std::env::args`.
+/// drive every command — and assert which point on the emit axis each one
+/// lands on, and that the update checker is never reached on the frame
+/// paths — without relying on `std::env::args`.
+///
+/// Bare `sshm`, `sshm pick` and `sshm manage` all open the same inline
+/// frame; they differ only in the [`Emit`] they hand it, which is what
+/// Enter then means (#35).
 fn dispatch(
     cli: Cli,
-    run_app_fn: fn() -> io::Result<(bool, Option<config::Connection>)>,
-    run_pick_fn: fn(Vec<config::Connection>, String) -> io::Result<picker::PickerOutcome>,
+    run_frame_fn: fn(Emit, Vec<config::Connection>, String) -> io::Result<()>,
+    check_update_fn: fn() -> UpdateResult,
 ) -> io::Result<()> {
     // Handle completions command
     if let Some(Commands::Completions { shell }) = cli.command {
@@ -137,27 +136,23 @@ fn dispatch(
         }
     }
 
-    // Handle pick command — inline picker (insert, don't execute)
+    // `sshm pick` — the insert emit. Runs before the update checker so a
+    // captured stdout is never polluted by it, and returns straight from
+    // the frame.
     if let Some(Commands::Pick { query }) = cli.command {
         let connections = config::Config::load().connections;
-        match run_pick_fn(connections, query.unwrap_or_default()) {
-            Ok(picker::PickerOutcome::Selected(conn)) => {
-                println!("{}", build_ssh_command(&conn));
-                return Ok(());
-            }
-            Ok(picker::PickerOutcome::Cancel) => {
-                std::process::exit(130);
-            }
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                return Err(e);
-            }
-        }
+        return run_frame_fn(Emit::Insert, connections, query.unwrap_or_default());
+    }
+
+    // `sshm manage` — the edit emit, in the manage frame.
+    if let Some(Commands::Manage) = cli.command {
+        let connections = config::Config::load().connections;
+        return run_frame_fn(Emit::Edit, connections, String::new());
     }
 
     // Handle check-update flag or command
     if cli.check_update || matches!(cli.command, Some(Commands::CheckUpdate)) {
-        match update::force_check_for_update() {
+        match check_update_fn() {
             UpdateResult::UpdateAvailable { version } => {
                 println!("Update available: v{}", version);
                 println!("Run again without flag to update automatically.");
@@ -187,16 +182,73 @@ fn dispatch(
         return Ok(());
     }
 
-    let (should_connect, conn) = run_app_fn()?;
+    // Bare `sshm` — the execute emit. There is no fullscreen to fall
+    // through to: the frame is the whole surface now.
+    let connections = config::Config::load().connections;
+    run_frame_fn(Emit::Execute, connections, String::new())
+}
 
-    if should_connect {
-        if let Some(conn) = conn {
-            let args = build_ssh_args(&conn);
-            cleanup_and_exit(&args);
+/// The real frame command: open the shared inline frame, resolve the
+/// outcome along the emit axis, and perform the resulting action.
+///
+/// The frame never writes to a captured stdout. When stdout is a pipe —
+/// `out=$(sshm pick)` — the frame is drawn to `/dev/tty` instead, so the
+/// only bytes the pipe ever carries are the ones this function deliberately
+/// emits. Keys already come from the terminal: crossterm reads stdin when
+/// it is a tty and opens `/dev/tty` itself when it is not.
+fn run_frame_command(
+    emit: Emit,
+    connections: Vec<config::Connection>,
+    query: String,
+) -> io::Result<()> {
+    let mut frame_out = open_frame_stream()?;
+
+    let outcome = inline::run_inline(&mut frame_out, &connections, query, emit.frame_mode())?;
+
+    match emit.resolve(outcome) {
+        Action::Execute(args) => {
+            let code = ssh::execute_ssh(&args);
+            std::process::exit(code);
+        }
+        Action::Insert(alias) => {
+            // The emitted selection: the alias alone, on the real stdout.
+            println!("{alias}");
+            Ok(())
+        }
+        Action::Edit(conn) => {
+            // The edit path's sight-line, written to the frame's own stream
+            // so a captured stdout stays clean. The rich edit interaction
+            // is #36/#37; the cut-over's contract is that Enter edits, not
+            // connects.
+            let (width, height) = crossterm::terminal::size().unwrap_or((80, 24));
+            let canvas = frame::Canvas::detect(width as usize, height as usize);
+            for line in inline::edit_trace(&conn, canvas) {
+                frame_out.write_all(theme::ansi::line_to_ansi(&line).as_bytes())?;
+                frame_out.write_all(b"\n")?;
+            }
+            frame_out.flush()
+        }
+        Action::Cancelled => {
+            std::process::exit(130);
         }
     }
+}
 
-    Ok(())
+/// The stream the frame draws to: stdout when it is a real terminal,
+/// `/dev/tty` when stdout is captured and reserved for the emitted
+/// selection.
+fn open_frame_stream() -> io::Result<Box<dyn Write>> {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() {
+        Ok(Box::new(io::stdout()))
+    } else {
+        Ok(Box::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")?,
+        ))
+    }
 }
 
 fn run_add_command(
@@ -543,236 +595,141 @@ fn print_init_bash_script() {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::config::Connection;
-    use crate::picker::{self, PickerOutcome};
+    use sshm::config::Connection;
     use serial_test::serial;
 
-    #[test]
-    fn test_cleanup_and_exit_with_args() {
-        let args: Vec<std::ffi::OsString> = vec![];
-        assert!(args.is_empty());
+    // The frame runner is a fn pointer, so it records into a thread-local
+    // rather than a closure: the assertion is then about what each command
+    // *asked the frame to be*, which is the routing, not a side effect.
+    #[derive(Debug, Clone, PartialEq)]
+    struct FrameCall {
+        emit: Emit,
+        query: String,
     }
 
+    thread_local! {
+        static FRAME_CALLS: std::cell::RefCell<Vec<FrameCall>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record_frame(emit: Emit, _connections: Vec<Connection>, query: String) -> io::Result<()> {
+        FRAME_CALLS.with(|c| c.borrow_mut().push(FrameCall { emit, query }));
+        Ok(())
+    }
+
+    fn take_calls() -> Vec<FrameCall> {
+        FRAME_CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+    }
+
+    fn check_update_must_not_run() -> UpdateResult {
+        panic!("the frame paths must never reach the update checker");
+    }
+
+    // ── the three commands, one frame, three emits (#35) ────────────────
+
     #[test]
-    fn test_main_should_connect_false_returns_ok() {
-        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let mock_run_pick = |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> {
-            Ok(PickerOutcome::Cancel)
+    fn bare_sshm_opens_the_frame_on_the_execute_emit() {
+        let cli = Cli {
+            command: None,
+            check_update: false,
         };
-        let result = run_main(mock_run_app, mock_run_pick);
-        assert!(result.is_ok());
+        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        assert_eq!(
+            take_calls(),
+            vec![FrameCall {
+                emit: Emit::Execute,
+                query: String::new(),
+            }]
+        );
     }
 
     #[test]
-    fn test_main_should_connect_true_with_conn() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 22,
-            key_path: None,
-            folder: None,
+    fn pick_opens_the_frame_on_the_insert_emit_with_its_query() {
+        let cli = Cli {
+            command: Some(Commands::Pick {
+                query: Some("web".to_string()),
+            }),
+            check_update: false,
         };
-        let mock_run_app =
-            move || Ok::<(bool, Option<Connection>), io::Error>((true, Some(conn.clone())));
-
-        let (should_connect, result_conn) = mock_run_app().unwrap();
-        assert!(should_connect);
-        assert!(result_conn.is_some());
+        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        assert_eq!(
+            take_calls(),
+            vec![FrameCall {
+                emit: Emit::Insert,
+                query: "web".to_string(),
+            }]
+        );
     }
 
     #[test]
-    fn test_main_should_connect_true_no_conn() {
-        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((true, None));
-        let mock_run_pick = |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> {
-            Ok(PickerOutcome::Cancel)
+    fn manage_opens_the_frame_on_the_edit_emit() {
+        let cli = Cli {
+            command: Some(Commands::Manage),
+            check_update: false,
         };
-        let result = run_main(mock_run_app, mock_run_pick);
-        assert!(result.is_ok());
+        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        assert_eq!(
+            take_calls(),
+            vec![FrameCall {
+                emit: Emit::Edit,
+                query: String::new(),
+            }]
+        );
     }
 
     #[test]
-    fn test_main_branch_should_connect_true_with_key() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 22,
-            key_path: Some("/path/to/key".to_string()),
-            folder: None,
-        };
-        let args = build_ssh_args(&conn);
-        assert!(args.iter().any(|a| a == "-i"));
-    }
-
-    #[test]
-    fn test_main_branch_port_not_22() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 2222,
-            key_path: None,
-            folder: None,
-        };
-        let args = build_ssh_args(&conn);
-        assert!(args.iter().any(|a| a == "-p"));
-    }
-
-    #[test]
-    fn test_main_branch_port_is_22() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 22,
-            key_path: None,
-            folder: None,
-        };
-        let args = build_ssh_args(&conn);
-        assert!(!args.iter().any(|a| a == "-p"));
-    }
-
-    #[test]
-    fn test_main_branch_user_empty() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "".to_string(),
-            port: 22,
-            key_path: None,
-            folder: None,
-        };
-        let args = build_ssh_args(&conn);
-        assert_eq!(args.last().unwrap(), "example.com");
-    }
-
-    #[test]
-    fn test_main_branch_user_not_empty() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 22,
-            key_path: None,
-            folder: None,
-        };
-        let args = build_ssh_args(&conn);
-        assert_eq!(args.last().unwrap(), "admin@example.com");
-    }
-
-    #[test]
-    fn test_run_main_logic() {
-        let mock_run_app = || Ok::<(bool, Option<Connection>), io::Error>((false, None));
-        let mock_run_pick = |_c: Vec<Connection>, _q: String| -> io::Result<PickerOutcome> {
-            Ok(PickerOutcome::Cancel)
-        };
-        let result = run_main(mock_run_app, mock_run_pick);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_run_main_with_connection() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 22,
-            key_path: None,
-            folder: None,
-        };
-        let mock_run_app = move || Ok::<(bool, Option<Connection>), io::Error>((true, Some(conn)));
-
-        let (should_connect, result_conn) = mock_run_app().unwrap();
-        assert!(should_connect);
-        assert!(result_conn.is_some());
-    }
-
-    #[test]
-    fn test_run_main_logic_paths() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 22,
-            key_path: None,
-            folder: None,
-        };
-
-        let args = build_ssh_args(&conn);
-        assert!(!args.is_empty());
-    }
-
-    // NOTE: pick-path branch behavior is asserted via dispatch in
-    // test_dispatch_pick_does_not_invoke_update_checker_or_run_app below,
-    // which drives the real dispatch logic rather than a standalone mock.
-
-    #[test]
-    fn test_run_main_pick_build_ssh_command_reuses_args() {
-        let conn = Connection {
-            id: "1".to_string(),
-            alias: "test".to_string(),
-            host: "example.com".to_string(),
-            user: "admin".to_string(),
-            port: 2222,
-            key_path: Some("/path/to/key".to_string()),
-            folder: None,
-        };
-        let cmd = picker::build_ssh_command(&conn);
-        assert!(cmd.starts_with("ssh "));
-        assert!(cmd.contains("-i"));
-        assert!(cmd.contains("-p"));
-        assert!(cmd.contains("admin@example.com"));
-    }
-
-    /// The spec requires: "Update checker skip is asserted by the injected-runner
-    /// test (the runner is never asked to run it on the pick path)."
-    ///
-    /// We drive the real `dispatch` with a `Cli { command: Some(Pick), ... }` and a
-    /// `run_app_fn` that panics if ever called. The Pick branch returns before the
-    /// update-checker block, so `run_app_fn` is never invoked — proving the update
-    /// checker is structurally skipped on the pick path. We use a thread-local flag
-    /// instead of a panicking closure because `dispatch` returns `Ok(())` on the
-    /// `Selected` path (it writes to stdout and returns) rather than reaching
-    /// `run_app_fn`.
-    #[test]
-    fn test_dispatch_pick_does_not_invoke_update_checker_or_run_app() {
-        // The pick path runs before the update-checker block, so reaching the
-        // Selected return proves dispatch never reached the update checker.
+    fn pick_without_a_query_seeds_the_frame_with_an_empty_one() {
         let cli = Cli {
             command: Some(Commands::Pick { query: None }),
             check_update: false,
         };
+        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        assert_eq!(
+            take_calls(),
+            vec![FrameCall {
+                emit: Emit::Insert,
+                query: String::new(),
+            }]
+        );
+    }
 
-        // A zero-arg fn that panics if ever called, proving the pick path never
-        // falls through to the fullscreen TUI / update-checker branches.
-        fn run_app_that_panics() -> io::Result<(bool, Option<Connection>)> {
-            panic!("run_app_fn must not be called on the pick path");
+    #[test]
+    fn completions_never_opens_a_frame() {
+        let cli = Cli {
+            command: Some(Commands::Completions {
+                shell: clap_complete::Shell::Zsh,
+            }),
+            check_update: false,
+        };
+        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        assert!(take_calls().is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn init_never_opens_a_frame() {
+        let cli = Cli {
+            command: Some(Commands::Init {
+                shell: ShellType::Zsh,
+                no_bind: true,
+            }),
+            check_update: false,
+        };
+        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        assert!(take_calls().is_empty());
+    }
+
+    #[test]
+    fn the_check_update_flag_reaches_the_checker_not_the_frame() {
+        fn no_update() -> UpdateResult {
+            UpdateResult::NoUpdate
         }
-
-        let mock_run_pick =
-            |_connections: Vec<Connection>, _query: String| -> io::Result<PickerOutcome> {
-                Ok(PickerOutcome::Selected(Connection {
-                    id: "1".to_string(),
-                    alias: "test".to_string(),
-                    host: "example.com".to_string(),
-                    user: "admin".to_string(),
-                    port: 22,
-                    key_path: None,
-                    folder: None,
-                }))
-            };
-
-        let result = dispatch(cli, run_app_that_panics, mock_run_pick);
-        assert!(result.is_ok());
+        let cli = Cli {
+            command: None,
+            check_update: true,
+        };
+        dispatch(cli, record_frame, no_update).unwrap();
+        assert!(take_calls().is_empty(), "-c checks, it does not frame");
     }
 
     // ── sshm init zsh snapshot tests (AC8, AC9) ──────────────────────────────────────────────

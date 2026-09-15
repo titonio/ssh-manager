@@ -39,9 +39,9 @@
 //!    be in says the same thing with the colour turned off.
 
 use crate::config::Connection;
-use crate::picker::compute_matches;
 use crate::theme::{ColorSupport, Theme};
 use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -203,6 +203,10 @@ pub mod fit {
     }
 }
 
+// Re-exported for the crate's consumers; the bin target compiles this module
+// privately and drives `build_frame` directly, so the re-exports are dead
+// there.
+#[allow(unused_imports)]
 pub use fit::{
     fit_line, fit_visible_rows, physical_rows, visible_window, CHROME_LINES, FRAME_LINES,
     VISIBLE_ROWS,
@@ -365,6 +369,165 @@ impl Frame {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Filtering — pure, and inside the frame seam (#31: "filtering
+// (`compute_matches`) … remain pure and move into the frame seam")
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A fuzzy match result: (original connection index, score, highlight indices
+/// within the best-matching field).
+pub type MatchResult = (usize, i64, Vec<usize>);
+
+/// Pure fuzzy filter over `&[Connection]` + `SkimMatcherV2` + query.
+///
+/// Searches alias, host, user, and **folder** fields. For each connection, the
+/// field yielding the highest `fuzzy_match` score is used for the highlight
+/// indices. Results are sorted by score descending (best match first), with
+/// original index as tiebreaker.
+///
+/// An empty query returns all connections with score `0` and no highlights.
+///
+/// The highlight indices are positions in the row's **display text**
+/// ([`build_row_text`]), which is the coordinate system [`row_line`] splits
+/// its spans in — the two must agree or the highlight lands on the wrong
+/// character.
+pub fn compute_matches(
+    connections: &[Connection],
+    matcher: &SkimMatcherV2,
+    query: &str,
+) -> Vec<MatchResult> {
+    if query.is_empty() {
+        return connections
+            .iter()
+            .enumerate()
+            .map(|(i, _)| (i, 0, vec![]))
+            .collect();
+    }
+
+    let mut results: Vec<MatchResult> = Vec::new();
+
+    for (i, conn) in connections.iter().enumerate() {
+        let fields: Vec<(&str, &str)> = vec![
+            ("alias", &conn.alias),
+            ("host", &conn.host),
+            ("user", &conn.user),
+            ("folder", conn.folder.as_deref().unwrap_or("")),
+        ];
+
+        let offsets = compute_field_offsets(conn);
+
+        let mut best_score: i64 = i64::MIN;
+        let mut best_display_indices: Option<Vec<usize>> = None;
+
+        for (field_name, field) in &fields {
+            if let Some((score, indices)) = matcher.fuzzy_indices(field, query) {
+                if score > best_score {
+                    best_score = score;
+                    // Map field-relative indices to absolute display positions.
+                    let field_start = offsets
+                        .iter()
+                        .find(|(n, _, _)| n == field_name)
+                        .map(|(_, s, _)| *s)
+                        .unwrap_or(0);
+                    best_display_indices = Some(indices.iter().map(|&i| field_start + i).collect());
+                }
+            }
+        }
+
+        if let Some(display_indices) = best_display_indices {
+            results.push((i, best_score, display_indices));
+        }
+    }
+
+    results.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    results
+}
+
+/// Build the display text for a frame row (without the rail or cursor).
+///
+/// Format:
+///   `[folder] alias (user@host:port)` when folder is present,
+///   `alias (user@host:port)` when it is not.
+pub fn build_row_text(conn: &Connection) -> String {
+    let folder = conn.folder.as_deref().unwrap_or("");
+    if folder.is_empty() {
+        format!("{} ({}@{}:{})", conn.alias, conn.user, conn.host, conn.port)
+    } else {
+        format!(
+            "[{}] {} ({}@{}:{})",
+            folder, conn.alias, conn.user, conn.host, conn.port
+        )
+    }
+}
+
+/// Compute the start/end character-offsets of each searchable field within the
+/// row display text produced by [`build_row_text`].
+pub fn compute_field_offsets(conn: &Connection) -> Vec<(&str, usize, usize)> {
+    let folder = conn.folder.as_deref().unwrap_or("");
+    let mut offsets: Vec<(&str, usize, usize)> = Vec::new();
+
+    if !folder.is_empty() {
+        offsets.push(("folder", 1, 1 + folder.len()));
+    }
+
+    let alias_start = if folder.is_empty() {
+        0
+    } else {
+        folder.len() + 3
+    };
+    offsets.push(("alias", alias_start, alias_start + conn.alias.len()));
+
+    let user_start = alias_start + conn.alias.len() + 2; // " (" is 2 chars
+    offsets.push(("user", user_start, user_start + conn.user.len()));
+
+    let host_start = user_start + conn.user.len() + 1;
+    offsets.push(("host", host_start, host_start + conn.host.len()));
+
+    let port_start = host_start + conn.host.len() + 1;
+    offsets.push(("port", port_start, port_start + conn.port.to_string().len()));
+
+    offsets
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Hint fitting — the rule the frame's hint rail is drawn under
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Join hint labels with ` | `, dropping the ones that do not fit.
+///
+/// Hints are dropped from the **end**, so a caller controls exactly what
+/// survives in a narrow terminal purely by ordering them by importance.
+/// Without this the footer was one long string that the terminal clipped
+/// mid-word at whatever width it happened to have.
+pub fn fit_hints(hints: &[&str], width: usize) -> String {
+    fit_hints_with(hints, width, " | ")
+}
+
+/// [`fit_hints`] with the separator chosen by the caller.
+///
+/// The drop-from-the-end rule is the useful part, not the pipe: the inline
+/// frame's hint rail separates its segments with ` · ` and has to fit inside
+/// a gutter as well as a width. One rule means the frame never invents a
+/// second answer to "what survives a narrow terminal".
+pub fn fit_hints_with(hints: &[&str], width: usize, sep: &str) -> String {
+    let sep_len = sep.chars().count();
+    let mut out = String::new();
+    let mut out_len = 0usize;
+    for hint in hints {
+        let hint_len = hint.chars().count();
+        let extra = if out.is_empty() { 0 } else { sep_len };
+        if out_len + extra + hint_len > width {
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str(sep);
+        }
+        out.push_str(hint);
+        out_len += extra + hint_len;
+    }
+    out
+}
+
 /// Build the frame for a set of Connections, a live query, a selected row, a
 /// mode, and the terminal it is being drawn into.
 ///
@@ -373,8 +536,7 @@ impl Frame {
 /// built, so the frame emits no colour rather than emitting cyan and hoping.
 /// The hint rail is fitted to `canvas.width`, dropping whole segments from the
 /// least-needed end rather than letting the terminal clip mid-word.
-pub fn build_frame(
-    connections: &[Connection],
+pub fn build_frame(    connections: &[Connection],
     query: &str,
     selection: usize,
     mode: FrameMode,
@@ -499,7 +661,7 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// instead, because its Enter chooses rather than edits.
 ///
 /// The rail is fitted with the same drop-from-the-end rule the fullscreen footer
-/// uses ([`crate::app::fit_hints_with`]), against the width left after the
+/// uses ([`fit_hints_with`]), against the width left after the
 /// gutter. That is what turns "82 columns of hints in an 80-column terminal"
 /// from a mid-word clip into a clean loss of the least-needed segment.
 fn hint_rail_line(mode: FrameMode, width: usize, t: &Theme) -> Line<'static> {
@@ -524,7 +686,7 @@ fn hint_rail_line(mode: FrameMode, width: usize, t: &Theme) -> Line<'static> {
     };
 
     let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-    let fitted = crate::app::fit_hints_with(hints, width.saturating_sub(GUTTER), HINT_SEP);
+    let fitted = fit_hints_with(hints, width.saturating_sub(GUTTER), HINT_SEP);
 
     Line::from(vec![
         Span::styled(RAIL, Style::default().fg(t.border)),

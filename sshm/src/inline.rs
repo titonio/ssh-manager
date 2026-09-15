@@ -162,30 +162,50 @@ pub fn settle_trace(settle: &Settle, canvas: Canvas) -> Vec<Line<'static>> {
     let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
 
     match settle {
-        Settle::Picked(conn) => {
-            let mut spans = vec![icon(t.accent), Span::raw(" picked  ")];
-
-            if let Some(folder) = conn.folder.as_deref().filter(|f| !f.is_empty()) {
-                spans.push(Span::styled(format!("[{folder}] "), dim));
-            }
-
-            spans.push(Span::styled(
-                conn.alias.clone(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw("  "));
-            spans.push(Span::styled(
-                format!("({}@{}:{})", conn.user, conn.host, conn.port),
-                dim,
-            ));
-
-            vec![Line::from(spans)]
-        }
+        Settle::Picked(conn) => vec![connection_trace("picked", conn, &t)],
         Settle::Cancelled => vec![Line::from(vec![
             icon(t.accent),
             Span::styled(" cancelled", dim),
         ])],
     }
+}
+
+/// The one line the manage frame's Enter leaves behind (#35, `Emit::Edit`).
+///
+/// Same Clack grammar as the settle trace — accent `◆`, bold alias, dim
+/// meta, folder only when there is one — with the verb changed to `editing`
+/// so the scrollback says what the command is about to do rather than what
+/// a pick did. The rich edit interaction lands in #36/#37; this trace is
+/// the cut-over's sight-line that the selection went to the edit path and
+/// not to `ssh`.
+pub fn edit_trace(conn: &Connection, canvas: Canvas) -> Vec<Line<'static>> {
+    let t = Theme::clack().resolve(canvas.support);
+    vec![connection_trace("editing", conn, &t)]
+}
+
+/// One `◆ <verb>  [folder] alias  (user@host:port)` line, shared by the
+/// picked and editing traces so the two can never drift apart in grammar.
+fn connection_trace(verb: &str, conn: &Connection, t: &Theme) -> Line<'static> {
+    let icon = |role: ratatui::style::Color| Span::styled("◆", Style::default().fg(role));
+    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+
+    let mut spans = vec![icon(t.accent), Span::raw(format!(" {verb}  "))];
+
+    if let Some(folder) = conn.folder.as_deref().filter(|f| !f.is_empty()) {
+        spans.push(Span::styled(format!("[{folder}] "), dim));
+    }
+
+    spans.push(Span::styled(
+        conn.alias.clone(),
+        Style::default().add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        format!("({}@{}:{})", conn.user, conn.host, conn.port),
+        dim,
+    ));
+
+    Line::from(spans)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
