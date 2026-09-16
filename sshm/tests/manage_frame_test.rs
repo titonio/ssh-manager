@@ -13,7 +13,9 @@ use crossterm::event::KeyCode;
 use ratatui::style::Modifier;
 use ratatui::text::Line;
 use sshm::config::Connection;
-use sshm::frame::{build_frame_with_flow, Canvas, FrameFlow, FrameMode, FRAME_LINES};
+use sshm::frame::{
+    build_frame_with_flow, Canvas, FrameFlow, FrameMode, ImportOfferFlow, FRAME_LINES,
+};
 use sshm::manage::{self, step, DeleteOutcome, EditOutcome, ManageState};
 use sshm::theme::ColorSupport;
 
@@ -75,8 +77,15 @@ fn key(code: KeyCode) -> crossterm::event::KeyEvent {
 
 /// Render the manage frame for whatever state the interaction is in.
 fn render(state: &ManageState) -> sshm::frame::Frame {
+    render_list(&conns(), state)
+}
+
+/// Render the manage frame over an arbitrary list, for the states whose
+/// list is not the fixture's — the import offer arrives on an empty
+/// set, and the CTA that stays under it is part of what is pinned.
+fn render_list(list: &[Connection], state: &ManageState) -> sshm::frame::Frame {
     build_frame_with_flow(
-        &conns(),
+        list,
         &state.query,
         state.selection,
         FrameMode::Manage,
@@ -1088,4 +1097,322 @@ fn type_into(state: &ManageState, text: &str) -> ManageState {
         s = step(&s, plain(ch), Some(&web01())).state;
     }
     s
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The first-run import offer (#38)
+//
+// The one ask the user did not raise: the frame runner puts it on an
+// empty manage frame when the ssh config holds stanzas that could
+// become Connections. The frame's job is to ask it like every other
+// ask — `◆` on the header, `(y/N)` on the line, the way out first —
+// and to record the answer as a dim `◇` note. The offer itself lives
+// in main.rs and manage.rs; this section is what it looks like.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The offer as the frame runner seeds it: N importable Connections
+/// found at `path`. Built directly because the seeding predicate
+/// lives outside this seam; everything downstream of it is driven
+/// through `step` and `settle_import` like every other phase.
+fn offer(count: usize, path: &str) -> ManageState {
+    ManageState {
+        phase: manage::Phase::ConfirmImport {
+            count,
+            path: path.into(),
+        },
+        ..ManageState::new()
+    }
+}
+
+/// The offer *is* the header question, in the contract's own words —
+/// the same position and grammar the delete confirm established: one
+/// line, one ask.
+#[test]
+fn the_import_offer_asks_with_the_contract_s_own_words() {
+    let frame = render(&offer(12, "/tmp/sshm-test/config"));
+
+    assert_eq!(
+        line_text(&frame.lines()[0]),
+        "◆ Import 12 connections from /tmp/sshm-test/config? (y/N)",
+        "the offer header is the contract's string, verbatim"
+    );
+}
+
+/// The projection carries the ask whole: the frame reads the count and
+/// the path off `FrameFlow`, never off the phase — the frame seam stays
+/// the only place the offer is rendered.
+#[test]
+fn the_offer_projects_onto_the_flow_whole() {
+    let flow = FrameFlow::from(&offer(12, "/tmp/sshm-test/config"));
+
+    assert_eq!(
+        flow.import_offer,
+        Some(ImportOfferFlow {
+            count: 12,
+            path: "/tmp/sshm-test/config".into(),
+        })
+    );
+}
+
+/// The path the user is shown is the path they know: under the home
+/// directory it reads `~/…`, the same way they type it. The frame
+/// abbreviates the real home it resolves, display-only.
+#[test]
+fn the_offer_shows_a_home_dir_path_as_a_tilde_path() {
+    let home = dirs::home_dir().expect("the test environment has a home directory");
+    let path = home.join(".ssh/config");
+
+    let frame = render(&offer(3, path.to_str().expect("a UTF-8 home path")));
+
+    assert_eq!(
+        line_text(&frame.lines()[0]),
+        "◆ Import 3 connections from ~/.ssh/config? (y/N)"
+    );
+}
+
+/// The offer reads with the colour turned off: the `◆` that marks it as
+/// a live ask and the `(y/N)` that names its answers are glyphs and
+/// words, not hue — the whole question survives `NO_COLOR`.
+#[test]
+fn the_offer_question_reads_with_no_colour_at_all() {
+    let mono = build_frame_with_flow(
+        &[],
+        "",
+        0,
+        FrameMode::Manage,
+        Canvas::new(120, 24, ColorSupport::Monochrome),
+        &FrameFlow::from(&offer(12, "/tmp/sshm-test/config")),
+    );
+    let joined = frame_text(&mono).join("\n");
+
+    assert!(
+        joined.contains('◆'),
+        "the live-ask glyph vanished: {joined}"
+    );
+    assert!(
+        joined.contains("(y/N)"),
+        "the answer hint vanished under NO_COLOR: {joined}"
+    );
+    assert!(
+        joined.contains("Import 12 connections from"),
+        "the ask itself vanished: {joined}"
+    );
+}
+
+/// During the offer the rail mirrors the delete-confirm rail: the way
+/// out first, then the two answers, then the hard stop. The management
+/// chords are off it — the offer step reads none of them, and a hint
+/// for a key the step does not read is the one thing this frame has
+/// promised twice already not to do.
+#[test]
+fn the_offer_rail_mirrors_the_confirm_rail() {
+    let frame = render(&offer(12, "/tmp/sshm-test/config"));
+    let rail = line_text(frame.lines().iter().rev().nth(1).expect("hint rail"));
+
+    assert_eq!(
+        rail, "│   Esc back · y confirm · N abort · Ctrl+C quit",
+        "the offer rail is the delete-confirm rail, escape first"
+    );
+}
+
+/// The note the contract asks for, earned through `settle_import` —
+/// the store really wrote twelve, so the frame may say so.
+#[test]
+fn the_imported_note_is_the_contract_s_own_string() {
+    let settled = manage::settle_import(
+        &offer(12, "/tmp/sshm-test/config"),
+        manage::ImportOutcome::Imported {
+            imported: 12,
+            failed: 0,
+        },
+    )
+    .expect("a real import settles onto the list");
+
+    let frame = render(&settled);
+    let text = frame_text(&frame);
+    let note = text
+        .iter()
+        .find(|l| l.contains('◇'))
+        .unwrap_or_else(|| panic!("no ◇ note in {text:?}"));
+
+    assert_eq!(
+        note.trim_start_matches('│').trim(),
+        "◇ imported 12 connections",
+        "the note is the contract's string"
+    );
+}
+
+/// A partial import says what was skipped. The skipped stanzas were never
+/// in the offered count — the scan left them out — so the note reports
+/// them as skipped, not as a shortfall of what the user was promised.
+#[test]
+fn a_partial_import_says_what_was_skipped() {
+    let settled = manage::settle_import(
+        &offer(12, "/tmp/sshm-test/config"),
+        manage::ImportOutcome::Imported {
+            imported: 9,
+            failed: 3,
+        },
+    )
+    .expect("a partial import still settles");
+
+    let frame = render(&settled);
+    let joined = frame_text(&frame).join("\n");
+
+    assert!(
+        joined.contains("◇ imported 9 connections, 3 skipped"),
+        "the note must carry the skipped count: {joined}"
+    );
+    assert!(
+        !joined.contains("failed"),
+        "a skipped stanza was never promised, so it must not read as a failure: {joined}"
+    );
+}
+
+/// One Connection imports reads singular, in the ask and in the answer:
+/// "Import 1 connection" and "imported 1 connection", not "1
+/// connections". The plural is a visible tell of unloved copy.
+#[test]
+fn one_connection_reads_singular_in_the_ask_and_the_answer() {
+    let asked = render(&offer(1, "/tmp/sshm-test/config"));
+    let asked_text = frame_text(&asked).join("\n");
+    assert!(
+        asked_text.contains("Import 1 connection from"),
+        "the offer of one must read singular: {asked_text}"
+    );
+
+    let settled = manage::settle_import(
+        &offer(1, "/tmp/sshm-test/config"),
+        manage::ImportOutcome::Imported {
+            imported: 1,
+            failed: 0,
+        },
+    )
+    .expect("a single import settles");
+    let settled_text = frame_text(&render(&settled)).join("\n");
+    assert!(
+        settled_text.contains("imported 1 connection")
+            && !settled_text.contains("imported 1 connections"),
+        "the note of one must read singular: {settled_text}"
+    );
+}
+
+/// A declined offer leaves its own dim note over the empty frame, so the
+/// empty list underneath reads as *heard and refused* rather than as a
+/// screen that never asked anything — and the CTA stays under it.
+#[test]
+fn a_declined_offer_leaves_its_own_note_over_the_empty_cta() {
+    let declined = step(&offer(12, "/tmp/sshm-test/config"), key(KeyCode::Esc), None);
+
+    let frame = render_list(&[], &declined.state);
+    let joined = frame_text(&frame).join("\n");
+
+    assert!(
+        joined.contains("◇ import declined"),
+        "the decline must be on the record: {joined}"
+    );
+    assert!(
+        joined.contains("Ctrl+A to add one"),
+        "the empty CTA stays under the note: {joined}"
+    );
+    assert!(
+        !joined.contains("imported"),
+        "nothing was imported, so nothing may say it was: {joined}"
+    );
+}
+
+/// The imported note survives the flow budget like every other note: a
+/// terminal too short for the note and a row keeps the note — the thing
+/// the user needs to read — and drops the row instead.
+#[test]
+fn the_imported_note_survives_a_short_terminal() {
+    let settled = manage::settle_import(
+        &offer(12, "/tmp/sshm-test/config"),
+        manage::ImportOutcome::Imported {
+            imported: 12,
+            failed: 0,
+        },
+    )
+    .expect("a real import settles onto the list");
+
+    let short = build_frame_with_flow(
+        &conns(),
+        "",
+        0,
+        FrameMode::Manage,
+        Canvas::new(120, 5, ColorSupport::Truecolor),
+        &FrameFlow::from(&settled),
+    );
+
+    assert_eq!(
+        short.lines().len(),
+        1 + 1 + 2,
+        "header + one flow line + hint + corner, got {:?}",
+        frame_text(&short)
+    );
+    assert!(
+        frame_text(&short)
+            .iter()
+            .any(|l| l.contains("imported 12 connections")),
+        "the note survives the squeeze, got {:?}",
+        frame_text(&short)
+    );
+}
+
+/// The offer header is one line like every other header: the frame is
+/// exactly as tall with the question on top as without it, over a full
+/// list or an empty one. The constant-height invariant (#34) holds with
+/// the offer exactly as it holds with the delete confirm.
+#[test]
+fn the_offer_header_does_not_grow_the_frame() {
+    let plain = render(&ManageState::new());
+
+    for (label, frame) in [
+        (
+            "offer over the list",
+            render(&offer(12, "/tmp/sshm-test/config")),
+        ),
+        (
+            "offer over an empty set",
+            render_list(&[], &offer(12, "/tmp/sshm-test/config")),
+        ),
+    ] {
+        assert_eq!(
+            frame.lines().len(),
+            plain.lines().len(),
+            "{label}: the offer header changed the frame's height"
+        );
+        assert_eq!(frame.lines().len(), FRAME_LINES);
+    }
+}
+
+/// Both modes keep their call to action while the offer is on the frame:
+/// manage names its own chord, pick names the command — and the pick
+/// frame never shows the offer at all, because the pick frame asks no
+/// questions.
+#[test]
+fn the_empty_cta_shows_in_both_modes_while_the_offer_is_open() {
+    let joined = frame_text(&render_list(&[], &offer(12, "/tmp/sshm-test/config"))).join("\n");
+    assert!(
+        joined.contains("Ctrl+A to add one"),
+        "the empty manage frame keeps its CTA under the offer: {joined}"
+    );
+
+    let pick = build_frame_with_flow(
+        &[],
+        "",
+        0,
+        FrameMode::Pick,
+        wide(),
+        &FrameFlow::from(&offer(12, "/tmp/sshm-test/config")),
+    );
+    let joined = frame_text(&pick).join("\n");
+    assert!(
+        joined.contains("run sshm manage to add one"),
+        "the empty pick frame keeps its CTA: {joined}"
+    );
+    assert!(
+        !joined.contains("Import"),
+        "the pick frame asks no questions: {joined}"
+    );
 }

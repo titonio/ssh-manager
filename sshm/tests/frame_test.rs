@@ -13,8 +13,8 @@ use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 use sshm::config::Connection;
 use sshm::frame::{
-    build_frame, build_row_text, compute_matches, visible_window, Canvas, FrameMode, FrameState,
-    FRAME_LINES, VISIBLE_ROWS,
+    build_frame, build_row_text, compute_matches, display_import_path, visible_window, Canvas,
+    FrameMode, FrameState, FRAME_LINES, VISIBLE_ROWS,
 };
 use sshm::theme::{ColorSupport, Theme};
 
@@ -1428,5 +1428,53 @@ fn a_fitted_row_keeps_its_rail_and_cursor_and_loses_only_its_tail() {
         !rows[0].contains("hostname"),
         "the over-long tail was cut, got {:?}",
         rows[0]
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The offer's display path (#38)
+//
+// The import offer names a file the user has to recognise, and the form
+// they recognise is `~/…`, not the absolute path the driver resolved.
+// The abbreviation is a pure function of `(path, home)` so it can be
+// pinned against a fake home rather than the machine the test happens to
+// run on — the rule is about the string, not about the environment.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The home prefix becomes `~/`, the way the user types it.
+#[test]
+fn the_offer_path_shows_the_home_directory_as_a_tilde() {
+    assert_eq!(
+        display_import_path("/home/anyone/.ssh/config", Some("/home/anyone")),
+        "~/.ssh/config"
+    );
+}
+
+/// The cut falls at a path boundary, never at a string prefix:
+/// `/home/anyoneelse` merely *starts with* the home and is not inside
+/// it — mangling that into `~else` would point the user at a file that
+/// does not exist.
+#[test]
+fn the_tilde_abbreviation_respects_the_path_boundary() {
+    let home = "/home/anyone";
+
+    assert_eq!(
+        display_import_path("/home/anyoneelse/.ssh/config", Some(home)),
+        "/home/anyoneelse/.ssh/config"
+    );
+    assert_eq!(display_import_path("/home/anyone", Some(home)), "~");
+}
+
+/// No home, or a path the home does not explain: the raw path is shown.
+/// A `~` standing for nothing is worse than the long form.
+#[test]
+fn a_path_the_home_does_not_explain_is_shown_raw() {
+    assert_eq!(
+        display_import_path("/etc/ssh/ssh_config", Some("/home/anyone")),
+        "/etc/ssh/ssh_config"
+    );
+    assert_eq!(
+        display_import_path("/home/anyone/.ssh/config", None),
+        "/home/anyone/.ssh/config"
     );
 }

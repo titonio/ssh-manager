@@ -31,7 +31,7 @@
 //! The frame's constant height and the settle-collapse are #34's and are
 //! untouched: this module only says which lines the frame should be showing.
 
-use crate::config::Connection;
+use crate::config::{self, Connection};
 use crate::connections::ConnectionDraft;
 use crate::inline::InlineOutcome;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -69,6 +69,23 @@ pub enum Phase {
     ///
     /// [`Add`]: Phase::Add
     Edit(EditSequence),
+    /// The first-run import offer (#38).
+    ///
+    /// `count` is what the scan found at `path`: the Host stanzas in
+    /// that file that could become Connections. It is a number about a
+    /// file, not a promise about the set — the offer is made before
+    /// anything is written, and the number the user is *then* told
+    /// arrived comes back through [`ImportOutcome`] rather than being
+    /// carried forward from here.
+    ///
+    /// `path` is the file the user was shown, and the file the write is
+    /// about. Carrying it in the phase is what stops the driver from
+    /// re-deriving `~/.ssh/config` at the moment of the write and
+    /// importing something the user never agreed to. The offer is also
+    /// the only phase that arrives unasked: nobody pressed a chord to
+    /// open it, which is why its answer set is as conservative as the
+    /// delete confirm's.
+    ConfirmImport { count: usize, path: String },
 }
 
 /// Which field of the add sequence is live.
@@ -445,6 +462,34 @@ pub enum Trace {
     /// was pressed; if the store no longer has it, saying `edited` would
     /// describe a write that did not happen.
     EditFailed { connection: Connection },
+    /// The import ran **and the store really wrote `imported`
+    /// Connections**; `failed` stanzas could not become Connections at
+    /// all (#38).
+    ///
+    /// Earned through [`settle_import`], never by the `y` that answered
+    /// the offer — the same discipline [`Trace::Deleted`] and
+    /// [`Trace::Added`] are held to. `◇ imported 12 connections` is a
+    /// claim about `connections.json`, and the keystroke that asked for
+    /// it knows nothing about the file.
+    ///
+    /// Both numbers travel because a partial import is not a whole one.
+    /// The skipped count names stanzas the scan already left out of the
+    /// offer — a `Host *.example.com` can never become a Connection — so
+    /// it is not a shortfall of what the user was promised; it is the
+    /// rest of the file, reported rather than silently dropped. The live
+    /// PTY run for #38 is why the word is *skipped* and not *failed*:
+    /// `1 failed` under an offer of `3` read as one of the three having
+    /// failed, when nothing of the three had.
+    Imported { imported: usize, failed: usize },
+    /// The offer was answered no, or abandoned. Nothing was written
+    /// (#38).
+    ///
+    /// The import half of [`Trace::AddAbandoned`], with one difference
+    /// worth naming: the offer is the only ask the user did not raise, so
+    /// the decline is the answer the frame is most likely to show. It
+    /// exists so the empty list underneath it reads as *heard and
+    /// refused* rather than as a screen that never asked anything.
+    ImportDeclined,
 }
 
 /// Everything the manage frame's interaction consists of.
@@ -551,6 +596,17 @@ pub enum Effect {
     },
     /// Leave the frame with this outcome.
     Exit(InlineOutcome),
+    /// Fold the ssh config at `path` into the store and persist the
+    /// result (#38).
+    ///
+    /// The path travels with the request because the user agreed to
+    /// *that* file: the offer named it, and the write has to be about
+    /// the same one. What arrives is not known here — the store answers
+    /// with an [`ImportReport`], and [`settle_import`] is where the
+    /// frame learns whether it may say `imported`.
+    ///
+    /// [`ImportReport`]: crate::config::ImportReport
+    Import { path: String },
 }
 
 /// What a [`Store::remove`] call actually did.
@@ -763,6 +819,81 @@ pub fn settle_edit(
     }
 }
 
+/// What a [`Store::import_ssh_config`] call actually did (#38).
+///
+/// The import half of [`DeleteOutcome`]. The state machine owns no disk
+/// and cannot know how many Connections a file holds, so the driver runs
+/// the effect and hands the answer back through [`settle_import`].
+///
+/// There are two arms where the delete has three because an import has
+/// no *absent* case. A file with nothing to import answers truthfully
+/// with `imported: 0` — nothing was written, and nothing on screen
+/// contradicts that — whereas `Ok(None)` from a delete is a claim the
+/// frame could not otherwise tell from a removal.
+///
+/// [`Store::import_ssh_config`]: crate::connections::Store::import_ssh_config
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// The import ran. `imported` Connections were written; `failed`
+    /// stanzas could not become Connections.
+    Imported { imported: usize, failed: usize },
+    /// The store refused the import and said why.
+    Failed(String),
+}
+
+impl ImportOutcome {
+    /// Classify what [`Store::import_ssh_config`] returned.
+    ///
+    /// The report's two halves become the note's two numbers, with
+    /// `failed` read through [`ImportReport::failed`] rather than
+    /// recounted here — one place that says how many stanzas did not
+    /// cross, so the note and the report cannot drift apart.
+    ///
+    /// [`Store::import_ssh_config`]: crate::connections::Store::import_ssh_config
+    /// [`ImportReport::failed`]: crate::config::ImportReport::failed
+    pub fn from_report(result: Result<config::ImportReport, String>) -> Self {
+        match result {
+            Ok(report) => ImportOutcome::Imported {
+                imported: report.imported,
+                failed: report.failed(),
+            },
+            Err(message) => ImportOutcome::Failed(message),
+        }
+    }
+}
+
+/// Fold the store's answer to [`Effect::Import`] into the state the frame
+/// is rebuilt from (#38).
+///
+/// The import half of the honesty rule, mirroring [`settle_add`] and
+/// [`settle_delete`]:
+///
+/// * `Imported { imported, failed }` — the note earns `imported`, with
+///   the numbers the store reported rather than the count the offer was
+///   made at. Those can differ: the scan and the write are two reads of
+///   the same file, and the file is allowed to have changed in between.
+/// * `Failed(message)` — the caller collapses the frame to `◆ error …`,
+///   the same way a refused add and a refused delete do. A live list the
+///   store cannot vouch for is worse than no list.
+///
+/// The refresh is the one [`settle_add`] performs — filter cleared,
+/// cursor at the top — and the reason is stronger here than anywhere
+/// else: the offer only ever appears on an empty set, so a filter left
+/// over from before it would hide every Connection the user just said
+/// yes to, and the frame would read `No matches` under a note naming
+/// twelve.
+pub fn settle_import(_state: &ManageState, outcome: ImportOutcome) -> Result<ManageState, String> {
+    match outcome {
+        ImportOutcome::Imported { imported, failed } => Ok(ManageState {
+            phase: Phase::List,
+            query: String::new(),
+            selection: 0,
+            trace: Some(Trace::Imported { imported, failed }),
+        }),
+        ImportOutcome::Failed(message) => Err(message),
+    }
+}
+
 /// The outcome of one keystroke: the state to become, and the effects to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
@@ -799,6 +930,10 @@ pub fn step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) -
         Phase::ConfirmDelete { ref target } => confirm_step(state, key, target),
         Phase::Add(ref sequence) => add_step(state, key, sequence),
         Phase::Edit(ref editor) => edit_step(state, key, editor),
+        // `count` is not re-read here: the offer's answer is about the
+        // file, and what arrived from it is the store's answer, not the
+        // scan's estimate.
+        Phase::ConfirmImport { ref path, .. } => confirm_import_step(state, key, path),
     }
 }
 
@@ -946,6 +1081,75 @@ fn declined(state: &ManageState, target: &Connection) -> ManageState {
         trace: Some(Trace::Declined {
             connection: target.clone(),
         }),
+        ..state.clone()
+    }
+}
+
+/// The first-run import offer: `y` imports, everything else declines (#38).
+///
+/// The answer set is [`confirm_step`]'s, unchanged, because the same
+/// argument applies with more force — this is the only ask the user did
+/// not raise themselves:
+///
+/// * `y` / `Y` — accept. One import, of the path the offer named.
+/// * `n` / `N`, `Esc` — decline. Nothing is asked for.
+/// * any other printable — decline **and** filter. The filter is live
+///   right through the offer (user story 21), so a user who did not
+///   mean to answer a question that appeared on its own and carries on
+///   typing ends up searching, not importing twelve Connections they
+///   never asked for. The character is not wasted and is not an answer.
+/// * anything else — ignored. Movement in particular does nothing: the
+///   offer is about a file, not about a row, and there is no row to
+///   point at anyway.
+fn confirm_import_step(state: &ManageState, key: KeyEvent, path: &str) -> Step {
+    if is_chord(key, 'c') {
+        return Step::exit(state.clone(), InlineOutcome::Cancelled);
+    }
+
+    if is_answer(key, 'y') {
+        // The ask, not the claim. `trace` deliberately stays empty:
+        // how many Connections the file holds is a fact about the disk,
+        // and the disk has not been asked yet. The driver runs the
+        // effect and folds the answer back through [`settle_import`],
+        // which is what puts `imported` — or the collapse — on the
+        // frame.
+        return Step {
+            state: ManageState {
+                phase: Phase::List,
+                trace: None,
+                ..state.clone()
+            },
+            effects: vec![Effect::Import {
+                path: path.to_string(),
+            }],
+        };
+    }
+
+    if is_answer(key, 'n') || key.code == KeyCode::Esc {
+        return Step::state_only(import_declined(state));
+    }
+
+    if let KeyCode::Char(ch) = key.code {
+        if key.modifiers.is_empty() {
+            let mut next = import_declined(state);
+            next.query.push(ch);
+            return Step::state_only(next);
+        }
+    }
+
+    Step::state_only(state.clone())
+}
+
+/// The state after an offer that did not import: back on the list, with
+/// the decline left as the trace.
+///
+/// The import half of [`declined`], minus the target — a decline is a
+/// decline whatever the file was, and the frame says `import declined`
+/// rather than naming a path the user has already seen.
+fn import_declined(state: &ManageState) -> ManageState {
+    ManageState {
+        phase: Phase::List,
+        trace: Some(Trace::ImportDeclined),
         ..state.clone()
     }
 }

@@ -1,6 +1,12 @@
 // The bin is a thin CLI over the library: it uses the same modules the tests
 // drive, rather than compiling a second private copy of them.
-use sshm::{config, connections, emit, inline, ssh, update};
+use sshm::{
+    config, connections, emit,
+    frame::FrameMode,
+    inline,
+    manage::{ManageState, Phase},
+    ssh, update,
+};
 
 use std::io::{self, Write};
 
@@ -190,6 +196,33 @@ fn dispatch(
     run_frame_fn(Emit::Execute, &mut config, String::new())
 }
 
+/// The first-run import offer's predicate (#38): what an import from
+/// `ssh_config_path` would add, if the store is empty and the answer is
+/// not nothing.
+///
+/// `Some(count)` is the whole decision the frame runner makes before
+/// manage opens. Two conditions, both honest:
+///
+/// * the Connection set is empty — a user who already has Connections
+///   was never a first run, and offering to bulk-write over a set they
+///   built by hand is not this feature;
+/// * the file has at least one importable stanza — an absent or
+///   all-wildcard `~/.ssh/config` has nothing to offer, and offering
+///   zero is offering nothing.
+///
+/// The path is a parameter rather than a resolved home dir so the
+/// predicate is testable against a fixture with no `HOME` faking: the
+/// caller owns the one honest answer to "where is the user's ssh
+/// config", and this owns the answer to "is there something to offer
+/// at a given path".
+fn first_run_import_offer(store: &dyn connections::Store, ssh_config_path: &str) -> Option<usize> {
+    if !store.all().is_empty() {
+        return None;
+    }
+    let count = config::count_importable(store.all(), ssh_config_path);
+    (count > 0).then_some(count)
+}
+
 /// The real frame command: open the shared inline frame, resolve the
 /// outcome along the emit axis, and perform the resulting action.
 ///
@@ -205,7 +238,33 @@ fn run_frame_command(
 ) -> io::Result<()> {
     let mut frame_out = open_frame_stream()?;
 
-    let outcome = inline::run_inline(&mut frame_out, store, query, emit.frame_mode())?;
+    // The first-run import offer (#38) belongs to manage only: the pick
+    // frame asks no questions, and an import is a write. When manage
+    // opens on an empty set with importable stanzas in ~/.ssh/config,
+    // the frame opens on the offer instead of the list — seeded as a
+    // `ManageState`, because the offer is a step the frame answers, not
+    // a flag the driver re-derives. Every other path is untouched.
+    let offer = if emit.frame_mode() == FrameMode::Manage {
+        config::ssh_config_path()
+            .filter(|path| path.exists())
+            .and_then(|path| {
+                let path = path.to_string_lossy().into_owned();
+                first_run_import_offer(store, &path).map(|count| (count, path))
+            })
+    } else {
+        None
+    };
+
+    let outcome = match offer {
+        Some((count, path)) => {
+            let initial = ManageState {
+                phase: Phase::ConfirmImport { count, path },
+                ..Default::default()
+            };
+            inline::run_inline_with_state(&mut frame_out, store, initial, emit.frame_mode())?
+        }
+        None => inline::run_inline(&mut frame_out, store, query, emit.frame_mode())?,
+    };
 
     match emit.resolve(outcome) {
         Action::Execute(args) => {
@@ -738,6 +797,93 @@ pub mod tests {
         };
         dispatch(cli, record_frame, no_update).unwrap();
         assert!(take_calls().is_empty(), "-c checks, it does not frame");
+    }
+
+    // ── first-run import offer predicate (#38) ──────────────────────────
+    //
+    // The predicate takes the ssh config path explicitly, so these
+    // fixtures need no HOME faking: the caller resolves the real
+    // ~/.ssh/config, and the tests hand it a file they wrote themselves.
+
+    fn ssh_config_fixture(name: &str, content: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn remove_fixture(path: &std::path::Path) {
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn first_run_offer_counts_importable_stanzas_for_an_empty_store() {
+        let path = ssh_config_fixture(
+            "ssh-manager-first-run-offer-test",
+            "Host web-01\n    HostName web.example.com\n    User www\n\nHost db-01\n    HostName db.example.com\n    User dba\n",
+        );
+        let store = config::Config::new();
+        assert_eq!(
+            first_run_import_offer(&store, path.to_str().unwrap()),
+            Some(2),
+            "an empty store and two importable stanzas is exactly the offer"
+        );
+        remove_fixture(&path);
+    }
+
+    #[test]
+    fn first_run_offer_is_silent_when_the_store_already_has_a_connection() {
+        let path = ssh_config_fixture(
+            "ssh-manager-first-run-nonempty-test",
+            "Host web-01\n    HostName web.example.com\n    User www\n",
+        );
+        let mut store = config::Config::new();
+        store.add_connection(config::Connection {
+            id: "already-here".to_string(),
+            alias: "mine".to_string(),
+            host: "10.0.0.1".to_string(),
+            user: "me".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
+        assert_eq!(
+            first_run_import_offer(&store, path.to_str().unwrap()),
+            None,
+            "a user who already has Connections is not a first run, however \
+             tempting the file"
+        );
+        remove_fixture(&path);
+    }
+
+    #[test]
+    fn first_run_offer_is_silent_when_the_file_does_not_exist() {
+        let missing = std::env::temp_dir()
+            .join("ssh-manager-first-run-missing-test")
+            .join("config");
+        let store = config::Config::new();
+        assert_eq!(
+            first_run_import_offer(&store, missing.to_str().unwrap()),
+            None,
+            "no file means nothing to offer"
+        );
+    }
+
+    #[test]
+    fn first_run_offer_is_silent_when_every_stanza_is_a_wildcard() {
+        let path = ssh_config_fixture(
+            "ssh-manager-first-run-wildcard-test",
+            "Host *\n    User default\n\nHost *.internal\n    User internal\n",
+        );
+        let store = config::Config::new();
+        assert_eq!(
+            first_run_import_offer(&store, path.to_str().unwrap()),
+            None,
+            "a count of zero is not an offer: nothing there could become a \
+             Connection"
+        );
+        remove_fixture(&path);
     }
 
     // ── sshm init zsh snapshot tests (AC8, AC9) ──────────────────────────────────────────────

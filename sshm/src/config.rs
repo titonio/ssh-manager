@@ -151,38 +151,133 @@ pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
     entries
 }
 
-/// Fold the `~/.ssh/config` Host stanzas into `config` and report how many
-/// Connections were added.
+/// What an import from an ssh config actually did to the Connection set.
+///
+/// The two numbers mean different things to the surface that reports them:
+/// `imported` is what the user gained, `failures` is what could not come
+/// across and never will. A non-zero `imported` alongside a non-empty
+/// `failures` is a partial success — the import still happened, and the
+/// trace says so (`◇ imported 9 connections, 3 skipped`) rather than
+/// pretending every stanza arrived.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ImportReport {
+    pub imported: usize,
+    /// Human-readable reasons for stanzas that could not become Connections.
+    pub failures: Vec<String>,
+}
+
+impl ImportReport {
+    /// How many Host stanzas could not become a Connection.
+    pub fn failed(&self) -> usize {
+        self.failures.len()
+    }
+}
+
+/// The one classification every Host stanza gets, shared by the fold and by
+/// the offer's count so the two can never disagree about what an import
+/// would do.
+///
+/// A stanza is **skipped** when a Connection with the same host and user is
+/// already in the set — including one this same pass added a moment ago, so
+/// a config that lists the same host twice still imports once. It is a
+/// **failure** when its pattern contains a glob: `*.example.com` is a rule
+/// about many hosts, and a Connection names exactly one, so there is
+/// nothing honest to import. Everything else becomes a Connection
+/// leniently — see [`import_from_ssh_config_with_path`].
+fn plan_import(
+    existing: &[Connection],
+    entries: &[SshConfigEntry],
+) -> (Vec<Connection>, Vec<String>) {
+    let mut importable = Vec::new();
+    let mut failures = Vec::new();
+
+    for entry in entries {
+        if entry.host.contains('*') || entry.host.contains('?') {
+            failures.push(format!("wildcard host \"{}\"", entry.host));
+            continue;
+        }
+
+        let host = entry.hostname.clone().unwrap_or_else(|| entry.host.clone());
+        let user = entry.user.clone().unwrap_or_default();
+        let already_present = existing
+            .iter()
+            .chain(importable.iter())
+            .any(|c| c.host == host && c.user == user);
+        if already_present {
+            continue;
+        }
+
+        let mut conn = Connection::new(entry.host.clone(), host, user);
+        conn.port = entry.port.unwrap_or(22);
+        conn.key_path = entry.key_file.clone();
+        importable.push(conn);
+    }
+
+    (importable, failures)
+}
+
+/// Parse `path` and fold its Host stanzas into `config`'s in-memory set.
+///
+/// Does **not** save: the caller owns when the set becomes durable, which
+/// is what lets the same fold serve the persisted store and the ephemeral
+/// harness alike. Lenient by design — a stanza missing a port, a user or
+/// even a Hostname still becomes a Connection on the SSH defaults, because
+/// a half-described Connection the user can fix is worth more than an
+/// import that stopped at the first odd line.
+///
+/// A globbed Host pattern is the one thing that cannot cross: it lands in
+/// `failures` as `wildcard host "<pattern>"` and adds nothing. A stanza
+/// already in the set is skipped, which is not a failure — the user is
+/// not being told they are wrong about a Connection they already have.
+pub fn import_from_ssh_config_with_path(config: &mut Config, path: &str) -> ImportReport {
+    let (importable, failures) = plan_import(&config.connections, &parse_ssh_config(path));
+    let imported = importable.len();
+    config.connections.extend(importable);
+
+    ImportReport { imported, failures }
+}
+
+/// What an import from `path` would add to `existing`, computed without
+/// touching anything.
+///
+/// This is the number the first-run offer shows (#38) before the user has
+/// said yes, so it has to be the number the import then delivers. Both go
+/// through [`plan_import`]: the offer is not a guess resting on a second
+/// copy of the rules, it is the fold's own answer read off a set that is
+/// never modified. A path that cannot be read parses as no stanzas, so it
+/// counts `0` — an absent `~/.ssh/config` simply means nothing to offer.
+pub fn count_importable(existing: &[Connection], path: &str) -> usize {
+    plan_import(existing, &parse_ssh_config(path)).0.len()
+}
+
+/// Where the user's ssh config lives: `~/.ssh/config`, if a home
+/// directory can be resolved at all.
+///
+/// The one place this path is spelled out. The import wrapper and the
+/// manage runner's first-run check both need it, and a second copy of
+/// `home.join(".ssh").join("config")` is a second thing to change when
+/// the answer ever moves.
+pub fn ssh_config_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|home| home.join(".ssh").join("config"))
+}
+
+/// Fold the user's own `~/.ssh/config` into `config` and report what arrived.
+///
+/// The home-directory wrapper around [`import_from_ssh_config_with_path`]:
+/// it decides *which* file is the user's ssh config, and nothing else.
+/// Like the wrapper it wraps, it does not save — persistence belongs to
+/// [`crate::connections::import`], so a caller that only wants to know
+/// what an import would do can fold without writing.
 ///
 /// A home directory that cannot be resolved is an `Err`, not a panic, so a
 /// caller advertising a `Result` never panics on the way through.
-pub fn import_from_ssh_config(config: &mut Config) -> Result<usize, String> {
-    let ssh_dir = dirs::home_dir()
-        .ok_or_else(|| "Could not find home directory".to_string())?
-        .join(".ssh")
-        .join("config");
+pub fn import_from_ssh_config(config: &mut Config) -> Result<ImportReport, String> {
+    let path = ssh_config_path().ok_or_else(|| "Could not find home directory".to_string())?;
 
-    let entries = parse_ssh_config(ssh_dir.to_str().unwrap_or(""));
-    let mut imported = 0;
-
-    for entry in entries {
-        let host = entry.hostname.unwrap_or(entry.host.clone());
-
-        if !config
-            .connections
-            .iter()
-            .any(|c| c.host == host && c.user == entry.user.as_deref().unwrap_or(""))
-        {
-            let mut conn =
-                Connection::new(entry.host.clone(), host, entry.user.unwrap_or_default());
-            conn.port = entry.port.unwrap_or(22);
-            conn.key_path = entry.key_file;
-            config.connections.push(conn);
-            imported += 1;
-        }
-    }
-
-    Ok(imported)
+    Ok(import_from_ssh_config_with_path(
+        config,
+        path.to_str().unwrap_or(""),
+    ))
 }
 
 #[cfg(test)]
@@ -857,6 +952,279 @@ Host *
     }
 
     #[test]
+    fn test_import_with_path_adds_every_importable_stanza_and_reports_the_count() {
+        let temp_dir = std::env::temp_dir().join("ssh-manager-import-report-test");
+        let ssh_dir = temp_dir.join(".ssh");
+        let config_path = ssh_dir.join("config");
+
+        let ssh_config_content = r#"Host web-01
+    HostName web.example.com
+    User www
+
+Host db-01
+    HostName db.example.com
+    User dbadmin
+    Port 2222
+    IdentityFile ~/.ssh/db_key
+"#;
+
+        fs::create_dir_all(&ssh_dir).unwrap();
+        fs::write(&config_path, ssh_config_content).unwrap();
+
+        let mut config = Config::new();
+        let report = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
+
+        assert_eq!(report.imported, 2, "both Host stanzas came across");
+        assert_eq!(report.failed(), 0, "nothing here is unimportable");
+        assert_eq!(config.connections.len(), 2);
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_import_reports_a_wildcard_host_as_a_failure_and_does_not_import_it() {
+        let temp_dir = std::env::temp_dir().join("ssh-manager-import-wildcard-test");
+        let ssh_dir = temp_dir.join(".ssh");
+        let config_path = ssh_dir.join("config");
+
+        let ssh_config_content = r#"Host web-01
+    HostName web.example.com
+    User www
+
+Host *.example.com
+    User wildcard
+
+Host staging-?
+    User qa
+"#;
+
+        fs::create_dir_all(&ssh_dir).unwrap();
+        fs::write(&config_path, ssh_config_content).unwrap();
+
+        let mut config = Config::new();
+        let report = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
+
+        assert_eq!(report.imported, 1, "only the concrete Host arrived");
+        assert_eq!(
+            report.failures,
+            vec![
+                "wildcard host \"*.example.com\"",
+                "wildcard host \"staging-?\""
+            ],
+            "each globbed pattern is named, in the order it was read"
+        );
+        assert_eq!(config.connections.len(), 1);
+        assert_eq!(config.connections[0].alias, "web-01");
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_import_of_an_all_wildcard_config_adds_nothing_and_fails_every_stanza() {
+        let temp_dir = std::env::temp_dir().join("ssh-manager-import-all-wildcard-test");
+        let ssh_dir = temp_dir.join(".ssh");
+        let config_path = ssh_dir.join("config");
+
+        let ssh_config_content = r#"Host *
+    User default
+    Port 22
+
+Host *.internal
+    User internal
+"#;
+
+        fs::create_dir_all(&ssh_dir).unwrap();
+        fs::write(&config_path, ssh_config_content).unwrap();
+
+        let mut config = Config::new();
+        let report = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
+
+        assert_eq!(report.imported, 0);
+        assert_eq!(report.failed(), 2, "every stanza is accounted for");
+        assert!(
+            config.connections.is_empty(),
+            "a pattern is not a Connection: nothing was added"
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_import_skips_already_present_connections_without_calling_them_failures() {
+        let temp_dir = std::env::temp_dir().join("ssh-manager-import-skip-not-failure-test");
+        let ssh_dir = temp_dir.join(".ssh");
+        let config_path = ssh_dir.join("config");
+
+        let ssh_config_content = r#"Host web-01
+    HostName 10.0.0.4
+    User deploy
+
+Host db-01
+    HostName 10.0.0.9
+    User dba
+"#;
+
+        fs::create_dir_all(&ssh_dir).unwrap();
+        fs::write(&config_path, ssh_config_content).unwrap();
+
+        let mut config = Config::new();
+        config.add_connection(Connection {
+            id: "already-here".to_string(),
+            alias: "web-01-renamed".to_string(),
+            host: "10.0.0.4".to_string(),
+            user: "deploy".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
+
+        let report = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
+
+        assert_eq!(
+            report.imported, 1,
+            "only the Connection they did not have arrived"
+        );
+        assert_eq!(
+            report.failed(),
+            0,
+            "having it already is not being wrong: a skip is not a failure"
+        );
+        assert_eq!(config.connections.len(), 2);
+        assert_eq!(
+            config.connections[0].id, "already-here",
+            "the Connection they had is left alone, alias and all"
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_count_importable_is_the_same_number_the_import_then_delivers() {
+        let temp_dir = std::env::temp_dir().join("ssh-manager-count-agrees-test");
+        let ssh_dir = temp_dir.join(".ssh");
+        let config_path = ssh_dir.join("config");
+
+        let ssh_config_content = r#"Host web-01
+    HostName 10.0.0.4
+    User deploy
+
+Host *.example.com
+    User wildcard
+
+Host db-01
+    HostName 10.0.0.9
+    User dba
+
+Host web-02
+    HostName 10.0.0.5
+    User deploy
+"#;
+
+        fs::create_dir_all(&ssh_dir).unwrap();
+        fs::write(&config_path, ssh_config_content).unwrap();
+
+        let mut config = Config::new();
+        config.add_connection(Connection {
+            id: "already-here".to_string(),
+            alias: "web-01".to_string(),
+            host: "10.0.0.4".to_string(),
+            user: "deploy".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        });
+
+        let offered = count_importable(&config.connections, config_path.to_str().unwrap());
+        let report = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
+
+        assert_eq!(
+            offered, report.imported,
+            "the offer promised {offered}; the import delivered {}",
+            report.imported
+        );
+        assert_eq!(
+            offered, 2,
+            "two new Connections, one already held, one wildcard"
+        );
+        assert_eq!(
+            count_importable(&config.connections, config_path.to_str().unwrap()),
+            0,
+            "once imported, the same set has nothing left to offer"
+        );
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn test_count_importable_on_a_path_that_cannot_be_read_is_zero() {
+        assert_eq!(count_importable(&[], "/nonexistent/ssh/config"), 0);
+    }
+
+    /// Point `HOME` at a throwaway directory so the home-resolving import
+    /// never reads the real `~/.ssh/config`, and put it back on the way out.
+    struct TempHome {
+        dir: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TempHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp home");
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", dir.path());
+            Self { dir, previous }
+        }
+
+        fn write_ssh_config(&self, content: &str) {
+            let ssh_dir = self.dir.path().join(".ssh");
+            fs::create_dir_all(&ssh_dir).unwrap();
+            fs::write(ssh_dir.join("config"), content).unwrap();
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_import_from_home_reports_what_its_ssh_config_held() {
+        let home = TempHome::new();
+        home.write_ssh_config(
+            "Host web-01\n  HostName 10.0.0.4\n  User deploy\n\n\
+             Host *.example.com\n  User wildcard\n\n\
+             Host db-01\n  HostName 10.0.0.9\n  User dba\n",
+        );
+        let mut config = Config::new();
+
+        let report =
+            import_from_ssh_config(&mut config).expect("a resolvable home is not a failure");
+
+        assert_eq!(report.imported, 2, "both concrete Hosts came across");
+        assert_eq!(report.failures, vec!["wildcard host \"*.example.com\""]);
+        assert_eq!(config.connections.len(), 2);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_import_from_home_adds_nothing_when_there_is_no_ssh_config() {
+        let _home = TempHome::new();
+        let mut config = Config::new();
+
+        let report = import_from_ssh_config(&mut config)
+            .expect("a missing ~/.ssh/config is nothing to import, not an error");
+
+        assert_eq!(report.imported, 0);
+        assert_eq!(report.failed(), 0);
+        assert!(config.connections.is_empty());
+    }
+
+    #[test]
     fn test_import_from_ssh_config_basic() {
         let temp_dir = std::env::temp_dir().join("ssh-manager-import-test");
         let ssh_dir = temp_dir.join(".ssh");
@@ -877,9 +1245,9 @@ Host database
         fs::write(&config_path, ssh_config_content).unwrap();
 
         let mut config = Config::new();
-        let imported = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
+        let report = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
 
-        assert_eq!(imported, 2);
+        assert_eq!(report.imported, 2);
         assert_eq!(config.connections.len(), 2);
 
         let web = config
@@ -933,9 +1301,9 @@ Host new
             folder: None,
         });
 
-        let imported = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
+        let report = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
 
-        assert_eq!(imported, 1);
+        assert_eq!(report.imported, 1);
         assert_eq!(config.connections.len(), 2);
         let existing = config
             .connections
@@ -957,9 +1325,9 @@ Host new
         fs::write(&config_path, "").unwrap();
 
         let mut config = Config::new();
-        let imported = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
+        let report = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
 
-        assert_eq!(imported, 0);
+        assert_eq!(report.imported, 0);
         assert!(config.connections.is_empty());
 
         fs::remove_dir_all(&temp_dir).ok();
@@ -968,33 +1336,9 @@ Host new
     #[test]
     fn test_import_from_ssh_config_nonexistent() {
         let mut config = Config::new();
-        let imported = import_from_ssh_config_with_path(&mut config, "/nonexistent/ssh/config");
+        let report = import_from_ssh_config_with_path(&mut config, "/nonexistent/ssh/config");
 
-        assert_eq!(imported, 0);
+        assert_eq!(report.imported, 0);
         assert!(config.connections.is_empty());
-    }
-
-    fn import_from_ssh_config_with_path(config: &mut Config, path: &str) -> usize {
-        let entries = parse_ssh_config(path);
-        let mut imported = 0;
-
-        for entry in entries {
-            let host = entry.hostname.unwrap_or(entry.host.clone());
-
-            if !config
-                .connections
-                .iter()
-                .any(|c| c.host == host && c.user == entry.user.as_deref().unwrap_or(""))
-            {
-                let mut conn =
-                    Connection::new(entry.host.clone(), host, entry.user.unwrap_or_default());
-                conn.port = entry.port.unwrap_or(22);
-                conn.key_path = entry.key_file;
-                config.connections.push(conn);
-                imported += 1;
-            }
-        }
-
-        imported
     }
 }

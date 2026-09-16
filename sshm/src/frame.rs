@@ -303,6 +303,8 @@ pub struct FrameFlow {
     pub add: Option<AddFlow>,
     /// The `Ctrl+E` in-place single-field editor, while one is open (#37).
     pub edit: Option<EditFlow>,
+    /// The first-run import offer, while one is open (#38).
+    pub import_offer: Option<ImportOfferFlow>,
 }
 
 /// One step of the add sequence that has already been answered.
@@ -338,9 +340,11 @@ pub struct AddFlow {
 
 impl From<&crate::manage::ManageState> for FrameFlow {
     fn from(state: &crate::manage::ManageState) -> Self {
-        let (confirming, add, edit) = match &state.phase {
-            crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None, None),
-            crate::manage::Phase::List => (None, None, None),
+        let (confirming, add, edit, import_offer) = match &state.phase {
+            crate::manage::Phase::ConfirmDelete { target } => {
+                (Some(target.clone()), None, None, None)
+            }
+            crate::manage::Phase::List => (None, None, None, None),
             crate::manage::Phase::Add(sequence) => (
                 None,
                 Some(AddFlow {
@@ -355,6 +359,7 @@ impl From<&crate::manage::ManageState> for FrameFlow {
                     last: sequence.field.next().is_none(),
                 }),
                 None,
+                None,
             ),
             crate::manage::Phase::Edit(editor) => (
                 None,
@@ -365,6 +370,16 @@ impl From<&crate::manage::ManageState> for FrameFlow {
                     input: editor.input.clone(),
                     error: editor.error.clone(),
                 }),
+                None,
+            ),
+            crate::manage::Phase::ConfirmImport { count, path } => (
+                None,
+                None,
+                None,
+                Some(ImportOfferFlow {
+                    count: *count,
+                    path: path.clone(),
+                }),
             ),
         };
 
@@ -373,6 +388,7 @@ impl From<&crate::manage::ManageState> for FrameFlow {
             trace: state.trace.clone(),
             add,
             edit,
+            import_offer,
         }
     }
 }
@@ -401,6 +417,27 @@ pub struct EditFlow {
     pub input: String,
     /// The rejection shown under the header, if the last Enter was refused.
     pub error: Option<String>,
+}
+
+/// The first-run import offer as far as the frame can see it (#38).
+///
+/// The frame does not run the offer — [`crate::manage`] answers it and
+/// the frame runner in `main.rs` decides when an empty set with an
+/// importable file deserves the ask. This is the projection of the ask
+/// itself: how many Connections the scan found, and the file it found
+/// them in. The frame turns that into the header question and nothing
+/// else — `count` is what the scan said, not a promise about what the
+/// write will return. The number the user is *then* told arrived comes
+/// back through [`crate::manage::Trace::Imported`], earned from the
+/// store rather than carried forward from here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportOfferFlow {
+    /// What the scan found at `path`: the stanzas that could become
+    /// Connections.
+    pub count: usize,
+    /// The file the offer is about — the one shown in the question and
+    /// the one a `y` writes from, so the two can never disagree.
+    pub path: String,
 }
 
 /// The lines the flow draws between the header and the rows, capped at the
@@ -452,6 +489,35 @@ fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> 
         // rows underneath it.
         Some(crate::manage::Trace::EditFailed { connection }) => {
             vec![note_line(EDIT_FAILED_NOTE, connection, t)]
+        }
+        // The import's note: `◇ imported 12 connections`. One line, like
+        // the add's — the offer was asked on the header, not here, so
+        // there is no settled question to record, only the write that
+        // happened. The skipped count rides along when there is one, and
+        // it is called *skipped*, not *failed*: the offer's number came
+        // from a scan that already left those stanzas out, so they are
+        // not a shortfall of what the user was promised. The live PTY
+        // run for #38 caught `1 failed` reading as "one of your three
+        // failed" when nothing of the three had — the skipped stanza was
+        // never one of them. The word carries the difference.
+        Some(crate::manage::Trace::Imported { imported, failed }) => {
+            let noun = if *imported == 1 {
+                "connection"
+            } else {
+                "connections"
+            };
+            let text = if *failed > 0 {
+                format!("imported {imported} {noun}, {failed} skipped")
+            } else {
+                format!("imported {imported} {noun}")
+            };
+            vec![plain_note_line(&text, t)]
+        }
+        // The offer was heard and refused. The note is what makes the
+        // empty list underneath read as *declined* rather than as a
+        // screen that never asked anything.
+        Some(crate::manage::Trace::ImportDeclined) => {
+            vec![plain_note_line(IMPORT_DECLINED_NOTE, t)]
         }
         None => Vec::new(),
     };
@@ -602,6 +668,14 @@ const EDIT_FAILED_NOTE: &str = "edit failed — no such Connection:";
 /// written. The word "deleted" never appears on a frame where a deletion
 /// did not happen — that is the whole rule this note exists to keep.
 const DELETE_FAILED_NOTE: &str = "delete failed — no such Connection:";
+
+/// The note a declined import offer leaves.
+///
+/// The decline half of [`ADD_ABANDONED_NOTE`], shorter because there was
+/// no half-filled form to account for: nothing was written, and the one
+/// thing the note has to carry is that the ask was *heard* — the empty
+/// list under it reads as refused, not as never-offered.
+const IMPORT_DECLINED_NOTE: &str = "import declined";
 
 /// The `■` line: the confirm's question, answered.
 ///
@@ -1149,7 +1223,9 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// not the one that happens.
 ///
 /// While the delete confirm is open the rail changes to the answers that
-/// step actually reads, in the same order: the way out first.
+/// step actually reads, in the same order: the way out first. The import
+/// offer wears the same rail — same answers, same order, because it is
+/// the same kind of ask with the same conservative answer set.
 ///
 /// The rail is fitted with the shared drop-from-the-end rule
 /// ([`fit_hints_with`], the same one [`fit_hints`] is built on), against the
@@ -1161,9 +1237,10 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
     const ADD_MID: &[&str] = &["Esc back", "Enter next", "Ctrl+C quit"];
     const ADD_LAST: &[&str] = &["Esc back", "Enter add", "Ctrl+C quit"];
     const EDITING: &[&str] = &["Esc back", "Enter save", "←→ field", "Ctrl+C quit"];
+    const CONFIRMING: &[&str] = &["Esc back", "y confirm", "N abort", "Ctrl+C quit"];
 
-    let hints: &[&str] = if flow.confirming.is_some() {
-        &["Esc back", "y confirm", "N abort", "Ctrl+C quit"]
+    let hints: &[&str] = if flow.confirming.is_some() || flow.import_offer.is_some() {
+        CONFIRMING
     } else if let Some(add) = &flow.add {
         // The add step names what Enter means *on this step*: `next`
         // while there are steps left, `add` on the last one, where the
@@ -1255,6 +1332,41 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
         return Line::from(spans);
     }
 
+    // The import offer: the question *is* the header, same position and
+    // grammar as the delete confirm's — one line, one ask (#38). The
+    // count and the path are the two facts the answer is about, so they
+    // are bold; the words that only glue them together recede, exactly as
+    // the folder prefix does in the delete question. The path is shown
+    // in the form the user recognises (see [`display_import_path`]),
+    // display-only: the write still goes to the raw path the phase
+    // carries.
+    if let Some(offer) = &flow.import_offer {
+        let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+
+        let home = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned));
+        let shown = display_import_path(&offer.path, home.as_deref());
+        // One offered Connection reads "Import 1 connection", not
+        // "Import 1 connections" — the same plural the note keeps, so
+        // the ask and the answer agree on the noun.
+        let noun = if offer.count == 1 {
+            "connection"
+        } else {
+            "connections"
+        };
+
+        return Line::from(vec![
+            Span::styled("◆", Style::default().fg(t.accent)),
+            Span::raw(" "),
+            Span::styled("Import ", bold),
+            Span::styled(offer.count.to_string(), bold),
+            Span::styled(format!(" {noun} from "), dim),
+            Span::styled(shown, bold),
+            Span::styled("? ", bold),
+            Span::styled("(y/N)", dim),
+        ]);
+    }
+
     // The add step: the header *is* the step, one line, one ask — the
     // same grammar the delete confirm uses. The typed text rides on the
     // header with it because the frame hides the terminal cursor and a
@@ -1316,6 +1428,36 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
         Span::raw(" "),
         Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
     ])
+}
+
+/// The import offer's path in the form the user recognises: a home-dir
+/// prefix shown as `~/`, the way they type it (#38).
+///
+/// Pure on purpose: `home` is a parameter, not a call to
+/// `dirs::home_dir()`, so the rule is pinned against a fake home rather
+/// than the machine the test happens to run on. The header passes the
+/// real home; the tests pass a made-up one.
+///
+/// The cut falls at a **path boundary**, never at a string prefix:
+/// `/home/anyoneelse` merely starts with `/home/anyone` and is not
+/// inside it, so it stays raw — mangling it would point the user at a
+/// file that does not exist. With no home to explain the path, the raw
+/// path is shown: a `~` standing for nothing is worse than the long
+/// form. Display-only either way — the write goes to the raw path the
+/// phase carries, never to the abbreviation.
+pub fn display_import_path(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home.filter(|h| !h.is_empty()) else {
+        return path.to_string();
+    };
+
+    if path == home {
+        return "~".to_string();
+    }
+
+    match path.strip_prefix(home) {
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    }
 }
 
 /// The caret the add step draws for itself.

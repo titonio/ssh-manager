@@ -18,11 +18,11 @@
 //!   pressed, not to wherever the cursor drifted to afterwards.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sshm::config::Connection;
+use sshm::config::{Connection, ImportReport};
 use sshm::inline::InlineOutcome;
 use sshm::manage::{
-    self, step, AddField, AddSequence, DeleteOutcome, EditOutcome, Effect, ManageState, Phase,
-    Trace,
+    self, step, AddField, AddSequence, DeleteOutcome, EditOutcome, Effect, ImportOutcome,
+    ManageState, Phase, Trace,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1701,6 +1701,391 @@ fn the_edit_is_one_step_not_a_five_field_walk() {
     assert!(
         !matches!(step.state.phase, Phase::Add(_)),
         "Ctrl+E must never open the add sequence"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 12 — the first-run import offer (#38)
+//
+// The offer is the one place the manage frame asks the user to authorize a
+// write they did not type out field by field, so it is held to the same
+// discipline as the delete confirm: the keystroke is an *ask*, and the
+// `◇ imported` note is a claim about `connections.json` that only the
+// store can earn. The tests below keep those two halves apart.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The path the ticket's worked example offers to import from.
+const OFFER_PATH: &str = "/home/deploy/.ssh/config";
+
+/// The frame sitting on the first-run offer: twelve importable
+/// Connections found at [`OFFER_PATH`], nothing written yet.
+///
+/// The list is empty here by definition — that is what makes it a
+/// first run — so every keystroke below is driven with `selected: None`.
+/// That is the point: the offer cannot depend on a cursor, because there
+/// is nothing to point at.
+fn offered() -> ManageState {
+    ManageState {
+        phase: Phase::ConfirmImport {
+            count: 12,
+            path: OFFER_PATH.to_string(),
+        },
+        ..ManageState::new()
+    }
+}
+
+/// `y` asks for the import and returns to the list — and asks for *one*
+/// import, of the path the offer named.
+///
+/// The count travels in the phase rather than the effect because the
+/// count is what the scan found, not what the write will deliver; the
+/// effect names only the file, and the report that comes back says how
+/// many arrived.
+#[test]
+fn answering_y_at_the_import_offer_asks_for_exactly_one_import_of_the_offered_path() {
+    let step = step(&offered(), plain('y'), None);
+
+    assert_eq!(
+        step.effects,
+        vec![Effect::Import {
+            path: OFFER_PATH.to_string()
+        }],
+        "`y` must ask for exactly one import, of the path the offer named"
+    );
+    assert_eq!(
+        step.state.phase,
+        Phase::List,
+        "the offer is over once it has been answered"
+    );
+    assert_eq!(
+        step.state.trace, None,
+        "the keystroke must not pre-commit an `imported` note. The state \
+         machine owns no disk: the claim is earned by the store's answer, \
+         folded in by `settle_import`"
+    );
+}
+
+/// Shift is allowed on the answer, exactly as it is on the delete
+/// confirm: `Y` is the same yes, and a user with the shift down must not
+/// be silently read as having typed some other printable.
+#[test]
+fn a_capital_y_answers_the_import_offer_like_a_lowercase_one() {
+    let step = step(&offered(), plain('Y'), None);
+
+    assert_eq!(
+        step.effects,
+        vec![Effect::Import {
+            path: OFFER_PATH.to_string()
+        }],
+        "`Y` must ask for the same import `y` does"
+    );
+    assert_eq!(step.state.trace, None);
+}
+
+/// The effect carries the path it was offered with, not a path it
+/// resolved for itself.
+///
+/// This is the whole reason the path lives in the phase: the user was
+/// shown one file, so the write has to be about that file. An effect
+/// that re-derived `~/.ssh/config` at the driver could import something
+/// the user never agreed to.
+#[test]
+fn the_import_effect_carries_the_path_the_offer_was_made_at() {
+    let elsewhere = ManageState {
+        phase: Phase::ConfirmImport {
+            count: 3,
+            path: "/etc/ssh/ssh_config".into(),
+        },
+        ..ManageState::new()
+    };
+
+    let step = step(&elsewhere, plain('y'), None);
+
+    assert_eq!(
+        step.effects,
+        vec![Effect::Import {
+            path: "/etc/ssh/ssh_config".into()
+        }],
+        "the import must name the file the user was shown, not the default one"
+    );
+}
+
+/// `n` declines, and a decline writes nothing.
+///
+/// The trace is the whole point of the arm: the user needs to see that
+/// the offer was heard and refused, rather than the empty frame silently
+/// carrying on as if nothing had been asked.
+#[test]
+fn answering_n_at_the_import_offer_declines_and_writes_nothing() {
+    for ch in ['n', 'N'] {
+        let step = step(&offered(), plain(ch), None);
+
+        assert!(
+            step.effects.is_empty(),
+            "`{ch}` must ask for nothing: {:?}",
+            step.effects
+        );
+        assert_eq!(
+            step.state.phase,
+            Phase::List,
+            "and must put the frame back on the list"
+        );
+        assert_eq!(
+            step.state.trace,
+            Some(Trace::ImportDeclined),
+            "with the decline left as the note"
+        );
+    }
+}
+
+/// Esc abandons the offer the same way `n` does: nothing written, the
+/// decline on the record.
+#[test]
+fn esc_at_the_import_offer_declines_it() {
+    let step = step(&offered(), key(KeyCode::Esc), None);
+
+    assert!(
+        step.effects.is_empty(),
+        "Esc must ask for nothing: {:?}",
+        step.effects
+    );
+    assert_eq!(step.state.phase, Phase::List);
+    assert_eq!(step.state.trace, Some(Trace::ImportDeclined));
+}
+
+/// The safety rule the delete confirm runs on, restated for the offer:
+/// a user who carries on typing is searching, not importing.
+///
+/// The offer appears unasked the first time `sshm manage` opens on an
+/// empty set. A user who never meant to answer it and starts typing a
+/// filter must end up with a filtered list and a declined import — not
+/// with twelve Connections they did not ask for.
+#[test]
+fn a_stray_printable_at_the_import_offer_declines_it_and_filters() {
+    for ch in ['w', 'd', 'x', 'a', 'e', ' '] {
+        let step = step(&offered(), plain(ch), None);
+
+        assert!(
+            step.effects.is_empty(),
+            "`{ch:?}` must not ask for an import: {:?}",
+            step.effects
+        );
+        assert_eq!(
+            step.state.phase,
+            Phase::List,
+            "`{ch:?}` must leave the offer"
+        );
+        assert_eq!(
+            step.state.query,
+            ch.to_string(),
+            "and the character must land in the filter rather than be wasted"
+        );
+        assert_eq!(step.state.trace, Some(Trace::ImportDeclined));
+    }
+}
+
+/// Movement is inert while the offer is open, as it is at the delete
+/// confirm. There is nothing to move onto — the set is empty — and a key
+/// that silently died would read as a broken keybinding, so the rule is
+/// simply that the offer is untouched.
+#[test]
+fn movement_does_not_happen_while_the_import_offer_is_open() {
+    for code in [
+        KeyCode::Down,
+        KeyCode::Up,
+        KeyCode::Enter,
+        KeyCode::Backspace,
+        KeyCode::Left,
+        KeyCode::Right,
+    ] {
+        let step = step(&offered(), key(code), None);
+
+        assert_eq!(
+            step.state,
+            offered(),
+            "{code:?} must leave the offer exactly as it was"
+        );
+        assert!(step.effects.is_empty(), "{code:?} must ask for nothing");
+    }
+}
+
+/// Ctrl+C at the offer is a cancel, not an answer.
+///
+/// It must not import, and it must not be reported as a decline either:
+/// the frame is leaving, and the exit is the only thing the driver is
+/// asked to do.
+#[test]
+fn ctrl_c_at_the_import_offer_cancels_without_importing() {
+    let step = step(&offered(), ctrl('c'), None);
+
+    assert_eq!(
+        step.effects,
+        vec![Effect::Exit(InlineOutcome::Cancelled)],
+        "Ctrl+C must leave the frame and ask for nothing else"
+    );
+}
+
+/// The classification of `Store::import_ssh_config`'s answer is the
+/// whole contract between the driver and this module, so it is pinned
+/// here rather than left to be re-derived at the call site.
+///
+/// A report with failures alongside imports is still `Imported`: nine
+/// Connections really arrived, and the three that did not are carried as
+/// a count so the note can say `3 skipped` rather than hiding them.
+#[test]
+fn the_import_report_classifies_into_the_two_outcomes() {
+    assert_eq!(
+        ImportOutcome::from_report(Ok(ImportReport {
+            imported: 12,
+            failures: vec![],
+        })),
+        ImportOutcome::Imported {
+            imported: 12,
+            failed: 0
+        },
+        "a clean report is a clean import"
+    );
+
+    assert_eq!(
+        ImportOutcome::from_report(Ok(ImportReport {
+            imported: 9,
+            failures: vec![
+                "wildcard host \"*.example.com\"".into(),
+                "wildcard host \"test?\"".into(),
+                "wildcard host \"*.lan\"".into(),
+            ],
+        })),
+        ImportOutcome::Imported {
+            imported: 9,
+            failed: 3
+        },
+        "a partial import is still an import, with the failures counted"
+    );
+
+    assert_eq!(
+        ImportOutcome::from_report(Err("disk on fire".into())),
+        ImportOutcome::Failed("disk on fire".into()),
+        "and a store that refused is a failure, not an import of nothing"
+    );
+}
+
+/// A real import earns the note, and the frame comes back showing the
+/// list that was written.
+///
+/// The filter is cleared and the cursor goes to the top for the same
+/// reason `settle_add` does it: the user just said yes to twelve new
+/// Connections, and a stale filter left over from before the offer would
+/// hide every one of them under `No matches` while a note above claimed
+/// they had arrived.
+#[test]
+fn an_import_the_store_wrote_earns_the_imported_note() {
+    let stale = ManageState {
+        query: "web".into(),
+        selection: 7,
+        ..offered()
+    };
+    let answered = step(&stale, plain('y'), None);
+
+    let settled = manage::settle_import(
+        &answered.state,
+        ImportOutcome::Imported {
+            imported: 12,
+            failed: 0,
+        },
+    )
+    .expect("an import the store performed settles onto the list");
+
+    assert_eq!(
+        settled.trace,
+        Some(Trace::Imported {
+            imported: 12,
+            failed: 0
+        })
+    );
+    assert_eq!(settled.phase, Phase::List);
+    assert_eq!(
+        settled.query, "",
+        "the filter must be cleared so the imported Connections are visible"
+    );
+    assert_eq!(settled.selection, 0, "and the cursor starts at the top");
+}
+
+/// The partial case keeps both numbers on the note.
+///
+/// `◇ imported 9 connections, 3 skipped` rather than the clean wording:
+/// a user who was promised an import is owed to know which half did not
+/// show up, and a note that rounded three failures away would be a small
+/// lie about their file.
+#[test]
+fn a_partial_import_reports_both_halves() {
+    let answered = step(&offered(), plain('y'), None);
+
+    let settled = manage::settle_import(
+        &answered.state,
+        ImportOutcome::Imported {
+            imported: 9,
+            failed: 3,
+        },
+    )
+    .expect("a partial import is still a real import");
+
+    assert_eq!(
+        settled.trace,
+        Some(Trace::Imported {
+            imported: 9,
+            failed: 3
+        })
+    );
+}
+
+/// A store that refused the import collapses the frame rather than
+/// leaving a note on it.
+///
+/// Same rule as a refused add or delete: a live list the store cannot
+/// vouch for is worse than no list, and the frame has no honest thing to
+/// show underneath a failed write.
+#[test]
+fn an_import_the_store_refused_collapses_the_frame() {
+    let answered = step(&offered(), plain('y'), None);
+
+    let outcome = manage::settle_import(
+        &answered.state,
+        ImportOutcome::Failed("Permission denied (os error 13)".into()),
+    );
+
+    assert_eq!(
+        outcome,
+        Err("Permission denied (os error 13)".into()),
+        "the store's own message must survive to be reported, not be swallowed"
+    );
+    assert!(
+        !matches!(answered.state.trace, Some(Trace::Imported { .. })),
+        "and nothing on the pre-settle state may read as imported: {:?}",
+        answered.state.trace
+    );
+}
+
+/// A declined offer never reaches the settle path, so it can never be
+/// dressed up as an import.
+///
+/// The decline is terminal at the step: no effect leaves, which means
+/// `settle_import` is never called with anything about it. Pinned here
+/// because the honest note (`import declined`) and the earned note
+/// (`imported 12 connections`) must never be interchangeable.
+#[test]
+fn a_declined_offer_leaves_nothing_for_the_settle_path_to_claim() {
+    let declined = step(&offered(), key(KeyCode::Esc), None);
+
+    assert!(declined.effects.is_empty());
+    assert_eq!(
+        declined.state.trace,
+        Some(Trace::ImportDeclined),
+        "the decline is the note, not a stand-in for an import"
+    );
+    assert!(
+        !matches!(declined.state.trace, Some(Trace::Imported { .. })),
+        "and it must not read as an import: {:?}",
+        declined.state.trace
     );
 }
 

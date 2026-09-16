@@ -97,6 +97,20 @@ pub enum Settle {
         /// The store's own reason, carried through verbatim.
         message: String,
     },
+    /// An import the store refused (#38).
+    ///
+    /// The store refused the write; the frame collapses rather than
+    /// showing a list it cannot vouch for — the same contract
+    /// [`Settle::Error`] and [`Settle::AddFailed`] hold, for the same
+    /// reason. There is no Connection to name here: the ask was about a
+    /// file, not a row, and a line that invented one would claim an
+    /// object the set never received. So the line carries the store's
+    /// reason alone — `◆ import failed: <reason>` — dim where the other
+    /// failure traces are dim, the `◆` carrying the state.
+    ImportFailed {
+        /// The store's own reason, carried through verbatim.
+        message: String,
+    },
 }
 
 /// One row of the frame, as an instruction to the driver.
@@ -223,6 +237,20 @@ pub fn settle_trace(settle: &Settle, canvas: Canvas) -> Vec<Line<'static>> {
             // shape for it would be a second grammar.
             let mut line = connection_trace("error", &TraceSubject::from(draft), &t);
             push_reason(&mut line, message, canvas.fit_width(), &t);
+            vec![fit_line(line, canvas.fit_width())]
+        }
+        Settle::ImportFailed { message } => {
+            // No `connection_trace` here: an import is about a file,
+            // not a row, and there is no Connection to name. The line
+            // keeps the failure grammar the other traces use — accent
+            // glyph, dim text, the store's own reason cut to the
+            // canvas — so a refused import reads as the same class of
+            // failure even though it names nothing.
+            let mut line = Line::from(vec![icon(t.accent), Span::styled(" import failed: ", dim)]);
+            let reason = fit_reason(message, line.width(), canvas.fit_width());
+            if !reason.is_empty() {
+                line.spans.push(Span::styled(reason, dim));
+            }
             vec![fit_line(line, canvas.fit_width())]
         }
     }
@@ -605,10 +633,33 @@ pub enum InlineOutcome {
 /// of #36 — the delete confirm's decisions are unit-testable because they
 /// are not written in this loop, and what is left here is the part that
 /// genuinely needs a terminal.
+///
+/// This entry point opens the frame on a query-seeded list. A caller that
+/// needs the frame to open on some other step — the first-run import offer,
+/// which is a phase the command decides on before any keystroke exists —
+/// goes through [`run_inline_with_state`] instead.
 pub fn run_inline<W: Write>(
     out: &mut W,
     store: &mut dyn Store,
     initial_query: String,
+    mode: FrameMode,
+) -> io::Result<InlineOutcome> {
+    run_inline_with_state(out, store, ManageState::with_query(initial_query), mode)
+}
+
+/// [`run_inline`], opened on a caller-supplied [`ManageState`] (#38).
+///
+/// The first-run import offer is not a keystroke: it is a step the frame
+/// opens *on*, decided by the command before the driver starts. Seeding
+/// it through this entry point is what lets the offer travel as the same
+/// `ManageState` every later keystroke produces — the driver does not grow
+/// a flag to re-derive, and `run_inline` keeps its own meaning. The
+/// behaviour from here is identical to [`run_inline`]'s: the state is
+/// where the two differ, and only at the start.
+pub fn run_inline_with_state<W: Write>(
+    out: &mut W,
+    store: &mut dyn Store,
+    initial: ManageState,
     mode: FrameMode,
 ) -> io::Result<InlineOutcome> {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -627,7 +678,7 @@ pub fn run_inline<W: Write>(
         return Ok(InlineOutcome::Cancelled);
     }
 
-    let mut state = ManageState::with_query(initial_query);
+    let mut state = initial;
 
     // One place assembles the inputs a manage frame is built from, and one
     // place re-syncs the selection to whatever the frame clamped it to.
@@ -734,6 +785,28 @@ pub fn run_inline<W: Write>(
                                     // exit non-zero.
                                     Err(message) => {
                                         return settle_error(&mut live, canvas, &target, message)
+                                    }
+                                }
+                            }
+                            // The import is performed here and its
+                            // result folded straight back through
+                            // `settle_import`, so the `◇ imported` note
+                            // reports what the store wrote rather than
+                            // what the scan promised — the same
+                            // discipline the delete and add arms keep.
+                            Effect::Import { path } => {
+                                let outcome = manage::ImportOutcome::from_report(
+                                    store.import_ssh_config(&path),
+                                );
+                                match manage::settle_import(&state, outcome) {
+                                    Ok(next) => state = next,
+                                    // The store refused the write. Same
+                                    // contract as a refused add, delete
+                                    // or edit: collapse, report, exit
+                                    // non-zero — never keep painting a
+                                    // list the store cannot vouch for.
+                                    Err(message) => {
+                                        return settle_import_error(&mut live, canvas, message)
                                     }
                                 }
                             }
@@ -860,6 +933,27 @@ fn settle_add_error<W: Write>(
 ) -> io::Result<InlineOutcome> {
     let trace = Settle::AddFailed {
         draft: draft.clone(),
+        message: message.clone(),
+    };
+    live.collapse(&settle_trace(&trace, canvas))?;
+    Err(io::Error::other(message))
+}
+
+/// Collapse the frame on a refused **import** and hand the shell back with
+/// an error, mirroring [`settle_error`] and [`settle_add_error`].
+///
+/// The trace names no Connection: the offer was about a file, and the
+/// store refused the write, so there is nothing in the set to point at
+/// and nothing on disk changed. The frame collapses rather than showing a
+/// list it cannot vouch for — the same reason a refused delete collapses,
+/// with more force here, because the whole list the user is looking at
+/// would have been the import's supposed result.
+fn settle_import_error<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    canvas: Canvas,
+    message: String,
+) -> io::Result<InlineOutcome> {
+    let trace = Settle::ImportFailed {
         message: message.clone(),
     };
     live.collapse(&settle_trace(&trace, canvas))?;

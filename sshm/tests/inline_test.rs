@@ -484,6 +484,78 @@ fn a_failure_message_that_fits_is_left_whole() {
     );
 }
 
+/// A refused import settles to a single honest line (#38).
+///
+/// The store refused the write, so the frame collapses rather than
+/// showing a list it cannot vouch for. There is no Connection to name —
+/// the ask was about a file, not a row — so the line carries the
+/// store's own reason, and the `◆` carries the state.
+#[test]
+fn a_refused_import_settles_to_one_line_naming_the_failure() {
+    let trace = settle_trace(
+        &Settle::ImportFailed {
+            message: "could not write connections.json: Permission denied".into(),
+        },
+        canvas(),
+    );
+
+    assert_eq!(trace.len(), 1, "one settle line, like every other settle");
+    let text = line_text(&trace[0]);
+    assert!(
+        text.starts_with("◆ import failed"),
+        "the trace must wear the failure state on the `◆` glyph: {text}"
+    );
+    assert!(
+        text.contains("could not write connections.json: Permission denied"),
+        "and carry the store's own reason, not a generic shrug: {text}"
+    );
+
+    let reason = span_with(
+        &trace[0].spans,
+        "could not write connections.json: Permission denied",
+    );
+    assert!(
+        reason.style.add_modifier.contains(Modifier::DIM),
+        "the reason recedes as dim, where the other failure traces are dim: {reason:?}"
+    );
+    assert_eq!(
+        trace[0].spans[0].style.fg,
+        Some(sshm::theme::Theme::clack().accent),
+        "the `◆` carries the state in the accent role, as every settle line does"
+    );
+}
+
+/// The refused-import line carries text from outside the program, so it
+/// is fitted like the other failure traces: a wrapped settle row breaks
+/// the collapse's one-line-per-row count and strands half a message on
+/// the glass.
+#[test]
+fn a_refused_import_still_settles_to_one_fitted_line_on_a_narrow_canvas() {
+    let narrow = Canvas::new(40, 24, ColorSupport::Truecolor);
+    let trace = settle_trace(
+        &Settle::ImportFailed {
+            message: "the disk caught fire while writing connections.json and \
+                      no further detail is available from the operating system"
+                .into(),
+        },
+        narrow,
+    );
+
+    assert_eq!(trace.len(), 1);
+    assert!(
+        trace[0].width() <= narrow.fit_width(),
+        "the import-failure line must fit the terminal it settles into: {} columns \
+         in a {}-column canvas",
+        trace[0].width(),
+        narrow.fit_width()
+    );
+    assert!(
+        line_text(&trace[0]).starts_with("◆ import failed"),
+        "fitting must not eat the state glyph: {}",
+        line_text(&trace[0])
+    );
+}
+
 /// The settle trace is part of the user's scrollback now, so it obeys the
 /// frame's transparency rule: no span paints a background.
 #[test]
@@ -493,6 +565,9 @@ fn the_settle_trace_paints_no_background() {
         Settle::Cancelled,
         Settle::Error {
             connection: web01(),
+            message: "boom".into(),
+        },
+        Settle::ImportFailed {
             message: "boom".into(),
         },
     ] {
