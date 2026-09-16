@@ -526,6 +526,7 @@ fn ephemeral_unknown_id_removes_nothing() {
 }
 
 #[test]
+#[serial_test::serial]
 fn ephemeral_deletes_never_reach_the_users_file() {
     let home = TempHome::new();
     let mut store = Ephemeral::new(vec![connection("id-web-01", "web-01")]);

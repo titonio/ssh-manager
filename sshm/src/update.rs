@@ -446,6 +446,7 @@ mod tests {
     use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_should_check_update_no_cache() {
         let result = should_check_update();
         assert!(result.is_ok());
@@ -719,6 +720,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_should_check_update_error_handling() {
         // Test that should_check_update returns a Result
         let result = should_check_update();
@@ -928,6 +930,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_for_update_basic() {
         let result = check_for_update();
         assert!(matches!(
@@ -937,6 +940,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_force_check_for_update_basic() {
         let result = force_check_for_update();
         assert!(matches!(
@@ -1228,6 +1232,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_should_check_update_with_cargo_env_skips() {
         let old_value = std::env::var("CARGO_MANIFEST_DIR").ok();
         std::env::set_var("CARGO_MANIFEST_DIR", "/tmp/test");
@@ -1534,6 +1539,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_for_update_returns_result_variant() {
         let result = check_for_update();
         match result {
@@ -1548,6 +1554,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_force_check_for_update_returns_result_variant() {
         let result = force_check_for_update();
         match result {
