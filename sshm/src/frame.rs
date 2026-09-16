@@ -62,6 +62,15 @@ const GUTTER: usize = 1 + GUTTER_PAD.len();
 /// What separates two hints in the hint rail.
 const HINT_SEP: &str = " · ";
 
+/// The shared dim style for notes, errors, and other receding text.
+///
+/// `fg_muted` + `DIM` so the line recedes behind the frame it sits in.
+/// Extracted so the three call-sites (`error_line`, `plain_note_line`,
+/// `update_note_line`) cannot drift apart.
+fn dim_style(t: &Theme) -> Style {
+    Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM)
+}
+
 /// What a frame spends, and where it lands on the glass.
 ///
 /// Everything that answers *how does this fit* lives here; everything that
@@ -615,7 +624,7 @@ const FIELD_LABEL_WIDTH: usize = 6;
 /// state is carried by the glyph and the words as much as by the colour,
 /// so it reads the same with `NO_COLOR` set.
 fn error_line(message: &str, t: &Theme) -> Line<'static> {
-    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let dim = dim_style(t);
 
     Line::from(vec![
         Span::styled(RAIL, Style::default().fg(t.border)),
@@ -631,7 +640,7 @@ fn error_line(message: &str, t: &Theme) -> Line<'static> {
 /// A `◇` note with no Connection to name — for the routes that ask for
 /// something other than a delete and so have no row to point at.
 fn plain_note_line(text: &str, t: &Theme) -> Line<'static> {
-    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let dim = dim_style(t);
 
     Line::from(vec![
         Span::styled(RAIL, Style::default().fg(t.border)),
@@ -649,16 +658,28 @@ fn plain_note_line(text: &str, t: &Theme) -> Line<'static> {
 /// literal hue. The note carries no rail: it is *above* the framed body,
 /// not inside it, so it reads as a whisper over the frame rather than as
 /// one of its rows.
-fn update_note_line(version: &str, t: &Theme) -> Line<'static> {
-    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-
-    Line::from(vec![
-        Span::styled("◆", Style::default().fg(t.accent)),
-        Span::styled(
-            format!(" update available: v{version} — run sshm update"),
-            dim,
-        ),
-    ])
+///
+/// When the full note (with version) does not fit in `width`, the version
+/// is dropped and the action survives: `◆ update available — run sshm
+/// update`. Narrow terminal keeps what matters (sshm-design rule 5).
+fn update_note_line(version: &str, t: &Theme, width: usize) -> Line<'static> {
+    let dim = dim_style(t);
+    let full = format!("◆ update available: v{version} — run sshm update");
+    if unicode_width::UnicodeWidthStr::width(full.as_str()) <= width {
+        Line::from(vec![
+            Span::styled("◆", Style::default().fg(t.accent)),
+            Span::styled(
+                format!(" update available: v{version} — run sshm update"),
+                dim,
+            ),
+        ])
+    } else {
+        // Short form: keep the action, drop the version.
+        Line::from(vec![
+            Span::styled("◆", Style::default().fg(t.accent)),
+            Span::styled(" update available — run sshm update", dim),
+        ])
+    }
 }
 
 /// The note an abandoned add sequence leaves.
@@ -1151,13 +1172,19 @@ pub fn build_frame_with_note(
     let matched: Vec<usize> = matches.iter().map(|(conn_idx, _, _)| *conn_idx).collect();
     let selection = selection.min(matched.len().saturating_sub(1));
 
-    // The update note comes out of the row budget, not on top of it, so the
-    // frame's height is the same with or without it — the invariant the
-    // inline viewport and the settle-collapse both count on. See the
-    // decision note on this function.
-    let note_line = note.map(|v| update_note_line(v, &t));
+    // The update note adds a line above the header; it does not displace a
+    // list row. The frame's total height grows by one line when the note is
+    // present, decided once before the viewport opens. The visible rows are
+    // what the terminal leaves after chrome, prompt, and the note line
+    // itself — so 8 rows are kept with and without the note at full height,
+    // and the budget saturates (never overflows) at very small heights.
+    let note_line = note.map(|v| update_note_line(v, &t, canvas.fit_width()));
     let note_rows = usize::from(note_line.is_some());
-    let visible = canvas.visible_rows().unwrap_or(0).saturating_sub(note_rows);
+    let visible = if note_rows > 0 {
+        fit_visible_rows(canvas.height.saturating_sub(note_rows)).unwrap_or(0)
+    } else {
+        canvas.visible_rows().unwrap_or(0)
+    };
 
     let mut lines = Vec::new();
     if let Some(line) = note_line {

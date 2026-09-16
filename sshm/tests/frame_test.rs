@@ -1656,12 +1656,12 @@ fn no_cached_update_leaves_no_note_line() {
     );
 }
 
-/// The note displaces one list row rather than adding a line, so the frame's
-/// total height is the same whether or not the note is present. This is the
-/// invariant the inline viewport depends on: ratatui 0.30 cannot resize a
-/// live inline frame, so the height must be decided once, before it opens.
+/// The note adds one line to the frame's total height — it does not
+/// displace a list row. The height is decided once, before the viewport
+/// opens, and does not change while the frame is active. Both frames show
+/// 8 visible rows in the list area.
 #[test]
-fn the_update_note_displaces_a_row_so_the_frame_height_is_constant() {
+fn the_update_note_adds_a_line_so_the_list_keeps_eight_visible_rows() {
     let with_note = build_frame_with_note(
         &conns(),
         "",
@@ -1680,15 +1680,136 @@ fn the_update_note_displaces_a_row_so_the_frame_height_is_constant() {
         &FrameFlow::default(),
     );
 
+    // The note adds one line to the frame's total height.
     assert_eq!(
         with_note.lines().len(),
+        without_note.lines().len() + 1,
+        "the note adds a line, it does not displace a row"
+    );
+    assert_eq!(
         without_note.lines().len(),
-        "the note must not change the frame's height"
+        FRAME_LINES,
+        "a full-height frame without a note is FRAME_LINES tall"
     );
     assert_eq!(
         with_note.lines().len(),
-        FRAME_LINES,
-        "a full-height frame is FRAME_LINES tall with or without the note"
+        FRAME_LINES + 1,
+        "a full-height frame with a note is FRAME_LINES + 1 tall"
+    );
+
+    // Both frames show 8 visible rows in the list area.
+    // Without note: header at 0, hint at len-2, corner at len-1.
+    //   List rows are lines 1..(len-2), count = len - 3.
+    // With note: note at 0, header at 1, hint at len-2, corner at len-1.
+    //   List rows are lines 2..(len-2), count = len - 4.
+    let list_rows = |frame: &sshm::frame::Frame, header_idx: usize| -> usize {
+        frame.lines().len() - header_idx - 3 // -3 for header, hint, corner
+    };
+    assert_eq!(
+        list_rows(&without_note, 0),
+        VISIBLE_ROWS,
+        "without a note the list shows 8 rows"
+    );
+    assert_eq!(
+        list_rows(&with_note, 1),
+        VISIBLE_ROWS,
+        "with a note the list still shows 8 rows"
+    );
+}
+
+/// At a width where the full note (with version) does not fit, the version
+/// is dropped and the action survives: `◆ update available — run sshm
+/// update`. Narrow terminal keeps what matters (sshm-design rule 5).
+#[test]
+fn the_update_note_keeps_the_action_when_the_version_does_not_fit() {
+    // The full note is ~44 chars. Use a width that fits the short form
+    // (~35 chars) but not the full form.
+    let narrow = Canvas::new(38, 24, ColorSupport::Truecolor);
+    let frame = build_frame_with_note(
+        &conns(),
+        "",
+        0,
+        FrameMode::Pick,
+        narrow,
+        &FrameFlow::default(),
+        Some("0.1.11"),
+    );
+    let note = line_text(&frame.lines()[0]);
+
+    // The action must survive.
+    assert!(
+        note.contains("sshm update"),
+        "the action must survive a narrow terminal: {note:?}"
+    );
+    // The version is dropped to make room.
+    assert!(
+        !note.contains("v0.1.11"),
+        "the version is dropped when the full note does not fit: {note:?}"
+    );
+    // The glyph still marks it as ours.
+    assert!(
+        note.starts_with('◆'),
+        "the note still opens with ◆: {note:?}"
+    );
+}
+
+/// The note renders above the header in the bare/execute frame too, not
+/// just in the pick frame. The bare path uses `FrameMode::Pick` with
+/// `Emit::Execute`; the frame mode is still `Pick`.
+#[test]
+fn the_update_note_renders_above_the_header_in_execute_mode() {
+    let frame = build_frame_with_note(
+        &conns(),
+        "",
+        0,
+        FrameMode::Pick,
+        wide(),
+        &FrameFlow::default(),
+        Some("0.1.11"),
+    );
+    let lines = frame_text(&frame);
+
+    assert!(
+        lines[0].contains("update available"),
+        "the note must appear in the bare/execute frame: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("sshm update"),
+        "the note must name the command in the bare/execute frame: {lines:?}"
+    );
+    // The header follows the note.
+    assert!(
+        !lines[1].contains("update available"),
+        "the header is not the note: {lines:?}"
+    );
+}
+
+/// The note renders above the header in the manage frame too.
+#[test]
+fn the_update_note_renders_above_the_header_in_manage_mode() {
+    let frame = build_frame_with_note(
+        &conns(),
+        "",
+        0,
+        FrameMode::Manage,
+        wide(),
+        &FrameFlow::default(),
+        Some("0.1.11"),
+    );
+    let lines = frame_text(&frame);
+
+    assert!(
+        lines[0].contains("update available"),
+        "the note must appear in manage mode: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("sshm update"),
+        "the note must name the command in manage mode: {lines:?}"
+    );
+    // The header follows the note.
+    assert!(
+        !lines[1].contains("update available"),
+        "the header is not the note: {lines:?}"
     );
 }
 

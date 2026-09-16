@@ -97,7 +97,7 @@ fn main() -> io::Result<()> {
     run_main(
         run_frame_command,
         update::force_check_for_update,
-        update::cached_update,
+        update::cached_update_version,
     )
 }
 
@@ -162,16 +162,21 @@ fn dispatch(
     // captured stdout is never polluted by it, and returns straight from
     // the frame. The note is read from cache here, once, before the frame
     // opens (#39).
+    //
+    // The note is read once after the non-frame paths (completions, init)
+    // have returned, so all three frame paths (pick, manage, bare) share
+    // a single cache read. The `--check-update` path below calls
+    // `check_update_fn` (the network checker), not this cached reader.
+    let note = read_note_fn();
+
     if let Some(Commands::Pick { query }) = cli.command {
         let mut config = config::Config::load();
-        let note = read_note_fn();
         return run_frame_fn(Emit::Insert, &mut config, query.unwrap_or_default(), note);
     }
 
     // `sshm manage` — the edit emit, in the manage frame.
     if let Some(Commands::Manage) = cli.command {
         let mut config = config::Config::load();
-        let note = read_note_fn();
         return run_frame_fn(Emit::Edit, &mut config, String::new(), note);
     }
 
@@ -208,10 +213,9 @@ fn dispatch(
     }
 
     // Bare `sshm` — the execute emit. There is no fullscreen to fall
-    // through to: the frame is the whole surface now. The note is read
-    // from cache here, once, before the frame opens (#39).
+    // through to: the frame is the whole surface now. The note was read
+    // once above, before the frame opens (#39).
     let mut config = config::Config::load();
-    let note = read_note_fn();
     run_frame_fn(Emit::Execute, &mut config, String::new(), note)
 }
 

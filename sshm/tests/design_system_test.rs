@@ -816,6 +816,21 @@ fn dump_frames_for_review() {
                 Some("0.1.11"),
             ),
         ),
+        // The narrow-terminal degradation: the version is dropped so the
+        // action survives. Dumped so the human read confirms the note
+        // keeps what matters when the width runs out.
+        (
+            "frame-pick-update-note-narrow",
+            build_frame_with_note(
+                &c,
+                "",
+                0,
+                FrameMode::Pick,
+                Canvas::new(38, 24, truecolor),
+                &FrameFlow::default(),
+                Some("0.1.11"),
+            ),
+        ),
     ] {
         // The frame's own name already carries the support it was built with;
         // appending the *detected* mode here would mislabel a truecolour frame
