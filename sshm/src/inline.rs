@@ -42,7 +42,7 @@ use ratatui::text::{Line, Span};
 use crate::config::Connection;
 use crate::connections::{ConnectionDraft, Store};
 use crate::frame::{
-    build_frame_with_flow, fit_line, fit_visible_rows, Canvas, Frame, FrameFlow, FrameMode,
+    build_frame_with_note, fit_line, fit_visible_rows, Canvas, Frame, FrameFlow, FrameMode,
 };
 use crate::manage::{self, Effect, ManageState};
 use crate::theme::{self, Theme};
@@ -643,8 +643,15 @@ pub fn run_inline<W: Write>(
     store: &mut dyn Store,
     initial_query: String,
     mode: FrameMode,
+    note: Option<String>,
 ) -> io::Result<InlineOutcome> {
-    run_inline_with_state(out, store, ManageState::with_query(initial_query), mode)
+    run_inline_with_state(
+        out,
+        store,
+        ManageState::with_query(initial_query),
+        mode,
+        note,
+    )
 }
 
 /// [`run_inline`], opened on a caller-supplied [`ManageState`] (#38).
@@ -656,11 +663,19 @@ pub fn run_inline<W: Write>(
 /// a flag to re-derive, and `run_inline` keeps its own meaning. The
 /// behaviour from here is identical to [`run_inline`]'s: the state is
 /// where the two differ, and only at the start.
+///
+/// `note` is the cached update note (#39), read once by the command at the
+/// edge before the driver starts and handed down here as data. The driver
+/// passes it to the frame on every build but never re-reads it: the note is
+/// frozen at the value the edge read, so it cannot appear, vanish, or change
+/// while the frame is live. The frame displaces a row for it, so the
+/// viewport height is fixed before `open` and never moves.
 pub fn run_inline_with_state<W: Write>(
     out: &mut W,
     store: &mut dyn Store,
     initial: ManageState,
     mode: FrameMode,
+    note: Option<String>,
 ) -> io::Result<InlineOutcome> {
     use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
@@ -684,14 +699,18 @@ pub fn run_inline_with_state<W: Write>(
     // place re-syncs the selection to whatever the frame clamped it to.
     // Without it every call site re-typed the quintuple and had to remember
     // that the selection it passed in is not necessarily the one it gets.
+    // The update note rides along unchanged on every build — it is read once
+    // at the edge and never re-read here, so the paint path touches no cache
+    // file and no network (#39).
     let build = |store: &dyn Store, state: &ManageState, canvas: Canvas| {
-        let frame = build_frame_with_flow(
+        let frame = build_frame_with_note(
             store.all(),
             &state.query,
             state.selection,
             mode,
             canvas,
             &FrameFlow::from(state),
+            note.as_deref(),
         );
         let selection = frame.selection();
         (frame, selection)

@@ -94,15 +94,20 @@ enum ShellType {
 }
 
 fn main() -> io::Result<()> {
-    run_main(run_frame_command, update::force_check_for_update)
+    run_main(
+        run_frame_command,
+        update::force_check_for_update,
+        update::cached_update,
+    )
 }
 
 fn run_main(
-    run_frame_fn: fn(Emit, &mut dyn connections::Store, String) -> io::Result<()>,
+    run_frame_fn: fn(Emit, &mut dyn connections::Store, String, Option<String>) -> io::Result<()>,
     check_update_fn: fn() -> UpdateResult,
+    read_note_fn: fn() -> Option<String>,
 ) -> io::Result<()> {
     let cli = Cli::parse();
-    dispatch(cli, run_frame_fn, check_update_fn)
+    dispatch(cli, run_frame_fn, check_update_fn, read_note_fn)
 }
 
 /// Dispatch on an already-parsed CLI. Separated from `run_main` so tests can
@@ -115,10 +120,19 @@ fn run_main(
 /// Enter then means (#35). The frame is handed the whole `Config` as a
 /// [`Store`]: a manage delete must persist through the one implementation
 /// `connections.rs` owns, so the seam carries the live set, not a snapshot.
+///
+/// `read_note_fn` is the cache-only update-note reader (#39). Each frame
+/// path calls it exactly once, before the frame opens, and hands the result
+/// down as data — so the paint path reads a local file at most and never
+/// touches the network. The network-touching `check_update_fn` is reached
+/// only on the `--check-update` path, never on a frame path; the two readers
+/// are separate injected functions precisely so a test can prove that
+/// separation (see `check_update_must_not_run`).
 fn dispatch(
     cli: Cli,
-    run_frame_fn: fn(Emit, &mut dyn connections::Store, String) -> io::Result<()>,
+    run_frame_fn: fn(Emit, &mut dyn connections::Store, String, Option<String>) -> io::Result<()>,
     check_update_fn: fn() -> UpdateResult,
+    read_note_fn: fn() -> Option<String>,
 ) -> io::Result<()> {
     // Handle completions command
     if let Some(Commands::Completions { shell }) = cli.command {
@@ -146,16 +160,19 @@ fn dispatch(
 
     // `sshm pick` — the insert emit. Runs before the update checker so a
     // captured stdout is never polluted by it, and returns straight from
-    // the frame.
+    // the frame. The note is read from cache here, once, before the frame
+    // opens (#39).
     if let Some(Commands::Pick { query }) = cli.command {
         let mut config = config::Config::load();
-        return run_frame_fn(Emit::Insert, &mut config, query.unwrap_or_default());
+        let note = read_note_fn();
+        return run_frame_fn(Emit::Insert, &mut config, query.unwrap_or_default(), note);
     }
 
     // `sshm manage` — the edit emit, in the manage frame.
     if let Some(Commands::Manage) = cli.command {
         let mut config = config::Config::load();
-        return run_frame_fn(Emit::Edit, &mut config, String::new());
+        let note = read_note_fn();
+        return run_frame_fn(Emit::Edit, &mut config, String::new(), note);
     }
 
     // Handle check-update flag or command
@@ -191,9 +208,11 @@ fn dispatch(
     }
 
     // Bare `sshm` — the execute emit. There is no fullscreen to fall
-    // through to: the frame is the whole surface now.
+    // through to: the frame is the whole surface now. The note is read
+    // from cache here, once, before the frame opens (#39).
     let mut config = config::Config::load();
-    run_frame_fn(Emit::Execute, &mut config, String::new())
+    let note = read_note_fn();
+    run_frame_fn(Emit::Execute, &mut config, String::new(), note)
 }
 
 /// The first-run import offer's predicate (#38): what an import from
@@ -235,6 +254,7 @@ fn run_frame_command(
     emit: Emit,
     store: &mut dyn connections::Store,
     query: String,
+    note: Option<String>,
 ) -> io::Result<()> {
     let mut frame_out = open_frame_stream()?;
 
@@ -261,9 +281,9 @@ fn run_frame_command(
                 phase: Phase::ConfirmImport { count, path },
                 ..Default::default()
             };
-            inline::run_inline_with_state(&mut frame_out, store, initial, emit.frame_mode())?
+            inline::run_inline_with_state(&mut frame_out, store, initial, emit.frame_mode(), note)?
         }
-        None => inline::run_inline(&mut frame_out, store, query, emit.frame_mode())?,
+        None => inline::run_inline(&mut frame_out, store, query, emit.frame_mode(), note)?,
     };
 
     match emit.resolve(outcome) {
@@ -668,6 +688,7 @@ pub mod tests {
     struct FrameCall {
         emit: Emit,
         query: String,
+        note: Option<String>,
     }
 
     thread_local! {
@@ -679,8 +700,9 @@ pub mod tests {
         emit: Emit,
         _store: &mut dyn connections::Store,
         query: String,
+        note: Option<String>,
     ) -> io::Result<()> {
-        FRAME_CALLS.with(|c| c.borrow_mut().push(FrameCall { emit, query }));
+        FRAME_CALLS.with(|c| c.borrow_mut().push(FrameCall { emit, query, note }));
         Ok(())
     }
 
@@ -692,6 +714,20 @@ pub mod tests {
         panic!("the frame paths must never reach the update checker");
     }
 
+    /// The cache-only note reader most frame tests use: no cached version,
+    /// so no note. Distinct from `check_update_must_not_run` — this one is
+    /// *expected* to run on the frame path (it reads a file, not the
+    /// network), it just has nothing to report here.
+    fn no_cached_note() -> Option<String> {
+        None
+    }
+
+    /// A cache reader that reports a version, for the test that proves the
+    /// frame path carries the note through to the frame.
+    fn cached_note_present() -> Option<String> {
+        Some("0.2.0".to_string())
+    }
+
     // ── the three commands, one frame, three emits (#35) ────────────────
 
     #[test]
@@ -700,12 +736,13 @@ pub mod tests {
             command: None,
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
         assert_eq!(
             take_calls(),
             vec![FrameCall {
                 emit: Emit::Execute,
                 query: String::new(),
+                note: None,
             }]
         );
     }
@@ -718,12 +755,13 @@ pub mod tests {
             }),
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
         assert_eq!(
             take_calls(),
             vec![FrameCall {
                 emit: Emit::Insert,
                 query: "web".to_string(),
+                note: None,
             }]
         );
     }
@@ -734,12 +772,13 @@ pub mod tests {
             command: Some(Commands::Manage),
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
         assert_eq!(
             take_calls(),
             vec![FrameCall {
                 emit: Emit::Edit,
                 query: String::new(),
+                note: None,
             }]
         );
     }
@@ -750,12 +789,95 @@ pub mod tests {
             command: Some(Commands::Pick { query: None }),
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
         assert_eq!(
             take_calls(),
             vec![FrameCall {
                 emit: Emit::Insert,
                 query: String::new(),
+                note: None,
+            }]
+        );
+    }
+
+    // ── the cached update note reaches the frame, never the network (#39) ─
+
+    /// The frame path reads the note from the injected cache reader and
+    /// carries it to the frame. The network-touching checker is
+    /// `check_update_must_not_run`, which panics — so the test passing at
+    /// all *is* the proof that painting the frame never touches the
+    /// network. This is the `check_update_must_not_run` idiom extended to
+    /// the note: a cache-only reader is used, the network checker is not.
+    #[test]
+    fn the_frame_path_carries_the_cached_note_and_never_touches_the_network() {
+        let cli = Cli {
+            command: None,
+            check_update: false,
+        };
+        dispatch(
+            cli,
+            record_frame,
+            check_update_must_not_run,
+            cached_note_present,
+        )
+        .unwrap();
+        assert_eq!(
+            take_calls(),
+            vec![FrameCall {
+                emit: Emit::Execute,
+                query: String::new(),
+                note: Some("0.2.0".to_string()),
+            }],
+            "the cached note must reach the frame on the bare-sshm path"
+        );
+    }
+
+    /// The same on the pick path: the note rides the insert emit too.
+    #[test]
+    fn the_pick_frame_path_carries_the_cached_note() {
+        let cli = Cli {
+            command: Some(Commands::Pick {
+                query: Some("web".to_string()),
+            }),
+            check_update: false,
+        };
+        dispatch(
+            cli,
+            record_frame,
+            check_update_must_not_run,
+            cached_note_present,
+        )
+        .unwrap();
+        assert_eq!(
+            take_calls(),
+            vec![FrameCall {
+                emit: Emit::Insert,
+                query: "web".to_string(),
+                note: Some("0.2.0".to_string()),
+            }]
+        );
+    }
+
+    /// The same on the manage path.
+    #[test]
+    fn the_manage_frame_path_carries_the_cached_note() {
+        let cli = Cli {
+            command: Some(Commands::Manage),
+            check_update: false,
+        };
+        dispatch(
+            cli,
+            record_frame,
+            check_update_must_not_run,
+            cached_note_present,
+        )
+        .unwrap();
+        assert_eq!(
+            take_calls(),
+            vec![FrameCall {
+                emit: Emit::Edit,
+                query: String::new(),
+                note: Some("0.2.0".to_string()),
             }]
         );
     }
@@ -768,7 +890,7 @@ pub mod tests {
             }),
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
         assert!(take_calls().is_empty());
     }
 
@@ -782,7 +904,7 @@ pub mod tests {
             }),
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run).unwrap();
+        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
         assert!(take_calls().is_empty());
     }
 
@@ -795,7 +917,7 @@ pub mod tests {
             command: None,
             check_update: true,
         };
-        dispatch(cli, record_frame, no_update).unwrap();
+        dispatch(cli, record_frame, no_update, no_cached_note).unwrap();
         assert!(take_calls().is_empty(), "-c checks, it does not frame");
     }
 

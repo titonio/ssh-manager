@@ -227,6 +227,35 @@ pub fn read_note() -> Result<Option<UpdateInfo>, String> {
     note_from(check_for_update())
 }
 
+/// The version a previous run cached, with **no network**.
+///
+/// This is the reader the inline frame's paint path uses (#39). It opens
+/// the cache file and reports the `new_version` a *previous* run left
+/// there — or `None` when there is no cache, the cache holds no update,
+/// or the file cannot be read. It never calls the update checker, never
+/// opens a socket, and never blocks first paint: the whole point of the
+/// note is that it is already known before the frame draws.
+///
+/// A source checkout returns `None` without reading, mirroring
+/// [`read_note`]: running the tool from a checkout should not surface a
+/// note, and the cache a checkout's own test runs leave behind is not the
+/// user's update state.
+///
+/// The cache's age is deliberately not consulted. `CACHE_DURATION_SECS`
+/// governs when to *re-check*, not whether the last known answer is
+/// worth showing; a note that says "run `sshm update`" stays true whether
+/// the cache is an hour or a week old.
+pub fn cached_update() -> Option<String> {
+    if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
+        return None;
+    }
+
+    read_cache()
+        .ok()
+        .flatten()
+        .and_then(|cache| cache.new_version)
+}
+
 /// Turn the outcome of an update check into the note a surface shows.
 pub fn note_from(result: UpdateResult) -> Result<Option<UpdateInfo>, String> {
     match result {
@@ -1833,5 +1862,83 @@ mod tests {
     #[test]
     fn no_update_means_no_note() {
         assert!(matches!(note_from(UpdateResult::NoUpdate), Ok(None)));
+    }
+
+    // The cache-only reader the frame's paint path uses (#39). These pin
+    // that it reads the cached version and nothing else — no network, no
+    // freshness gate, no panic on a missing or corrupt file.
+
+    #[test]
+    #[serial]
+    fn cached_update_reports_the_version_a_previous_run_left() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        let cache = CacheData {
+            last_check: 12345,
+            new_version: Some("0.2.0".to_string()),
+        };
+        fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        assert_eq!(cached_update().as_deref(), Some("0.2.0"));
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn cached_update_is_none_when_the_cache_holds_no_new_version() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        let cache = CacheData {
+            last_check: 12345,
+            new_version: None,
+        };
+        fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        assert_eq!(cached_update(), None);
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn cached_update_is_none_when_the_cache_is_unreadable() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        fs::write(&cache_path, "not json at all").unwrap();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        // A corrupt cache is a silent no-note, never a panic and never a
+        // network call: the paint path must survive it.
+        assert_eq!(cached_update(), None);
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn cached_update_is_none_when_there_is_no_cache_at_all() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        assert_eq!(cached_update(), None);
+    }
+
+    #[test]
+    fn cached_update_stays_quiet_inside_a_source_checkout() {
+        // A checkout must never surface a note, even if a cache file with a
+        // version happens to exist on the machine running the test.
+        let previous = std::env::var_os("CARGO_MANIFEST_DIR");
+        std::env::set_var("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"));
+
+        assert_eq!(cached_update(), None);
+
+        match previous {
+            Some(value) => std::env::set_var("CARGO_MANIFEST_DIR", value),
+            None => std::env::remove_var("CARGO_MANIFEST_DIR"),
+        }
     }
 }

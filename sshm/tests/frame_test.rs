@@ -13,8 +13,9 @@ use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 use sshm::config::Connection;
 use sshm::frame::{
-    build_frame, build_row_text, compute_matches, display_import_path, visible_window, Canvas,
-    FrameMode, FrameState, FRAME_LINES, VISIBLE_ROWS,
+    build_frame, build_frame_with_flow, build_frame_with_note, build_row_text, compute_matches,
+    display_import_path, visible_window, Canvas, FrameFlow, FrameMode, FrameState, FRAME_LINES,
+    VISIBLE_ROWS,
 };
 use sshm::theme::{ColorSupport, Theme};
 
@@ -656,6 +657,41 @@ fn a_narrow_pick_canvas_drops_the_manage_discovery_line_first() {
     assert!(
         tight.contains("Esc cancel") && tight.contains("↑↓ navigate"),
         "cancel and movement out-rank discovery and must survive: {tight:?}"
+    );
+}
+
+/// The ordering lock for #39's second criterion.
+///
+/// `fit_hints_with` drops whole segments from the *end*, so the only thing
+/// that decides what a narrow terminal loses is the order the rail lists
+/// them in. This pins that order exactly: the manage-discovery line is the
+/// LAST segment of the pick rail, which makes it the FIRST thing dropped.
+/// At a width that fits precisely three segments the rail is the three
+/// movement/cancel/select hints, in order, with the discovery line gone —
+/// and at full width the discovery line is present and trailing. If anyone
+/// reorders the rail so discovery sits ahead of a movement hint, this
+/// fails.
+#[test]
+fn the_pick_rail_lists_the_manage_discovery_line_last_so_it_is_dropped_first() {
+    // Full width: all four segments, discovery trailing.
+    let roomy = hint_rail(&build_frame(&conns(), "", 0, FrameMode::Pick, canvas(80)));
+    assert_eq!(
+        roomy, "│   Esc cancel · Enter select · ↑↓ navigate · sshm manage to add or edit",
+        "at 80 columns the full pick rail shows, discovery last"
+    );
+
+    // A width that fits exactly three segments (budget = 80→75, 44→39):
+    // the three that survive are the cancel/select/navigate hints, in
+    // order, and the discovery line is gone. The discovery line is the
+    // only one missing, proving it sits last and is dropped first.
+    let three = hint_rail(&build_frame(&conns(), "", 0, FrameMode::Pick, canvas(44)));
+    assert_eq!(
+        three, "│   Esc cancel · Enter select · ↑↓ navigate",
+        "the discovery line is the first segment a narrow rail loses"
+    );
+    assert!(
+        !three.contains("sshm manage"),
+        "the discovery line must not survive where a movement hint would have to be cut: {three:?}"
     );
 }
 
@@ -1476,5 +1512,205 @@ fn a_path_the_home_does_not_explain_is_shown_raw() {
     assert_eq!(
         display_import_path("/home/anyone/.ssh/config", None),
         "/home/anyone/.ssh/config"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The cached update note (#39)
+//
+// The note is a line the Frame value emits *above* the header, read once at
+// the edge from a previous run's cache and handed in as data. `build_frame`
+// never reads a file for it — the note is a parameter, so the paint path
+// performs no I/O. These tests assert on the Frame value only.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The note the cache left renders as the first line of the frame, above the
+/// `◆` header, naming the version and the command that installs it.
+#[test]
+fn the_cached_update_note_renders_above_the_header() {
+    let frame = build_frame_with_note(
+        &conns(),
+        "",
+        0,
+        FrameMode::Pick,
+        wide(),
+        &FrameFlow::default(),
+        Some("0.1.11"),
+    );
+    let lines = frame_text(&frame);
+
+    assert!(
+        lines[0].contains("update available"),
+        "the note must say an update is available: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("v0.1.11"),
+        "the note must name the version: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("sshm update"),
+        "the note must name the command that installs it: {lines:?}"
+    );
+    // The note sits above the header, so the header is pushed to line 1.
+    assert!(
+        lines[1].contains("Select a Connection"),
+        "the header follows the note: {lines:?}"
+    );
+}
+
+/// The note carries the `◆` glyph so it reads as a sshm line even with the
+/// colour turned off — the glyph, not the hue, is what marks it as ours.
+#[test]
+fn the_update_note_carries_its_glyph_so_it_reads_without_colour() {
+    let frame = build_frame_with_note(
+        &conns(),
+        "",
+        0,
+        FrameMode::Pick,
+        wide(),
+        &FrameFlow::default(),
+        Some("0.1.11"),
+    );
+    let note = &frame.lines()[0];
+    let text = line_text(note);
+
+    assert!(
+        text.starts_with('◆'),
+        "the note opens with the ◆ glyph so it reads without colour: {text:?}"
+    );
+}
+
+/// The note is dim and its colour comes from a `theme.rs` role, never a
+/// literal. The glyph wears `accent`; the sentence wears `fg_muted` + `DIM`.
+/// No span on the note paints a background.
+#[test]
+fn the_update_note_is_dim_and_uses_a_theme_role_never_a_literal() {
+    let frame = build_frame_with_note(
+        &conns(),
+        "",
+        0,
+        FrameMode::Pick,
+        wide(),
+        &FrameFlow::default(),
+        Some("0.1.11"),
+    );
+    let spans = &frame.lines()[0].spans;
+
+    // The glyph span carries the accent role.
+    let glyph = &spans[0];
+    assert_eq!(glyph.content, "◆");
+    assert_eq!(
+        glyph.style.fg,
+        Some(t().accent),
+        "the glyph must use the accent role"
+    );
+
+    // The sentence span is muted *and* dim, not merely a dark colour.
+    let body = spans
+        .iter()
+        .find(|s| s.content.contains("update available"))
+        .expect("the note has a body span");
+    assert_eq!(
+        body.style.fg,
+        Some(t().fg_muted),
+        "the body must use the fg_muted role"
+    );
+    assert!(
+        body.style.add_modifier.contains(Modifier::DIM),
+        "the body must be actually DIM so it recedes: {:?}",
+        body.style
+    );
+
+    // Nothing on the note paints a background — the frame stays transparent.
+    for span in spans {
+        assert_eq!(
+            span.style.bg, None,
+            "the frame never paints a background: {:?}",
+            span.style
+        );
+    }
+}
+
+/// No cached version means no note line at all: the frame opens on its header
+/// exactly as it did before the feature existed.
+#[test]
+fn no_cached_update_leaves_no_note_line() {
+    let frame = build_frame_with_note(
+        &conns(),
+        "",
+        0,
+        FrameMode::Pick,
+        wide(),
+        &FrameFlow::default(),
+        None,
+    );
+    let lines = frame_text(&frame);
+
+    assert!(
+        !lines.iter().any(|l| l.contains("update available")),
+        "with no cached version there is no note to show: {lines:?}"
+    );
+    assert!(
+        lines[0].contains("Select a Connection"),
+        "the header is the first line when there is no note: {lines:?}"
+    );
+}
+
+/// The note displaces one list row rather than adding a line, so the frame's
+/// total height is the same whether or not the note is present. This is the
+/// invariant the inline viewport depends on: ratatui 0.30 cannot resize a
+/// live inline frame, so the height must be decided once, before it opens.
+#[test]
+fn the_update_note_displaces_a_row_so_the_frame_height_is_constant() {
+    let with_note = build_frame_with_note(
+        &conns(),
+        "",
+        0,
+        FrameMode::Pick,
+        wide(),
+        &FrameFlow::default(),
+        Some("0.1.11"),
+    );
+    let without_note = build_frame_with_flow(
+        &conns(),
+        "",
+        0,
+        FrameMode::Pick,
+        wide(),
+        &FrameFlow::default(),
+    );
+
+    assert_eq!(
+        with_note.lines().len(),
+        without_note.lines().len(),
+        "the note must not change the frame's height"
+    );
+    assert_eq!(
+        with_note.lines().len(),
+        FRAME_LINES,
+        "a full-height frame is FRAME_LINES tall with or without the note"
+    );
+}
+
+/// The note reads under `NO_COLOR` / monochrome: the accent collapses to
+/// `Reset` but the `◆` glyph and the words survive, so the message is not
+/// carried by colour alone.
+#[test]
+fn the_update_note_survives_monochrome() {
+    let mono = Canvas::new(120, 24, ColorSupport::Monochrome);
+    let frame = build_frame_with_note(
+        &conns(),
+        "",
+        0,
+        FrameMode::Pick,
+        mono,
+        &FrameFlow::default(),
+        Some("0.1.11"),
+    );
+    let text = line_text(&frame.lines()[0]);
+
+    assert!(
+        text.starts_with('◆') && text.contains("update available") && text.contains("sshm update"),
+        "the note's meaning must not depend on colour: {text:?}"
     );
 }

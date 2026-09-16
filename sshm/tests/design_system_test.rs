@@ -28,7 +28,9 @@
 //! gated in `frame_test.rs`, at the seam that produces them.
 
 use ratatui::style::Color;
-use sshm::frame::{build_frame, build_frame_with_flow, Canvas, FrameFlow, FrameMode};
+use sshm::frame::{
+    build_frame, build_frame_with_flow, build_frame_with_note, Canvas, FrameFlow, FrameMode,
+};
 use sshm::theme::{ColorSupport, Theme};
 
 fn conns() -> Vec<sshm::config::Connection> {
@@ -784,6 +786,34 @@ fn dump_frames_for_review() {
                     add: None,
                     edit: None,
                 },
+            ),
+        ),
+        // The #39 cached update note: a dim `◆` line above the header, read
+        // from a previous run's cache. Dumped at truecolour and monochrome
+        // so the human read confirms the note recedes behind the frame it
+        // sits above, and that the `◆` glyph carries it when colour is off.
+        (
+            "frame-pick-update-note-80",
+            build_frame_with_note(
+                &c,
+                "",
+                0,
+                FrameMode::Pick,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow::default(),
+                Some("0.1.11"),
+            ),
+        ),
+        (
+            "frame-pick-update-note-80-mono",
+            build_frame_with_note(
+                &c,
+                "",
+                0,
+                FrameMode::Pick,
+                Canvas::new(80, 24, mono),
+                &FrameFlow::default(),
+                Some("0.1.11"),
             ),
         ),
     ] {

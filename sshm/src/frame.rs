@@ -640,6 +640,27 @@ fn plain_note_line(text: &str, t: &Theme) -> Line<'static> {
     ])
 }
 
+/// The dim update note a previous run's cache leaves above the frame (#39).
+///
+/// `◆` in the `accent` role so the line reads as ours even with the colour
+/// off, the sentence in `fg_muted` + `DIM` so it recedes behind the frame
+/// it sits above. The version and the command are the two facts worth
+/// scanning for and they ride in the sentence — no second colour, no
+/// literal hue. The note carries no rail: it is *above* the framed body,
+/// not inside it, so it reads as a whisper over the frame rather than as
+/// one of its rows.
+fn update_note_line(version: &str, t: &Theme) -> Line<'static> {
+    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+
+    Line::from(vec![
+        Span::styled("◆", Style::default().fg(t.accent)),
+        Span::styled(
+            format!(" update available: v{version} — run sshm update"),
+            dim,
+        ),
+    ])
+}
+
 /// The note an abandoned add sequence leaves.
 ///
 /// Worded to answer the one question the user has after backing out of a
@@ -1073,6 +1094,40 @@ pub fn build_frame_with_flow(
     canvas: Canvas,
     flow: &FrameFlow,
 ) -> Frame {
+    build_frame_with_note(connections, query, selection, mode, canvas, flow, None)
+}
+
+/// [`build_frame_with_flow`] with the cached update note layered on (#39).
+///
+/// The note is a line the frame emits *above* the header — `◆ update
+/// available: v… — run sshm update` — read once at the edge from a
+/// previous run's cache and handed in here as data. The frame never opens
+/// the cache file itself: `note` is a plain `Option<&str>`, so the code
+/// path that paints the frame performs no I/O and cannot block on a
+/// network round-trip before first paint.
+///
+/// **Design decision (option a).** The note is part of the `Frame` value,
+/// not a line the command runner prints above it. The inline viewport is
+/// opened at a fixed height and ratatui 0.30 cannot resize it while it is
+/// live, so the frame's height must be decided exactly once, before the
+/// viewport opens. Folding the note into the frame lets that decision happen
+/// here, in one place: the note is drawn first and *displaces one list row*
+/// rather than adding a line, so the frame's total height is identical
+/// whether or not a note is present. A note printed by the runner above the
+/// frame (option b) would sit outside the height the driver counts, and the
+/// settle-collapse would either leave it stranded or have to learn about
+/// it — a second place that has to know the note exists. Keeping it in the
+/// frame means the note cannot appear, vanish, or change while the frame is
+/// active: it is read once at the edge and frozen into the value.
+pub fn build_frame_with_note(
+    connections: &[Connection],
+    query: &str,
+    selection: usize,
+    mode: FrameMode,
+    canvas: Canvas,
+    flow: &FrameFlow,
+    note: Option<&str>,
+) -> Frame {
     let t = Theme::clack().resolve(canvas.support);
     let matcher = SkimMatcherV2::default();
     let matches = compute_matches(connections, &matcher, query);
@@ -1095,9 +1150,20 @@ pub fn build_frame_with_flow(
 
     let matched: Vec<usize> = matches.iter().map(|(conn_idx, _, _)| *conn_idx).collect();
     let selection = selection.min(matched.len().saturating_sub(1));
-    let visible = canvas.visible_rows().unwrap_or(0);
 
-    let mut lines = vec![header_line(mode, flow, &t)];
+    // The update note comes out of the row budget, not on top of it, so the
+    // frame's height is the same with or without it — the invariant the
+    // inline viewport and the settle-collapse both count on. See the
+    // decision note on this function.
+    let note_line = note.map(|v| update_note_line(v, &t));
+    let note_rows = usize::from(note_line.is_some());
+    let visible = canvas.visible_rows().unwrap_or(0).saturating_sub(note_rows);
+
+    let mut lines = Vec::new();
+    if let Some(line) = note_line {
+        lines.push(line);
+    }
+    lines.push(header_line(mode, flow, &t));
 
     // The flow lines come out of the row budget, not on top of it.
     let above = flow_lines(flow, visible, &t);

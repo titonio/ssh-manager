@@ -82,7 +82,10 @@ fn main() -> std::io::Result<()> {
     let mut store = Ephemeral::new(fixture());
 
     let mut out = std::io::stdout();
-    let outcome = run_inline(&mut out, &mut store, query, mode)?;
+    // No cached update note in the demo: the note is read from the real
+    // cache by the command at the edge, not by the driver, so the demo
+    // passes `None` and shows the frame as it renders with nothing cached.
+    let outcome = run_inline(&mut out, &mut store, query, mode, None)?;
 
     eprintln!("[demo] {outcome:?}");
     Ok(())
