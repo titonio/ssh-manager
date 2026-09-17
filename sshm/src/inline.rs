@@ -212,7 +212,7 @@ pub fn settle_trace(settle: &Settle, canvas: Canvas) -> Vec<Line<'static>> {
     // cancel icon is state ("this step was abandoned"), and `border` is
     // documented as structural chrome that carries none.
     let icon = |role: ratatui::style::Color| Span::styled("◆", Style::default().fg(role));
-    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let dim = Style::default().fg(t.fg_muted);
 
     match settle {
         Settle::Picked(conn) => vec![connection_trace("picked", &TraceSubject::from(conn), &t)],
@@ -267,7 +267,7 @@ fn push_reason(line: &mut Line<'static>, message: &str, budget: usize, t: &Theme
     // row, and a wrapped row strands half a message on the glass.
     let reason = fit_reason(message, line.width(), budget);
     if !reason.is_empty() {
-        let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+        let dim = Style::default().fg(t.fg_muted);
         line.spans.push(Span::styled(format!("  — {reason}"), dim));
     }
 }
@@ -349,8 +349,8 @@ fn none_if_blank(value: &str) -> Option<&str> {
 /// scrollback that claims something the command never did.
 fn connection_trace(verb: &str, subject: &TraceSubject<'_>, t: &Theme) -> Line<'static> {
     let icon = |role: ratatui::style::Color| Span::styled("◆", Style::default().fg(role));
-    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(t.fg_muted);
+    let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
 
     let mut spans = vec![icon(t.accent), Span::raw(format!(" {verb}  "))];
 

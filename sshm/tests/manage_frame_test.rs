@@ -258,9 +258,16 @@ fn the_delete_leaves_a_dim_note_naming_the_connection() {
         .iter()
         .find(|s| s.content.contains('◇'))
         .expect("the ◇ glyph span");
+    assert_eq!(
+        glyph.style.fg,
+        Some(sshm::theme::Theme::clack().fg_muted),
+        "the note is a *muted* note: {:?}",
+        glyph.style
+    );
     assert!(
-        glyph.style.add_modifier.contains(Modifier::DIM),
-        "the note is a *dim* note: {:?}",
+        !glyph.style.add_modifier.contains(Modifier::DIM),
+        "the note must not carry DIM — Windows Terminal ignores SGR 2 \
+         (microsoft/terminal#6703, issue #42): {:?}",
         glyph.style
     );
 }

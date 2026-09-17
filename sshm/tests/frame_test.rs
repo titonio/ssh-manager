@@ -146,23 +146,33 @@ fn folder_and_host_meta_recede_while_the_alias_is_bold() {
     );
 }
 
-/// "Dim meta" has to mean the `DIM` attribute, not merely a dark colour.
+/// The row meta recedes by **token**, not by attribute.
 ///
-/// The ticket asks for dim meta and the hint rail already spells dim as
-/// `Modifier::DIM`. A muted-but-not-dim span emits `90;49` with no `2`, and on
-/// a terminal whose bright-black is bright it does not recede at all — so the
-/// same word was being rendered two ways in one frame.
+/// This test used to assert the exact opposite — that "dim meta" had to mean the
+/// `DIM` attribute. Two facts killed that (issue #42): Windows Terminal ignores
+/// SGR 2 entirely (microsoft/terminal#6703), so the attribute never rendered
+/// where it mattered; and `fg_muted` as `DarkGray` was the *same colour* as the
+/// body text on the reporter's palette, so neither spelling receded. The
+/// recession now lives in `fg_muted` itself — `Indexed(245)` at 4.67:1 against
+/// body `Gray` at 7.57:1 — and `DIM` is banned on informational text.
 #[test]
-fn the_row_meta_is_actually_dim_not_just_muted() {
+fn the_row_meta_recedes_by_token_not_by_attribute() {
     let frame = build_frame(&conns(), "", 0, FrameMode::Pick, canvas(80));
     let spans = &frame.lines()[1].spans;
 
     for text in ["[prod]", "(deploy@10.0.0.4:22)"] {
         let span = span_with(spans, text);
+        assert_eq!(
+            span.style.fg,
+            Some(t().fg_muted),
+            "meta {text:?} must wear the fg_muted role: {:?}",
+            span.style
+        );
         assert!(
-            span.style.add_modifier.contains(Modifier::DIM),
-            "meta {text:?} is muted but not DIM — it will not recede on a terminal \
-             with a bright bright-black: {:?}",
+            !span.style.add_modifier.contains(Modifier::DIM),
+            "meta {text:?} carries DIM, which Windows Terminal ignores \
+             (microsoft/terminal#6703) — the recession must come from the token: \
+             {:?}",
             span.style
         );
     }
@@ -509,17 +519,22 @@ fn pick_frame_hints_lead_with_the_escape_hatch_and_point_at_manage() {
     );
 }
 
-/// The hint rail is a dim line: it must never out-shout the rows above it.
+/// The hint rail is a muted line: it must never out-shout the rows above it.
+///
+/// Muted by **token**, not by `DIM` — the attribute is banned on informational
+/// text because Windows Terminal ignores SGR 2 entirely
+/// (microsoft/terminal#6703). See
+/// `the_row_meta_recedes_by_token_not_by_attribute` for the full chain (#42).
 #[test]
-fn the_hint_rail_is_dim() {
+fn the_hint_rail_is_muted_not_dim() {
     let frame = build_frame(&conns(), "", 0, FrameMode::Manage, wide());
     let rail = hint_spans(&frame);
 
     assert!(
         rail.iter()
             .all(|s| s.style.fg == Some(t().fg_muted)
-                && s.style.add_modifier.contains(Modifier::DIM)),
-        "every hint-rail span should be muted and dim, got {:?}",
+                && !s.style.add_modifier.contains(Modifier::DIM)),
+        "every hint-rail span should wear fg_muted with no DIM, got {:?}",
         rail.iter()
             .map(|s| (s.content.as_ref(), s.style))
             .collect::<Vec<_>>()
@@ -767,9 +782,12 @@ fn the_monochrome_frame_keeps_every_glyph_and_modifier_that_carries_state() {
         mono.contains("\x1b[1;"),
         "bold (the alias, the cursor) vanished under NO_COLOR: {mono:?}"
     );
+    // The opposite of the old assertion: DIM is banned on informational text
+    // because Windows Terminal ignores SGR 2 (microsoft/terminal#6703), so no
+    // frame may emit it — monochrome included.
     assert!(
-        mono.contains("\x1b[2;") || mono.contains(";2;"),
-        "DIM (the meta, the hint rail) vanished under NO_COLOR: {mono:?}"
+        !mono.contains("\x1b[2;") && !mono.contains(";2;"),
+        "a DIM survived the ban under NO_COLOR: {mono:?}"
     );
 }
 
@@ -1066,15 +1084,26 @@ fn a_frame_serializes_to_ansi_carrying_its_palette() {
     );
     assert!(
         params.contains(&"90".into()),
-        "no bright black (90) for the muted meta: {params:?}"
+        "no bright black (90) for the │ rail: {params:?}"
+    );
+    assert!(
+        params.contains(&"37".into()),
+        "no ANSI 7 (37) for the body tier — `fg` must be wired, not inherited: \
+         {params:?}"
+    );
+    assert!(
+        ansi.contains("38;5;245"),
+        "no indexed neutral grey (38;5;245) for the muted meta: {params:?}"
     );
     assert!(
         params.contains(&"1".into()),
         "no bold (1) for the alias: {params:?}"
     );
+    // No DIM anywhere. Windows Terminal ignores SGR 2 (microsoft/terminal#6703),
+    // so emitting it claims a recession the target terminal cannot deliver.
     assert!(
-        params.contains(&"2".into()),
-        "no dim (2) for the hint rail: {params:?}"
+        !ansi.contains("\x1b[2;") && !ansi.contains(";2;"),
+        "a DIM survived the ban: {params:?}"
     );
     assert!(
         params.contains(&"49".into()),
@@ -1580,11 +1609,11 @@ fn the_update_note_carries_its_glyph_so_it_reads_without_colour() {
     );
 }
 
-/// The note is dim and its colour comes from a `theme.rs` role, never a
-/// literal. The glyph wears `accent`; the sentence wears `fg_muted` + `DIM`.
+/// The note is muted and its colour comes from a `theme.rs` role, never a
+/// literal. The glyph wears `accent`; the sentence wears `fg_muted`.
 /// No span on the note paints a background.
 #[test]
-fn the_update_note_is_dim_and_uses_a_theme_role_never_a_literal() {
+fn the_update_note_is_muted_and_uses_a_theme_role_never_a_literal() {
     let frame = build_frame_with_note(
         &conns(),
         "",
@@ -1605,7 +1634,8 @@ fn the_update_note_is_dim_and_uses_a_theme_role_never_a_literal() {
         "the glyph must use the accent role"
     );
 
-    // The sentence span is muted *and* dim, not merely a dark colour.
+    // The sentence span recedes by token. No DIM — the attribute is banned
+    // because Windows Terminal ignores SGR 2 (microsoft/terminal#6703, issue #42).
     let body = spans
         .iter()
         .find(|s| s.content.contains("update available"))
@@ -1616,8 +1646,8 @@ fn the_update_note_is_dim_and_uses_a_theme_role_never_a_literal() {
         "the body must use the fg_muted role"
     );
     assert!(
-        body.style.add_modifier.contains(Modifier::DIM),
-        "the body must be actually DIM so it recedes: {:?}",
+        !body.style.add_modifier.contains(Modifier::DIM),
+        "the body must not carry DIM — the recession comes from the token: {:?}",
         body.style
     );
 

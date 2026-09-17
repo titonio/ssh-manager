@@ -127,19 +127,32 @@ fn no_color_literals_outside_the_theme_module() {
     );
 }
 
-/// The Clack palette carries no fixed RGB.
+/// The Clack palette carries no fixed RGB, and its only indexed colour is a
+/// **neutral grey**.
 ///
 /// The transparent inline frame (#33) borrows the user's terminal background, so
 /// it cannot contrast-check a hue of its own against a surface it cannot see.
 /// Every role is therefore a **named ANSI colour** — which the terminal maps to
-/// *its* palette, at the user's chosen values — or `Reset`, meaning "whatever
-/// the terminal is already using". A `Rgb(..)` or `Indexed(..)` here would pin a
-/// colour the frame has no business choosing, and would break the degrade to 16
-/// colours by skipping the terminal's own mapping.
+/// *its* palette, at the user's chosen values — or `Reset`.
+///
+/// The exception is the muted tier, and issue #42 is why it exists. The
+/// 16-colour set contains no neutral tone between `brightBlack` and `white`, so
+/// a two-tier neutral hierarchy is not expressible in named ANSI *at all*: on
+/// the One Dark scheme that prompted the issue, `Reset` and `DarkGray` are the
+/// same colour (`#5C6370`, 2.67:1) and the muted tier never rendered.
+/// `Indexed(245)` is the one step that fills the gap.
+///
+/// The exception is deliberately narrow — the 24-step grey ramp (232..=255) and
+/// nothing else. An indexed *hue* would be a palette fork wearing a grey's
+/// clothes: it skips the terminal's own mapping for a colour the frame has no
+/// business choosing.
 #[test]
-fn the_clack_palette_is_named_ansi_only() {
+fn the_clack_palette_is_named_ansi_or_neutral_grey() {
     let t = Theme::clack();
-    let fixed = |c: Color| matches!(c, Color::Rgb(..) | Color::Indexed(..));
+    let neutral_grey = |c: Color| matches!(c, Color::Indexed(n) if (232..=255).contains(&n));
+    let fork = |c: Color| {
+        matches!(c, Color::Rgb(..)) || (matches!(c, Color::Indexed(_)) && !neutral_grey(c))
+    };
 
     for (role, color) in [
         ("fg", t.fg),
@@ -151,9 +164,9 @@ fn the_clack_palette_is_named_ansi_only() {
         ("warning", t.warning),
     ] {
         assert!(
-            !fixed(color),
-            "clack role `{role}` is a fixed colour ({color:?}) — the transparent \
-             frame's palette must be named ANSI colours or Reset only"
+            !fork(color),
+            "clack role `{role}` is {color:?} — the palette must be a named ANSI \
+             colour, Reset, or a neutral grey from the 232..=255 ramp"
         );
     }
 }
@@ -167,23 +180,33 @@ fn the_clack_palette_hues_are_cyan_and_green() {
     assert_eq!(t.accent, Color::Cyan, "the ◆ step icon is Clack cyan");
     assert_eq!(t.highlight, Color::Green, "a fuzzy hit is Clack green");
     assert_eq!(t.border, Color::DarkGray, "the │ rail is bright black");
-    assert_eq!(t.fg_muted, Color::DarkGray, "the dim meta is bright black");
+    assert_eq!(
+        t.fg_muted,
+        Color::Indexed(245),
+        "the muted meta is the grey the 16-colour set cannot supply (#42)"
+    );
 }
 
 /// A transparent frame has no background of its own, so the WCAG table that
 /// once governed the fullscreen Nord palette cannot govern it. What replaces
 /// that check is the structural claim: the frame owns no background, body
-/// text is the terminal's own foreground, and selection is a glyph rather
-/// than a fill.
+/// text is a *named* tone rather than an inherited one, and selection is a
+/// glyph rather than a fill.
+///
+/// Body text used to be `Reset`, justified as "the terminal's own foreground,
+/// readable by construction". Issue #42 disproved that: the common One Dark
+/// scheme sets `foreground` to `#5C6370` — Atom's *comment* colour — which is
+/// 2.67:1 against that scheme's own background. Inheriting the terminal's ink
+/// is not the same as being readable, so body text names ANSI 7 instead.
 #[test]
 fn the_clack_palette_leaves_the_surface_to_the_terminal() {
     let t = Theme::clack();
 
     assert_eq!(
         t.fg,
-        Color::Reset,
-        "body text is the terminal's own foreground, so it is readable on the \
-         terminal's own background by construction"
+        Color::Gray,
+        "body text names the palette's own text tone; `Reset` inherits an ink the \
+         frame cannot vouch for — see issue #42"
     );
     // There is no background role left to assert on: `bg`, `selection_bg`
     // and `selection_fg` were deleted with the fullscreen TUI (#35)
@@ -192,6 +215,199 @@ fn the_clack_palette_leaves_the_surface_to_the_terminal() {
     // is gated where it is produced, by
     // `no_span_in_any_frame_sets_a_background` and
     // `the_serialized_frame_asks_for_no_background_colour` in `frame_test.rs`.
+}
+
+/// A role that nothing reads governs nothing.
+///
+/// `fg` was declared, documented and asserted-on for the entire life of the
+/// token layer while **no render code read it**. Body text was drawn as
+/// `Style::default().add_modifier(BOLD)` with no `.fg()` at all, inheriting the
+/// terminal's ink — so when issue #42 arrived, retuning the `fg` token would
+/// have changed nothing on screen, and nothing in this suite would have said why.
+///
+/// This is the guard against that class of silent no-op: the token must be
+/// *consumed*, not just defined.
+#[test]
+fn the_fg_role_is_read_by_render_code() {
+    let crate_dir = env!("CARGO_MANIFEST_DIR");
+    let mut reads = 0usize;
+
+    for rel in ["src/frame.rs", "src/inline.rs"] {
+        let text = std::fs::read_to_string(format!("{crate_dir}/{rel}"))
+            .unwrap_or_else(|e| panic!("cannot read {rel}: {e}"));
+        for line in text.lines() {
+            if line.contains("fg_muted") {
+                continue;
+            }
+            if line.contains("t.fg") || line.contains("theme.fg") {
+                reads += 1;
+            }
+        }
+    }
+
+    assert!(
+        reads >= 10,
+        "`fg` is read in only {reads} place(s) — body text is inheriting the \
+         terminal's ink again, which is the issue #42 failure mode"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rule G — the reference contrast floor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// WCAG 2.x relative luminance.
+fn luminance(rgb: (u8, u8, u8)) -> f64 {
+    let chan = |v: u8| {
+        let v = v as f64 / 255.0;
+        if v <= 0.03928 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * chan(rgb.0) + 0.7152 * chan(rgb.1) + 0.0722 * chan(rgb.2)
+}
+
+fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
+    let (l1, l2) = (luminance(a), luminance(b));
+    let (hi, lo) = if l1 >= l2 { (l1, l2) } else { (l2, l1) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// The xterm 24-step grey ramp, indices 232..=255 → 8, 18, 28, … 238.
+fn grey_ramp(n: u8) -> (u8, u8, u8) {
+    let v = 8 + (n - 232) * 10;
+    (v, v, v)
+}
+
+/// Resolve a theme colour to RGB against one *concrete* terminal palette.
+///
+/// A named ANSI colour has no pixels of its own — the terminal maps it — so a
+/// contrast number is only meaningful against a stated palette. That is the
+/// point of this rule: it is a reference check, not a guarantee.
+fn resolve_against(color: Color, palette: &[(u8, u8, u8); 16]) -> (u8, u8, u8) {
+    match color {
+        Color::Indexed(n) if (232..=255).contains(&n) => grey_ramp(n),
+        Color::Indexed(n) => palette[(n as usize) % 16],
+        Color::Rgb(r, g, b) => (r, g, b),
+        named => {
+            let idx = match named {
+                Color::Black => 0,
+                Color::Red => 1,
+                Color::Green => 2,
+                Color::Yellow => 3,
+                Color::Blue => 4,
+                Color::Magenta => 5,
+                Color::Cyan => 6,
+                Color::Gray => 7,
+                Color::DarkGray => 8,
+                Color::LightRed => 9,
+                Color::LightGreen => 10,
+                Color::LightYellow => 11,
+                Color::LightBlue => 12,
+                Color::LightMagenta => 13,
+                Color::LightCyan => 14,
+                Color::White => 15,
+                _ => 7,
+            };
+            palette[idx]
+        }
+    }
+}
+
+/// The reporter's One Dark, verbatim from the `settings.json` in issue #42.
+const ONE_DARK: [(u8, u8, u8); 16] = [
+    (0x00, 0x00, 0x00), // black
+    (0xE0, 0x6C, 0x75), // red
+    (0x98, 0xC3, 0x79), // green
+    (0xD1, 0x9A, 0x66), // yellow
+    (0x61, 0xAF, 0xEF), // blue
+    (0xC6, 0x78, 0xDD), // purple
+    (0x56, 0xB6, 0xC2), // cyan
+    (0xAB, 0xB2, 0xBF), // white  ← One Dark's actual text colour
+    (0x5C, 0x63, 0x70), // brightBlack == the scheme's `foreground`
+    (0xE0, 0x6C, 0x75),
+    (0x98, 0xC3, 0x79),
+    (0xD1, 0x9A, 0x66),
+    (0x61, 0xAF, 0xEF),
+    (0xC6, 0x78, 0xDD),
+    (0x56, 0xB6, 0xC2),
+    (0xFF, 0xFF, 0xFF),
+];
+const ONE_DARK_BG: (u8, u8, u8) = (0x1E, 0x21, 0x27);
+
+/// Windows Terminal's stock Campbell, as a second, unrelated reference.
+const CAMPBELL: [(u8, u8, u8); 16] = [
+    (0x0C, 0x0C, 0x0C),
+    (0xC5, 0x0F, 0x1F),
+    (0x13, 0xA1, 0x0E),
+    (0xC1, 0x9C, 0x00),
+    (0x00, 0x37, 0xDA),
+    (0x88, 0x17, 0x98),
+    (0x3A, 0x96, 0xDD),
+    (0xCC, 0xCC, 0xCC),
+    (0x76, 0x76, 0x76),
+    (0xE7, 0x48, 0x56),
+    (0x16, 0xC6, 0x0C),
+    (0xF9, 0xF1, 0xA5),
+    (0x3B, 0x78, 0xFF),
+    (0xB4, 0x00, 0x9E),
+    (0x61, 0xD6, 0xD6),
+    (0xF2, 0xF2, 0xF2),
+];
+const CAMPBELL_BG: (u8, u8, u8) = (0x0C, 0x0C, 0x0C);
+
+/// Every informational role clears 4.5:1 against both reference palettes.
+///
+/// The fullscreen TUI's WCAG gates were deleted in #35 on the argument that a
+/// transparent frame owns no background and so no ratio can be checked. That
+/// argument is sound as far as it goes, but it was stated as *"a contrast table
+/// cannot exist"* — and issue #42 shipped under exactly that reasoning.
+///
+/// A guaranteed table is impossible. A **reference** table is not: pin two real
+/// palettes, resolve each role the way a terminal would, and fail with the
+/// computed number. It cannot promise anything about the reader's own palette.
+/// What it does promise is that nobody re-introduces a 2.67:1 body tier without
+/// a failing test in front of them.
+///
+/// `border` is deliberately excluded: the `│` rail is chrome that carries no
+/// information, and a faint gutter is the intended look.
+#[test]
+fn every_informational_role_clears_the_reference_contrast_floor() {
+    let t = Theme::clack();
+    let roles = [
+        ("fg", t.fg),
+        ("fg_muted", t.fg_muted),
+        ("accent", t.accent),
+        ("highlight", t.highlight),
+        ("warning", t.warning),
+    ];
+
+    for (name, palette, bg, label) in [
+        (
+            "One Dark",
+            &ONE_DARK,
+            ONE_DARK_BG,
+            "the issue #42 reporter's palette",
+        ),
+        (
+            "Campbell",
+            &CAMPBELL,
+            CAMPBELL_BG,
+            "Windows Terminal's stock palette",
+        ),
+    ] {
+        for (role, color) in roles {
+            let ratio = contrast(resolve_against(color, palette), bg);
+            assert!(
+                ratio >= 4.5,
+                "`{role}` on {name} ({label}) is {ratio:.2}:1, under the 4.5:1 \
+                 floor — resolved to {:?} against {bg:?}",
+                resolve_against(color, palette)
+            );
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -3,15 +3,21 @@
 Single source of truth: `sshm/src/theme.rs`. This is the map of the roles the UI
 draws with and what each resolves to.
 
-There is **no contrast table here, and there cannot be one.** The palette is
-Clack-only as of the #35 cut-over: every token is a named ANSI colour or
-`Reset`, and the frame owns no background — it borrows the user's terminal,
-which it cannot measure. A WCAG ratio needs two RGB triples; this palette has
-none, and the terminal maps every named colour to whatever the user's theme
-says. The table of "measured WCAG pairs" that used to open this file described
-the Nord palette that was deleted with the fullscreen TUI, and the `contrast`
-helper that computed those numbers is gone with it. What replaced the ratio
-check is the structural rules below, each gated by a test.
+There is **no *guaranteed* contrast table here — but there is a reference one.**
+The palette is Clack-only as of the #35 cut-over: every token is a named ANSI
+colour, `Reset`, or a neutral grey off the 256-colour ramp, and the frame owns
+no background — it borrows the user's terminal. A WCAG ratio needs two RGB
+triples and the frame only ever owns one of them, so no number written here can
+promise anything about the reader's own theme.
+
+What #35 concluded from that — that a contrast table *cannot exist* — is the
+reasoning that let issue #42 ship. A guarantee is impossible; a **reference
+check** is not. `every_informational_role_clears_the_reference_contrast_floor`
+pins two real palettes (the reporter's One Dark, and Windows Terminal's stock
+Campbell), resolves each role the way a terminal would, and fails with the
+computed ratio. It cannot promise the reader's palette is fine. What it
+promises is that nobody re-introduces a 2.67:1 body tier without a red test in
+front of them.
 
 ## Roles
 
@@ -23,31 +29,52 @@ background token on.
 
 | Role | Clack | Drawn as |
 |---|---|---|
-| `fg` | `Reset` | The terminal's own foreground. Body text is built with `Span::raw`, which emits the same `39`; the role exists so body text is still named by role, never by literal. |
-| `fg_muted` | `DarkGray` | Folder prefix, `user@host:port` meta, the empty / no-match state copy, the hint rail. The meta and the hint rail add `DIM`; the state copy does not. |
+| `fg` | `Gray` (ANSI 7) | Body text. **Wired, not inherited.** This role used to be a fiction: it was declared, documented and asserted-on while no render code read it — body spans were `Style::default().add_modifier(BOLD)` with no `.fg()` at all, emitting `39` and inheriting the terminal's ink. Every bold body span now carries `.fg(t.fg)` (`the_fg_role_is_read_by_render_code`). On the One Dark palette behind #42 that is `#ABB2BF` at **7.57:1**, where the inherited `#5C6370` was **2.67:1**. |
+| `fg_muted` | `Indexed(245)` | Folder prefix, `user@host:port` meta, the empty / no-match state copy, the hint rail. `#8A8A8A` — **4.67:1** on One Dark, a real second tier instead of a copy of the body. **Carries no `DIM`**; see the note below the table. |
 | `accent` | `Cyan` | The `◆` step icon and the `❯` cursor |
 | `border` | `DarkGray` | The `│` rail and `└` corner — chrome, no state |
 | `highlight` | `Green` | Fuzzy-matched characters |
 | `success` | `Green` | Declared, not drawn: no live surface paints a positive signal yet |
 | `warning` | `Yellow` | The `!` line a refused add step shows under the header (`! alias is required`). Reserved in #33 so a warning never invents a hue; first drawn by the #37 add sequence. |
 
-What *is* enforceable about this table: no token is a fixed RGB
-(`the_clack_palette_is_named_ansi_only`, `clack_tokens_are_named_ansi_or_reset`),
-and the two hues are cyan for the active step and green for a match
-(`the_clack_palette_hues_are_cyan_and_green`). What is *not* enforceable is
-how readable any of it is — that depends on the terminal theme the frame is
-borrowing. Which is exactly why every state is carried by a glyph or a
-modifier rather than by a hue.
+What *is* enforceable about this table: no token is a fixed RGB and no token is
+an indexed **hue** (`the_clack_palette_is_named_ansi_or_neutral_grey`,
+`clack_tokens_are_named_ansi_or_neutral_grey`); the two hues are cyan for the
+active step and green for a match
+(`the_clack_palette_hues_are_cyan_and_green`); and every informational role
+clears 4.5:1 against both reference palettes
+(`every_informational_role_clears_the_reference_contrast_floor`). What is
+*not* enforceable is how readable any of it is on the reader's own theme —
+which is exactly why every state is carried by a glyph or a modifier rather
+than by a hue.
 
-Two role pairs share a value on purpose, and both are separated by *modifier*
-rather than by hue:
+### `DIM` is banned on informational text
 
-- **`fg_muted` and `border` are both `DarkGray`.** In Clack the rail and the
-  meta are meant to recede together. What tells them apart is that meta
-  carries `DIM` and the rail does not. There is no second mid-tone in the
-  16-colour palette that survives both a black and a white terminal — `Gray`
-  (#C0C0C0) is 1.2:1 on white — so a hue split would break one of the two
-  backgrounds the frame has to live on.
+`DIM` (SGR 2) used to be stacked on `fg_muted` throughout the frame, on the
+theory that a colour alone "does not recede at all". Two facts killed it
+(issue #42):
+
+- **Windows Terminal ignores SGR 2 entirely**
+  ([microsoft/terminal#6703](https://github.com/microsoft/terminal/issues/6703)).
+  The attribute never rendered where it mattered.
+- On the reporter's palette, `fg_muted` as `DarkGray` was **the same colour as
+  the body text**, so neither spelling receded.
+
+Recession now comes from the token. Emitting `DIM` claims an effect the target
+terminal cannot deliver, so the tests assert its **absence**:
+`the_row_meta_recedes_by_token_not_by_attribute`,
+`the_hint_rail_is_muted_not_dim`, and the no-`2`-anywhere check in
+`a_frame_serializes_to_ansi_carrying_its_palette`.
+
+### Shared values
+
+One pair still shares deliberately; one pair no longer does.
+
+- **`fg_muted` and `border` used to both be `DarkGray`**, separated only by
+  the `DIM` modifier. That invariant is **broken as of #42, on purpose** — see
+  the `DIM` note above. `fg_muted` moved to `Indexed(245)`; `border` stayed
+  `DarkGray`, because the rail is chrome that carries no information and a
+  faint gutter under brighter text is the intended look.
 - **`highlight` and `success` are both `Green`.** Clack's vocabulary is cyan
   for the active step and green for a good outcome; the frame draws
   `highlight` and never draws `success`. If a surface ever draws both at once
@@ -59,18 +86,24 @@ rather than by hue:
 1. Add the field to `Theme` and set it in `Theme::clack()`. Never a fresh RGB
    literal — `no_color_literals_outside_the_theme_module` greps every render
    module for one.
-2. Give it a named ANSI colour or `Reset`. A `Rgb(..)` or `Indexed(..)` token
-   pins a colour the frame has no business choosing and skips the terminal's
-   own mapping (`the_clack_palette_is_named_ansi_only`).
+2. Give it a named ANSI colour, `Reset`, or a neutral grey off the 24-step ramp
+   (232..=255). An `Rgb(..)` token pins a colour the frame has no business
+   choosing, and an indexed **hue** skips the terminal's own mapping for a
+   colour it does not own; both are rejected by
+   `the_clack_palette_is_named_ansi_or_neutral_grey`. The indexed exception
+   exists because the 16-colour set has no neutral tone between `brightBlack`
+   and `white` — without it there is nowhere to put a second tier (#42).
 3. If the role carries a state, that state must *also* be carried by a glyph
    or a modifier: the frame has to say the same thing with colour turned off
    (`the_monochrome_frame_keeps_every_glyph_and_modifier_that_carries_state`).
-4. There is no contrast test to add a pair to. `every_text_pair_meets_wcag_aa`
-   and `every_color_mode_stays_readable` measured the Nord palette against a
-   painted background; both were deleted in #35 rather than left asserting
-   against a palette that no longer exists. A new role that wants a contrast
-   guarantee has to name the background it is measured against — and the
-   inline frame does not own one.
+   `BOLD` only — `DIM` is banned (see above).
+4. If the role carries text the user must read, add it to
+   `every_informational_role_clears_the_reference_contrast_floor`. It resolves
+   the token against two pinned palettes and fails with the computed ratio.
+   That is a *reference* check, not a guarantee: the frame still owns no
+   background, so nothing here can promise the reader's own theme is fine.
+   `border` is excluded on purpose — chrome that carries no information is
+   allowed to be faint.
 
 The rule is not negotiable; the colour is. When a token reads badly on some
 terminal, move the token or give the state a glyph — do not add a hue that
@@ -79,14 +112,22 @@ only works on one theme.
 ## Reduced colour
 
 `Theme::resolve(ColorSupport)` collapses the whole palette to `Reset` under
-`NO_COLOR` or `TERM=dumb`. In every other mode the palette passes through
-untouched, because named ANSI colours are valid in 256- and 16-colour
-terminals alike and the terminal maps them to the user's own values
-(`named_colours_survive_the_reduced_modes_unmapped`,
+`NO_COLOR` or `TERM=dumb`. `Ansi256` and `Truecolor` pass through untouched.
+`Ansi16` **snaps `fg_muted` to `DarkGray`** and leaves the body tier alone:
+`Indexed(245)` lives in the 256-colour cube, a 16-colour terminal has no such
+cell, and the emitted `38;5;245` would be dropped or mapped unpredictably
+rather than degrading gracefully (`ansi16_snaps_the_muted_grey_it_cannot_render`,
+`named_colours_survive_the_reduced_modes_unmapped`,
 `truecolor_resolution_is_a_no_op`, `monochrome_suppresses_every_token`).
-A fixed-RGB palette would need snapping here; that is what the deleted Nord
-`resolve` did, and why a named-colour palette is what a transparent frame
-gets to be.
+
+So the muted tier is a 256-colour luxury and the body tier is not. A purely
+named-colour palette needed no snapping at all; buying back a real second tier
+bought back a piece of the snapping job the deleted Nord `resolve` used to do.
+
+**`NO_COLOR` is not a readability fallback.** Every role becomes `Reset`, which
+is the terminal's own ink — and on the palette behind issue #42 that ink is
+`#5C6370` at 2.67:1. `NO_COLOR` means "give me no colour", and that is what
+it delivers, consequences included.
 
 The transparent frame routes through the same call: `build_frame` takes a
 `Canvas { width, height, support }` and draws with
@@ -117,9 +158,9 @@ regression.
 | `│` | `border` | The rail every body line hangs off | Chrome; never carries state |
 | `❯` | `accent` + `BOLD` | **Selection** | Blank (same width) on unselected rows |
 | `└` | `border` | Closes the rail | Chrome; the frame's last line |
-| `·` | `fg_muted` + `DIM` | Separates hint segments | Dropped with its segment, never stranded |
-| `■` | `fg_muted` + `DIM`, with the alias and the answer in `BOLD` | **A question that has been answered** — the settled confirm step | `■ Delete [prod] web-01? Yes` / `? No`. `◆` asks, `■` has been answered: the glyph is the entire difference between a live confirm and a settled one, which is what keeps that difference readable with colour off. Both the yes and the no answer wear it — a declined delete leaves a trace too (story 22). |
-| `◇` | `fg_muted` + `DIM`, with the value in `BOLD` | **What the last action did** — the dim note above the rows; and each settled step of the add sequence | `◇ deleted [prod] web-01`, `◇ added [prod] web-01`, `◇ edited [prod] web-01x`. In the add sequence every answered step settles to a `◇ <label>  <value>` line (`◇ Alias  web-01`); an optional field left empty settles to `◇ <label>  —` rather than a blank, because a blank after `◇ Key` reads as a step that lost its answer, not one that deliberately has none. Backing out of the first step leaves `◇ add abandoned — nothing saved`, and backing out of an edit leaves `◇ edit abandoned — nothing saved`. Also the note that contradicts the settled `■ Yes` when the store removed nothing (`◇ delete failed — no such Connection: …`), and the same refusal shape for an edit whose target vanished before the write (`◇ edit failed — no such Connection: …`). |
+| `·` | `fg_muted` | Separates hint segments | Dropped with its segment, never stranded |
+| `■` | `fg_muted`, with the alias and the answer in `BOLD` | **A question that has been answered** — the settled confirm step | `■ Delete [prod] web-01? Yes` / `? No`. `◆` asks, `■` has been answered: the glyph is the entire difference between a live confirm and a settled one, which is what keeps that difference readable with colour off. Both the yes and the no answer wear it — a declined delete leaves a trace too (story 22). |
+| `◇` | `fg_muted`, with the value in `BOLD` | **What the last action did** — the dim note above the rows; and each settled step of the add sequence | `◇ deleted [prod] web-01`, `◇ added [prod] web-01`, `◇ edited [prod] web-01x`. In the add sequence every answered step settles to a `◇ <label>  <value>` line (`◇ Alias  web-01`); an optional field left empty settles to `◇ <label>  —` rather than a blank, because a blank after `◇ Key` reads as a step that lost its answer, not one that deliberately has none. Backing out of the first step leaves `◇ add abandoned — nothing saved`, and backing out of an edit leaves `◇ edit abandoned — nothing saved`. Also the note that contradicts the settled `■ Yes` when the store removed nothing (`◇ delete failed — no such Connection: …`), and the same refusal shape for an edit whose target vanished before the write (`◇ edit failed — no such Connection: …`). |
 | `!` | `warning` (the glyph `BOLD`) | **A refused answer** — the step stayed put and says why | `! alias is required`, `! port must be a number from 1 to 65535`. The state is carried by the glyph and the sentence, not the yellow, so it reads under `NO_COLOR`; the yellow is the `warning` role doing its job, never a literal. |
 | `_` | `fg_muted` | **The live text field** — where the keystrokes are going | Drawn by the frame because the hardware cursor is hidden for the frame's whole life; a field with no cursor and no echo of its own is a field the user cannot see themselves filling. ASCII on purpose: every font that renders the box-drawing renders `_`, and a caret that turns into tofu is worse than no caret. In the add sequence the live field rides the header (`◆ Alias  web-01_`); in the edit step it rides its own line under the target header (`◆ Alias   web-01_`), with the field's `◆` dim like the settled `◇` lines — the label recedes, the value is bold, the caret marks the live end. |
 
@@ -180,7 +221,7 @@ The gates are `settle_edit_grants_the_note_only_on_a_real_write`,
 (`an_edit_that_landed_on_nothing_says_so`,
 `an_abandoned_edit_says_nothing_was_saved`).
 
-`■` and `◇` are `fg_muted` + `DIM` rather than `accent` because they are
+`■` and `◇` are `fg_muted` rather than `accent` because they are
 history, not the live step: the frame's accent marks *where you are*, and a
 settled line that kept shouting in cyan would compete with the header for the
 one thing the accent role means. The state they carry is in the glyph and the

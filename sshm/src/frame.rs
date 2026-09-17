@@ -62,13 +62,15 @@ const GUTTER: usize = 1 + GUTTER_PAD.len();
 /// What separates two hints in the hint rail.
 const HINT_SEP: &str = " · ";
 
-/// The shared dim style for notes, errors, and other receding text.
+/// The shared muted style for notes, errors, and other receding text.
 ///
-/// `fg_muted` + `DIM` so the line recedes behind the frame it sits in.
-/// Extracted so the three call-sites (`error_line`, `plain_note_line`,
-/// `update_note_line`) cannot drift apart.
+/// `fg_muted` alone. No `DIM`: Windows Terminal ignores SGR 2 entirely
+/// (microsoft/terminal#6703), so emitting it is a claim the target terminal
+/// cannot honour, and the recession has to come from the token rather than the
+/// attribute. Extracted so the three call-sites (`error_line`,
+/// `plain_note_line`, `update_note_line`) cannot drift apart.
 fn dim_style(t: &Theme) -> Style {
-    Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM)
+    Style::default().fg(t.fg_muted)
 }
 
 /// What a frame spends, and where it lands on the glass.
@@ -574,8 +576,8 @@ fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> 
 /// The typed text is bold and the caret dim: the text is the fact, the
 /// caret is chrome. Under `NO_COLOR` both survive as themselves.
 fn edit_field_line(edit: &EditFlow, t: &Theme) -> Line<'static> {
-    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(t.fg_muted);
+    let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
 
     Line::from(vec![
         Span::styled(RAIL, Style::default().fg(t.border)),
@@ -594,8 +596,8 @@ fn edit_field_line(edit: &EditFlow, t: &Theme) -> Line<'static> {
 /// `◇ Key` reads as a step that lost its answer, not as one that
 /// deliberately has none.
 fn settled_field_line(settled: &SettledField, t: &Theme) -> Line<'static> {
-    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(t.fg_muted);
+    let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
 
     let value = match &settled.value {
         Some(value) => Span::styled(value.clone(), bold),
@@ -727,8 +729,8 @@ const IMPORT_DECLINED_NOTE: &str = "import declined";
 /// `fg_muted` + `DIM`; the alias and the answer stay bold so the two facts
 /// a user scans for survive the recession.
 fn settled_confirm_line(conn: &Connection, answered: bool, t: &Theme) -> Line<'static> {
-    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(t.fg_muted);
+    let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
 
     let mut spans = vec![
         Span::styled(RAIL, Style::default().fg(t.border)),
@@ -750,8 +752,8 @@ fn settled_confirm_line(conn: &Connection, answered: bool, t: &Theme) -> Line<'s
 
 /// The dim `◇` note: what the last action did.
 fn note_line(verb: &str, conn: &Connection, t: &Theme) -> Line<'static> {
-    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(t.fg_muted);
+    let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
 
     let mut spans = vec![
         Span::styled(RAIL, Style::default().fg(t.border)),
@@ -1387,7 +1389,7 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
         }
     };
 
-    let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
+    let dim = Style::default().fg(t.fg_muted);
     let fitted = fit_hints_with(hints, width.saturating_sub(GUTTER), HINT_SEP);
 
     Line::from(vec![
@@ -1405,8 +1407,8 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
 /// Connection.
 fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
     if let Some(target) = &flow.confirming {
-        let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(t.fg_muted);
+        let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
 
         let mut spans = vec![
             Span::styled("◆", Style::default().fg(t.accent)),
@@ -1434,8 +1436,8 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
     // display-only: the write still goes to the raw path the phase
     // carries.
     if let Some(offer) = &flow.import_offer {
-        let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(t.fg_muted);
+        let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
 
         let home = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned));
         let shown = display_import_path(&offer.path, home.as_deref());
@@ -1473,7 +1475,7 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
             Span::raw(" "),
             Span::styled(
                 add.label.to_string(),
-                Style::default().add_modifier(Modifier::BOLD),
+                Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
             Span::raw(add.input.clone()),
@@ -1493,8 +1495,8 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
     // prefix, bold alias. The two chords that change a Connection read as
     // the same kind of thing.
     if let Some(edit) = &flow.edit {
-        let dim = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(t.fg_muted);
+        let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
 
         let mut spans = vec![
             Span::styled("◆", Style::default().fg(t.accent)),
@@ -1519,7 +1521,10 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
     Line::from(vec![
         Span::styled("◆", Style::default().fg(t.accent)),
         Span::raw(" "),
-        Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            title,
+            Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
+        ),
     ])
 }
 
@@ -1595,12 +1600,15 @@ fn cursor_span(selected: bool, t: &Theme) -> Span<'static> {
 /// offsets were free to disagree while every rendered string still looked
 /// right.
 fn row_line(conn: &Connection, selected: bool, hits: &[usize], t: &Theme) -> Line<'static> {
-    // The ticket asks for *dim* meta, and the hint rail already spells "dim" as
-    // `DIM` on `fg_muted`. Muted-without-`DIM` is a different claim — it is
-    // just a darker colour, and on a terminal with a bright bright-black it
-    // does not recede at all. One word, one spelling.
-    let meta_style = Style::default().fg(t.fg_muted).add_modifier(Modifier::DIM);
-    let alias_style = Style::default().add_modifier(Modifier::BOLD);
+    // The meta recedes by *token*, not by attribute. `DIM` used to be stacked on
+    // `fg_muted` here on the theory that a colour alone "does not recede at
+    // all" — but Windows Terminal ignores SGR 2 entirely
+    // (microsoft/terminal#6703), and on the scheme behind issue #42 `fg_muted`
+    // as `DarkGray` was the *same colour* as the body text, so neither spelling
+    // receded. The recession now lives in `fg_muted` itself: `Indexed(245)` at
+    // 4.67:1 against body `Gray` at 7.57:1.
+    let meta_style = Style::default().fg(t.fg_muted);
+    let alias_style = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
     let hit_style = Style::default()
         .fg(t.highlight)
         .add_modifier(Modifier::BOLD);

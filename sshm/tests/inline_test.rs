@@ -284,15 +284,27 @@ fn the_picked_trace_keeps_the_frames_emphasis_grammar() {
             .contains(Modifier::BOLD),
         "the alias stays bold, as it is in a row"
     );
+    let muted = sshm::theme::Theme::clack().fg_muted;
     let meta = span_with(spans, "[prod] ");
+    assert_eq!(
+        meta.style.fg,
+        Some(muted),
+        "the folder prefix wears fg_muted, as it does in a row: {meta:?}"
+    );
     assert!(
-        meta.style.add_modifier.contains(Modifier::DIM),
-        "the folder prefix recedes as meta, as it does in a row: {meta:?}"
+        !meta.style.add_modifier.contains(Modifier::DIM),
+        "the folder prefix must not carry DIM — Windows Terminal ignores SGR 2 \
+         (microsoft/terminal#6703, issue #42): {meta:?}"
     );
     let meta = span_with(spans, "(deploy@10.0.0.4:22)");
+    assert_eq!(
+        meta.style.fg,
+        Some(muted),
+        "the host meta wears fg_muted: {meta:?}"
+    );
     assert!(
-        meta.style.add_modifier.contains(Modifier::DIM),
-        "the host meta stays dim: {meta:?}"
+        !meta.style.add_modifier.contains(Modifier::DIM),
+        "the host meta must not carry DIM: {meta:?}"
     );
 }
 
@@ -514,9 +526,15 @@ fn a_refused_import_settles_to_one_line_naming_the_failure() {
         &trace[0].spans,
         "could not write connections.json: Permission denied",
     );
+    assert_eq!(
+        reason.style.fg,
+        Some(sshm::theme::Theme::clack().fg_muted),
+        "the reason wears fg_muted, where the other failure traces do: {reason:?}"
+    );
     assert!(
-        reason.style.add_modifier.contains(Modifier::DIM),
-        "the reason recedes as dim, where the other failure traces are dim: {reason:?}"
+        !reason.style.add_modifier.contains(Modifier::DIM),
+        "the reason must not carry DIM — the recession comes from the token \
+         (issue #42): {reason:?}"
     );
     assert_eq!(
         trace[0].spans[0].style.fg,
