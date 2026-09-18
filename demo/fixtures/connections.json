@@ -1,0 +1,21 @@
+{
+  "connections": [
+    { "id": "1",  "alias": "web-01",        "host": "10.0.0.4",              "user": "deploy",   "port": 22,   "key_path": "~/.ssh/id_ed25519", "folder": "prod" },
+    { "id": "2",  "alias": "web-02",        "host": "10.0.0.5",              "user": "deploy",   "port": 22,   "key_path": "~/.ssh/id_ed25519", "folder": "prod" },
+    { "id": "3",  "alias": "db-primary",    "host": "10.0.1.10",             "user": "postgres", "port": 5432, "key_path": null,                "folder": "prod" },
+    { "id": "4",  "alias": "db-replica",    "host": "10.0.1.11",             "user": "postgres", "port": 5432, "key_path": null,                "folder": "prod" },
+    { "id": "5",  "alias": "edge-cache",    "host": "cdn.edge",              "user": "ops",      "port": 22,   "key_path": null,                "folder": "prod" },
+    { "id": "6",  "alias": "cache-eu-1",    "host": "eu-cache.internal",     "user": "ops",      "port": 22,   "key_path": null,                "folder": "prod" },
+    { "id": "7",  "alias": "mail-relay",    "host": "smtp.internal",         "user": "postfix",  "port": 22,   "key_path": null,                "folder": "prod" },
+    { "id": "8",  "alias": "gateway-eu",    "host": "eu-gw.internal",        "user": "admin",    "port": 22,   "key_path": null,                "folder": "prod" },
+    { "id": "9",  "alias": "staging-api",   "host": "staging.api.internal",  "user": "dev",      "port": 22,   "key_path": null,                "folder": "staging" },
+    { "id": "10", "alias": "staging-db",    "host": "staging.db.internal",   "user": "dev",      "port": 5432, "key_path": null,                "folder": "staging" },
+    { "id": "11", "alias": "grafana",       "host": "metrics.internal",      "user": "admin",    "port": 22,   "key_path": null,                "folder": "obs" },
+    { "id": "12", "alias": "loki",          "host": "logs.internal",         "user": "admin",    "port": 22,   "key_path": null,                "folder": "obs" },
+    { "id": "13", "alias": "ci-runner-1",   "host": "ci-1.internal",         "user": "runner",   "port": 22,   "key_path": null,                "folder": "ci" },
+    { "id": "14", "alias": "ci-runner-2",   "host": "ci-2.internal",         "user": "runner",   "port": 22,   "key_path": null,                "folder": "ci" },
+    { "id": "15", "alias": "nas-01",        "host": "192.168.1.50",          "user": "backup",   "port": 22,   "key_path": null,                "folder": "home" },
+    { "id": "16", "alias": "bastion",       "host": "jumpbox.corp",          "user": "root",     "port": 22,   "key_path": null,                "folder": null },
+    { "id": "17", "alias": "dev-box",       "host": "localhost",             "user": "dev",      "port": 2222, "key_path": null,                "folder": null }
+  ]
+}

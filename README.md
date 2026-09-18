@@ -3,6 +3,8 @@
 A terminal SSH connection manager that draws an **inline frame** inside your own
 shell — no alternate screen, no takeover — built with Rust and Ratatui.
 
+![sshm driven from a real shell: the inline picker opens below the prompt, filters the fleet as you type, collapses to a single settle line, then manage mode adds a connection through its field map and confirms a delete in place.](demo/hero.gif)
+
 ## Features
 
 - **Connection Management**: Add, edit, and remove SSH server connections
@@ -232,6 +234,13 @@ ssh-manager/
 │   │   └── update.rs        # Update checking
 │   ├── Cargo.toml           # Rust dependencies
 │   └── tests/               # Integration tests — see sshm/tests/README.md
+├── demo/
+│   ├── hero.tape            # The README reel (vhs)
+│   ├── fixtures/            # The connections the reel is recorded against
+│   └── rendered/            # Stills pulled from the design/live reels
+├── scripts/
+│   ├── render-hero.sh       # Records demo/hero.gif under a sandboxed HOME
+│   └── design-matrix.sh    # Capability tiers (60 cols, NO_COLOR)
 ├── .dsh/skills/sshm-design/ # Binding UI design rules (tokens, surfaces, verification)
 ├── .github/
 │   └── workflows/
@@ -282,6 +291,20 @@ cargo fmt -- --check
 # Run clippy lints
 cargo clippy --all-targets --all-features
 ```
+
+### Regenerating the README GIF
+
+```bash
+scripts/render-hero.sh            # -> demo/hero.gif
+```
+
+The GIF is recorded with [vhs](https://github.com/charmbracelet/vhs) from
+`demo/hero.tape`, driving the **real** binary — not a capture of static
+frames. Because bare `sshm` executes `ssh` on Enter and `sshm manage` writes
+the real store, the wrapper runs the whole reel under a throwaway `HOME`
+reset from `demo/fixtures/connections.json`, so your own `~/.ssh` is never
+opened and every render starts from the same fixture. It then asserts the
+add/delete round trip and fails if the store does not end where it began.
 
 ## CI/CD
 
