@@ -46,8 +46,8 @@ use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 use sshm::config::Connection;
 use sshm::frame::{
-    build_frame, build_frame_with_flow, build_frame_with_note, Canvas, Frame, FrameFlow,
-    FrameMode, FRAME_LINES, VISIBLE_ROWS,
+    build_frame, build_frame_with_flow, build_frame_with_note, Canvas, Frame, FrameFlow, FrameMode,
+    FRAME_LINES, VISIBLE_ROWS,
 };
 use sshm::manage::{self, FormCursor, ManageState};
 use sshm::theme::{ColorSupport, Theme};
@@ -285,7 +285,7 @@ fn body(frame: &Frame) -> &[Line<'static>] {
 /// gutter pad.
 fn row_glyph(line: &Line<'static>) -> char {
     plain(line)
-        .trim_start_matches(|c| c == '│' || c == ' ')
+        .trim_start_matches(['│', ' '])
         .chars()
         .next()
         .expect("a body row leads with its glyph")
@@ -297,7 +297,10 @@ fn row_glyph(line: &Line<'static>) -> char {
 /// rule under test is what the row *looks* like, and the mapping from
 /// `submit_ready`/`submit_focused` to that look is exactly the thing that could
 /// regress.
-fn submit_styles(state: &ManageState, support: ColorSupport) -> (Option<Color>, bool, Option<Color>, bool) {
+fn submit_styles(
+    state: &ManageState,
+    support: ColorSupport,
+) -> (Option<Color>, bool, Option<Color>, bool) {
     let frame = map_frame(state, 80, support);
     let line = &body(&frame)[FormCursor::ROWS];
     let text = plain(line);
@@ -861,12 +864,10 @@ fn the_form_rail_fits_80_columns_and_keeps_the_escape_hatch() {
 #[test]
 fn the_form_rail_names_what_enter_means_on_the_row_under_the_cursor() {
     let field = plain(
-        &map_frame(&add_ready_on_field(), 80, ColorSupport::Truecolor)
-            .lines()[FRAME_LINES - 2],
+        &map_frame(&add_ready_on_field(), 80, ColorSupport::Truecolor).lines()[FRAME_LINES - 2],
     );
     let submit = plain(
-        &map_frame(&add_ready_on_submit(), 80, ColorSupport::Truecolor)
-            .lines()[FRAME_LINES - 2],
+        &map_frame(&add_ready_on_submit(), 80, ColorSupport::Truecolor).lines()[FRAME_LINES - 2],
     );
 
     assert!(
@@ -938,11 +939,11 @@ fn the_map_carries_every_state_in_a_glyph_not_a_colour() {
 
     let drawn_colour: Vec<char> = body(&colour)[..FormCursor::ROWS - 1]
         .iter()
-        .map(|l| row_glyph(l))
+        .map(row_glyph)
         .collect();
     let drawn_mono: Vec<char> = body(&mono)[..FormCursor::ROWS - 1]
         .iter()
-        .map(|l| row_glyph(l))
+        .map(row_glyph)
         .collect();
 
     // The glyph is the state: the same rows draw the same characters with the
@@ -1053,7 +1054,7 @@ fn the_submit_row_is_distinguishable_in_all_three_states_without_colour() {
     // Reduce each state to a hue-free signature: the greyscale lightness of
     // the glyph and the label, plus whether each is bold.
     let signature = |s: &(Option<Color>, bool, Option<Color>, bool),
-                    palette: &[(u8, u8, u8); 16]|
+                     palette: &[(u8, u8, u8); 16]|
      -> (f64, bool, f64, bool) {
         (
             luminance(resolve_against(s.0.expect("glyph has a role"), palette)),
@@ -1068,7 +1069,10 @@ fn the_submit_row_is_distinguishable_in_all_three_states_without_colour() {
         let b = signature(&ready_unfocused, palette);
         let c = signature(&ready_focused, palette);
 
-        assert_ne!(a, b, "not-ready and ready are the same row with no hue on {name}");
+        assert_ne!(
+            a, b,
+            "not-ready and ready are the same row with no hue on {name}"
+        );
         assert_ne!(
             b, c,
             "ready and ready+focused are the same row with no hue on {name}"
@@ -1244,11 +1248,13 @@ fn the_error_line_names_every_offending_field_and_fits_80_columns() {
 
     // The worst case — both required fields empty *and* a bad port — still
     // fits 80 columns, which is what the contract claims.
-    let worst = plain(&body(&map_frame(
-        &add_worst_refusal(),
-        80,
-        ColorSupport::Truecolor,
-    ))[FormCursor::ROWS - 1]);
+    let worst = plain(
+        &body(&map_frame(
+            &add_worst_refusal(),
+            80,
+            ColorSupport::Truecolor,
+        ))[FormCursor::ROWS - 1],
+    );
     assert!(
         worst.contains("alias is required")
             && worst.contains("host is required")
@@ -1419,25 +1425,15 @@ fn dump_frames_for_review() {
                 Canvas::new(width, 24, support),
                 &flow,
             );
-            write(
-                &format!("frame-{name}-{width}{tag}"),
-                &frame,
-            );
+            write(&format!("frame-{name}-{width}{tag}"), &frame);
         }
     }
 
     // The worst refusal the map can say, at both widths: this is the frame to
     // look at if the three-problem line ever stops fitting.
     for (width, tag) in [(80usize, ""), (60, "")] {
-        let frame = map_frame(
-            &add_worst_refusal(),
-            width,
-            ColorSupport::Truecolor,
-        );
-        write(
-            &format!("frame-add-worst-error-{width}{tag}"),
-            &frame,
-        );
+        let frame = map_frame(&add_worst_refusal(), width, ColorSupport::Truecolor);
+        write(&format!("frame-add-worst-error-{width}{tag}"), &frame);
     }
 
     for (name, frame) in [

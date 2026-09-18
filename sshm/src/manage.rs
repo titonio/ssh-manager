@@ -68,7 +68,7 @@ pub enum Phase {
     /// afterwards changes nothing about it.
     ///
     /// [`Add`]: Phase::Add
-    Edit(EditSequence),
+    Edit(Box<EditSequence>),
     /// The first-run import offer (#38).
     ///
     /// `count` is what the scan found at `path`: the Host stanzas in
@@ -281,10 +281,7 @@ impl FormCursor {
     /// The row's position, top to bottom.
     pub fn index(self) -> usize {
         match self {
-            FormCursor::Field(f) => AddField::ORDER
-                .iter()
-                .position(|x| *x == f)
-                .unwrap_or(0),
+            FormCursor::Field(f) => AddField::ORDER.iter().position(|x| *x == f).unwrap_or(0),
             FormCursor::Submit => AddField::ORDER.len(),
         }
     }
@@ -1216,7 +1213,7 @@ fn list_step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) 
         // because the frame will not invent a target to change.
         if let Some(target) = selected {
             return Step::state_only(ManageState {
-                phase: Phase::Edit(EditSequence::start(target.clone())),
+                phase: Phase::Edit(Box::new(EditSequence::start(target.clone()))),
                 // The note from the last action is cleared the same way
                 // `Ctrl+A` clears it: the editor is a new ask, and a
                 // stale `◇ deleted` sitting above "which field am I
@@ -1518,10 +1515,10 @@ fn edit_step(state: &ManageState, key: KeyEvent, editor: &EditSequence) -> Step 
 
     let on = |cursor: FormCursor| {
         Step::state_only(ManageState {
-            phase: Phase::Edit(EditSequence {
+            phase: Phase::Edit(Box::new(EditSequence {
                 cursor,
                 ..editor.clone()
-            }),
+            })),
             ..state.clone()
         })
     };
@@ -1554,12 +1551,12 @@ fn edit_step(state: &ManageState, key: KeyEvent, editor: &EditSequence) -> Step 
             }
         }
         KeyCode::Backspace => Step::state_only(ManageState {
-            phase: Phase::Edit(editor.clone().deleted()),
+            phase: Phase::Edit(Box::new(editor.clone().deleted())),
             ..state.clone()
         }),
         KeyCode::Char(ch) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
             Step::state_only(ManageState {
-                phase: Phase::Edit(editor.clone().typed(ch)),
+                phase: Phase::Edit(Box::new(editor.clone().typed(ch))),
                 ..state.clone()
             })
         }
@@ -1597,10 +1594,10 @@ fn submit_edit(state: &ManageState, editor: &EditSequence) -> Step {
             }],
         },
         _ => Step::state_only(ManageState {
-            phase: Phase::Edit(EditSequence {
+            phase: Phase::Edit(Box::new(EditSequence {
                 error: Some(refusal_line(&problems, nothing_changed)),
                 ..editor.clone()
-            }),
+            })),
             ..state.clone()
         }),
     }

@@ -386,12 +386,7 @@ impl From<&crate::manage::ManageState> for FrameFlow {
                     submit_ready: editor.ready(),
                     submit_label: format!("Save changes to {}", editor.target.alias),
                     placeholder: "<not set>",
-                    header: match editor
-                        .target
-                        .folder
-                        .as_deref()
-                        .filter(|f| !f.is_empty())
-                    {
+                    header: match editor.target.folder.as_deref().filter(|f| !f.is_empty()) {
                         Some(folder) => format!("Edit [{folder}] {}", editor.target.alias),
                         None => format!("Edit {}", editor.target.alias),
                     },
@@ -573,11 +568,7 @@ fn map_row_line(row: &crate::manage::MapRow, placeholder: &str, t: &Theme) -> Li
             _ => dim,
         }
     };
-    let glyph = if row.focused {
-        '◆'
-    } else {
-        row.glyph.char()
-    };
+    let glyph = if row.focused { '◆' } else { row.glyph.char() };
 
     let mut spans = vec![
         Span::styled(RAIL, Style::default().fg(t.border)),
@@ -668,10 +659,7 @@ fn submit_line(form: &FormFlow, t: &Theme) -> Line<'static> {
             Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
         )
     } else {
-        (
-            Style::default().fg(t.accent),
-            Style::default().fg(t.fg),
-        )
+        (Style::default().fg(t.accent), Style::default().fg(t.fg))
     };
 
     Line::from(vec![

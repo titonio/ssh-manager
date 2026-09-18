@@ -30,8 +30,8 @@ use sshm::config::{Connection, ImportReport};
 use sshm::connections::ConnectionDraft;
 use sshm::inline::InlineOutcome;
 use sshm::manage::{
-    self, step, AddField, AddSequence, DeleteOutcome, EditOutcome, Effect, EditSequence, FormCursor,
-    ImportOutcome, ManageState, MapRow, Phase, RowGlyph, Trace,
+    self, step, AddField, AddSequence, DeleteOutcome, EditOutcome, EditSequence, Effect,
+    FormCursor, ImportOutcome, ManageState, MapRow, Phase, RowGlyph, Trace,
 };
 
 /// The port's refusal sentence, spelled once. The dash in `1–65535` is an
@@ -734,13 +734,15 @@ fn typing_and_backspace_are_no_ops_on_the_submit_row() {
 
     let typed = step(&at_submit, plain('z'), Some(&web01()));
     assert_eq!(
-        add_seq(&typed.state).draft, before,
+        add_seq(&typed.state).draft,
+        before,
         "a character typed on the `▶` row must not be appended to any field"
     );
 
     let deleted = step(&at_submit, key(KeyCode::Backspace), Some(&web01()));
     assert_eq!(
-        add_seq(&deleted.state).draft, before,
+        add_seq(&deleted.state).draft,
+        before,
         "and Backspace on the `▶` row must not eat a character off the last field"
     );
 
@@ -777,10 +779,7 @@ fn typing_at_an_add_step_goes_to_the_field_not_the_filter() {
         FormCursor::Field(AddField::Alias),
         "typing does not advance"
     );
-    assert_eq!(
-        state.query, "",
-        "the filter behind the map is untouched"
-    );
+    assert_eq!(state.query, "", "the filter behind the map is untouched");
 }
 
 #[test]
@@ -793,7 +792,10 @@ fn backspace_at_an_add_step_edits_the_field_not_the_filter() {
 
     let sequence = add_seq(&stepped.state);
 
-    assert_eq!(sequence.draft.alias, "w", "the character comes off the field");
+    assert_eq!(
+        sequence.draft.alias, "w",
+        "the character comes off the field"
+    );
     assert_eq!(
         stepped.state.query, "web",
         "and not off the filter the user had typed before Ctrl+A"
@@ -835,8 +837,13 @@ fn the_chord_letters_still_type_at_an_add_step() {
 /// exactly the way it catches.
 #[test]
 fn user_is_settable_during_add_and_lands_in_the_draft() {
-    let typed =
-        type_str(&goto(&add_with_required_filled(), FormCursor::Field(AddField::User)), "deploy");
+    let typed = type_str(
+        &goto(
+            &add_with_required_filled(),
+            FormCursor::Field(AddField::User),
+        ),
+        "deploy",
+    );
 
     assert_eq!(
         add_seq(&typed).draft.user,
@@ -974,7 +981,8 @@ fn an_empty_host_is_a_problem_that_leaves_the_alias_alone() {
         "the Host row says it is needed"
     );
     assert_eq!(
-        add_seq(&on_host.state).draft.alias, "web-01",
+        add_seq(&on_host.state).draft.alias,
+        "web-01",
         "the row already filled is not undone by the next one being empty"
     );
 }
@@ -1096,7 +1104,10 @@ fn a_port_above_the_tcp_range_is_rejected() {
     let typed = type_str(&at_port(), "70000");
 
     assert_eq!(glyph_of(&typed, AddField::Port), RowGlyph::Invalid);
-    assert_eq!(problems_of(&typed), vec![("Port", PORT_REFUSAL.to_string())]);
+    assert_eq!(
+        problems_of(&typed),
+        vec![("Port", PORT_REFUSAL.to_string())]
+    );
 }
 
 #[test]
@@ -1104,7 +1115,10 @@ fn port_zero_is_rejected() {
     let typed = type_str(&at_port(), "0");
 
     assert_eq!(glyph_of(&typed, AddField::Port), RowGlyph::Invalid);
-    assert_eq!(problems_of(&typed), vec![("Port", PORT_REFUSAL.to_string())]);
+    assert_eq!(
+        problems_of(&typed),
+        vec![("Port", PORT_REFUSAL.to_string())]
+    );
 }
 
 #[test]
@@ -1112,7 +1126,10 @@ fn a_negative_port_is_rejected() {
     let typed = type_str(&at_port(), "-1");
 
     assert_eq!(glyph_of(&typed, AddField::Port), RowGlyph::Invalid);
-    assert_eq!(problems_of(&typed), vec![("Port", PORT_REFUSAL.to_string())]);
+    assert_eq!(
+        problems_of(&typed),
+        vec![("Port", PORT_REFUSAL.to_string())]
+    );
 }
 
 /// The port is the one row that is optional *and* has a value when left
@@ -1238,7 +1255,10 @@ fn an_answered_optional_field_settles_as_itself() {
 /// order, rather than making the user discover them one Enter at a time.
 #[test]
 fn enter_on_submit_with_invalid_fields_names_every_bad_field() {
-    let at_port = goto(&add_at(FormCursor::Field(AddField::Alias)), FormCursor::Field(AddField::Port));
+    let at_port = goto(
+        &add_at(FormCursor::Field(AddField::Alias)),
+        FormCursor::Field(AddField::Port),
+    );
     let typed = type_str(&at_port, "99999");
 
     let refused = submit(&typed);
@@ -1246,7 +1266,7 @@ fn enter_on_submit_with_invalid_fields_names_every_bad_field() {
     assert_eq!(
         error_of(&refused.state),
         Some(
-            [&format!("alias is required"), &format!("host is required"), PORT_REFUSAL]
+            ["alias is required", "host is required", PORT_REFUSAL]
                 .join(JOIN)
                 .as_str(),
         ),
@@ -1299,10 +1319,7 @@ fn the_glyph_precedence_shows_the_blocker_before_the_edit() {
     // Empty-and-required beats Changed: clearing the Host of a live
     // Connection is both, and the one that blocks the save wins.
     let cleared_host = backspace_n(
-        &goto(
-            &edit_state(&web01()),
-            FormCursor::Field(AddField::Host),
-        ),
+        &goto(&edit_state(&web01()), FormCursor::Field(AddField::Host)),
         "10.0.0.4".chars().count(),
     );
     assert_eq!(
@@ -2049,7 +2066,10 @@ fn a_refused_edit_keeps_the_typed_text_and_the_target() {
         panic!("must still be editing, got {:?}", refused.state.phase);
     };
     assert_eq!(editor.target, web01(), "the target survives the refusal");
-    assert_eq!(editor.draft.alias, "", "what the user left stays where it is");
+    assert_eq!(
+        editor.draft.alias, "",
+        "what the user left stays where it is"
+    );
     assert_eq!(
         editor.error.as_deref(),
         Some("alias is required"),
@@ -2751,7 +2771,8 @@ fn add_with_required_filled() -> ManageState {
     state = goto(&state, FormCursor::Field(AddField::Host));
     state = type_str(&state, "10.0.0.7");
     assert_eq!(
-        add_seq(&state).draft.user, "",
+        add_seq(&state).draft.user,
+        "",
         "setup: the User row must start empty for the test to prove anything"
     );
     state
@@ -2881,7 +2902,7 @@ fn glyph_of(state: &ManageState, field: AddField) -> RowGlyph {
 }
 
 /// Find one field's row.
-fn row<'a>(rows: &'a [MapRow], field: AddField) -> &'a MapRow {
+fn row(rows: &[MapRow], field: AddField) -> &MapRow {
     rows.iter()
         .find(|r| r.field == field)
         .unwrap_or_else(|| panic!("no row for {field:?} in {rows:?}"))

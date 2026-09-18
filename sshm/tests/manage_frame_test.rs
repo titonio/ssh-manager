@@ -14,7 +14,7 @@ use ratatui::style::Modifier;
 use ratatui::text::Line;
 use sshm::config::Connection;
 use sshm::frame::{
-    build_frame_with_flow, Canvas, FrameFlow, FrameMode, FormFlow, ImportOfferFlow, FRAME_LINES,
+    build_frame_with_flow, Canvas, FormFlow, FrameFlow, FrameMode, ImportOfferFlow, FRAME_LINES,
 };
 use sshm::manage::{self, step, DeleteOutcome, FormCursor, ManageState};
 use sshm::theme::ColorSupport;
@@ -576,10 +576,7 @@ fn enter_on_an_invalid_field_still_advances() {
     let after = step(&bad, key(KeyCode::Enter), Some(&web01()));
     let after = form(&after.state);
 
-    assert!(
-        !before.submit_ready,
-        "setup: the form must not be ready"
-    );
+    assert!(!before.submit_ready, "setup: the form must not be ready");
     assert!(
         !after.submit_ready,
         "advancing must not make a bad form ready"
@@ -595,11 +592,7 @@ fn enter_on_an_invalid_field_still_advances() {
 /// line, in the row the separator occupied.
 #[test]
 fn the_error_line_names_every_offending_field() {
-    let refused = step(
-        &at_submit(&add_open()),
-        key(KeyCode::Enter),
-        Some(&web01()),
-    );
+    let refused = step(&at_submit(&add_open()), key(KeyCode::Enter), Some(&web01()));
     let frame = render(&refused.state);
     let joined = frame_text(&frame).join("\n");
 
@@ -624,12 +617,7 @@ fn the_error_line_names_every_offending_field() {
 #[test]
 fn the_error_line_replaces_the_rule_row_so_the_height_never_changes() {
     let clean = render(&add_required_filled());
-    let refused = render(&step(
-        &at_submit(&add_open()),
-        key(KeyCode::Enter),
-        Some(&web01()),
-    )
-    .state);
+    let refused = render(&step(&at_submit(&add_open()), key(KeyCode::Enter), Some(&web01())).state);
 
     assert_eq!(
         clean.lines().len(),
@@ -656,7 +644,10 @@ fn the_submit_row_is_present_whatever_the_form_state() {
     for (label, state) in [
         ("blank", add_open()),
         ("half filled", add_required_filled()),
-        ("refused", step(&at_submit(&add_open()), key(KeyCode::Enter), Some(&web01())).state),
+        (
+            "refused",
+            step(&at_submit(&add_open()), key(KeyCode::Enter), Some(&web01())).state,
+        ),
     ] {
         for support in [ColorSupport::Truecolor, ColorSupport::Monochrome] {
             let frame = build_frame_with_flow(
@@ -701,7 +692,10 @@ fn the_submit_row_rail_says_what_enter_does_there() {
     let rail = rail_of(&frame);
 
     assert!(rail.contains("Enter save"), "the ▶ row commits: {rail:?}");
-    assert!(!rail.contains("Enter next"), "there is no next row: {rail:?}");
+    assert!(
+        !rail.contains("Enter next"),
+        "there is no next row: {rail:?}"
+    );
 }
 
 /// The map never grows the frame, whatever it is showing.
@@ -937,11 +931,7 @@ fn goto_row(state: &ManageState, label: &str) -> ManageState {
     let target = row_index(label);
     let mut s = state.clone();
     for _ in 0..FormCursor::ROWS {
-        let current = form(&s)
-            .rows
-            .iter()
-            .position(|r| r.focused)
-            .unwrap_or(0);
+        let current = form(&s).rows.iter().position(|r| r.focused).unwrap_or(0);
         if current == target {
             assert!(
                 form(&s).rows[target].label == label,
@@ -1122,7 +1112,11 @@ fn a_refused_save_shows_the_reason_in_the_rule_row() {
 /// file back unchanged would let the user believe something was saved.
 #[test]
 fn a_save_with_nothing_changed_says_so() {
-    let refused = step(&at_submit(&edit_open()), key(KeyCode::Enter), Some(&web01()));
+    let refused = step(
+        &at_submit(&edit_open()),
+        key(KeyCode::Enter),
+        Some(&web01()),
+    );
     let joined = frame_text(&render(&refused.state)).join("\n");
 
     assert!(
@@ -1160,7 +1154,12 @@ fn the_edit_never_grows_the_frame() {
         edit_open(),
         type_into(&goto_row(&edit_open(), "Port"), "2222"),
         at_submit(&edit_open()),
-        step(&at_submit(&edit_open()), key(KeyCode::Enter), Some(&web01())).state,
+        step(
+            &at_submit(&edit_open()),
+            key(KeyCode::Enter),
+            Some(&web01()),
+        )
+        .state,
         step(
             &at_submit(&clear_row(&goto_row(&edit_open(), "Host"), 9)),
             key(KeyCode::Enter),
