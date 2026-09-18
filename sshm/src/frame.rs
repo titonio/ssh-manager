@@ -310,81 +310,96 @@ pub struct FrameFlow {
     /// What the last management action did, rendered as the lines above the
     /// rows.
     pub trace: Option<crate::manage::Trace>,
-    /// The `Ctrl+A` add sequence, while one is running (#37).
-    pub add: Option<AddFlow>,
-    /// The `Ctrl+E` in-place single-field editor, while one is open (#37).
-    pub edit: Option<EditFlow>,
+    /// The form map, while `Ctrl+A` or `Ctrl+E` has one open.
+    ///
+    /// One field for both, because they are one surface. Two options here
+    /// would mean the renderer had to know which command opened the map,
+    /// which is exactly the coupling this shape removes.
+    pub form: Option<FormFlow>,
     /// The first-run import offer, while one is open (#38).
     pub import_offer: Option<ImportOfferFlow>,
 }
 
-/// One step of the add sequence that has already been answered.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SettledField {
-    /// The step's word, drawn after the `◇`.
-    pub label: &'static str,
-    /// What it settled to, or `None` for an optional field left empty —
-    /// which the frame draws as *absent* rather than as a blank.
-    pub value: Option<String>,
-}
-
-/// The add sequence as far as the frame can see it (#37).
+/// The form map as far as the frame can see it.
 ///
-/// The frame does not run the sequence — [`crate::manage`] does. This is
-/// the projection of one live step: the word wearing the `◆`, what is on
-/// the line, what the last rejection said, and what has already settled
-/// behind it.
+/// One projection for both `Ctrl+A` and `Ctrl+E`, because they are the
+/// same surface: six field rows, a rule, and a `\u25b6` row. What differs is
+/// what the rows start out holding and what the button is called \u2014 and
+/// the frame should no more know which command opened it than which
+/// terminal it is drawing on.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AddFlow {
-    /// The step being answered now.
-    pub label: &'static str,
-    /// What the user has typed into it.
-    pub input: String,
-    /// The rejection shown under the header, if the last Enter was refused.
+pub struct FormFlow {
+    /// The six field rows, in map order.
+    pub rows: Vec<crate::manage::MapRow>,
+    /// Whether the cursor is on the `\u25b6` row rather than on a field.
+    pub submit_focused: bool,
+    /// Whether the `\u25b6` row would be accepted if Enter landed on it.
+    ///
+    /// Drives the dim-until-ready treatment. A button that looks live and
+    /// then refuses is worse than one that says it is not ready.
+    pub submit_ready: bool,
+    /// The `\u25b6` row's words: `Add connection`, or `Save changes to web-1`.
+    ///
+    /// The edit form carries its target here rather than on a title row,
+    /// because the rule row is the row the error takes over \u2014 and losing
+    /// "which Connection am I editing?" at the exact moment something
+    /// went wrong is the worst possible time to lose it.
+    pub submit_label: String,
+    /// What an empty field shows in place of a value.
+    ///
+    /// Add says `<optional>`: an invitation. Edit says `<not set>`: a
+    /// fact about the stored Connection. Same tier, different sentence,
+    /// because the two modes are answering different questions.
+    pub placeholder: &'static str,
+    /// The header's words: `New connection`, or `[prod] web-1`.
+    ///
+    /// Built where the target is in hand rather than in the renderer, so
+    /// the folder prefix and the alias come from one place.
+    pub header: String,
+    /// The refusal, drawn in the rule row in place of the separator.
     pub error: Option<String>,
-    /// The steps already settled, in the order they were answered.
-    pub settled: Vec<SettledField>,
-    /// Whether this is the last step, so the rail can say what Enter
-    /// means *here* rather than guessing.
-    pub last: bool,
 }
 
 impl From<&crate::manage::ManageState> for FrameFlow {
     fn from(state: &crate::manage::ManageState) -> Self {
-        let (confirming, add, edit, import_offer) = match &state.phase {
-            crate::manage::Phase::ConfirmDelete { target } => {
-                (Some(target.clone()), None, None, None)
-            }
-            crate::manage::Phase::List => (None, None, None, None),
+        let (confirming, form, import_offer) = match &state.phase {
+            crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None, None),
+            crate::manage::Phase::List => (None, None, None),
             crate::manage::Phase::Add(sequence) => (
                 None,
-                Some(AddFlow {
-                    label: sequence.field.label(),
-                    input: sequence.input.clone(),
+                Some(FormFlow {
+                    rows: sequence.rows(),
+                    submit_focused: sequence.cursor.is_submit(),
+                    submit_ready: sequence.ready(),
+                    submit_label: "Add connection".to_string(),
+                    placeholder: "<optional>",
+                    header: "New connection".to_string(),
                     error: sequence.error.clone(),
-                    settled: sequence
-                        .settled()
-                        .into_iter()
-                        .map(|(label, value)| SettledField { label, value })
-                        .collect(),
-                    last: sequence.field.next().is_none(),
                 }),
-                None,
                 None,
             ),
             crate::manage::Phase::Edit(editor) => (
                 None,
-                None,
-                Some(EditFlow {
-                    target: editor.target.clone(),
-                    label: editor.field.label(),
-                    input: editor.input.clone(),
+                Some(FormFlow {
+                    rows: editor.rows(),
+                    submit_focused: editor.cursor.is_submit(),
+                    submit_ready: editor.ready(),
+                    submit_label: format!("Save changes to {}", editor.target.alias),
+                    placeholder: "<not set>",
+                    header: match editor
+                        .target
+                        .folder
+                        .as_deref()
+                        .filter(|f| !f.is_empty())
+                    {
+                        Some(folder) => format!("Edit [{folder}] {}", editor.target.alias),
+                        None => format!("Edit {}", editor.target.alias),
+                    },
                     error: editor.error.clone(),
                 }),
                 None,
             ),
             crate::manage::Phase::ConfirmImport { count, path } => (
-                None,
                 None,
                 None,
                 Some(ImportOfferFlow {
@@ -397,37 +412,10 @@ impl From<&crate::manage::ManageState> for FrameFlow {
         Self {
             confirming,
             trace: state.trace.clone(),
-            add,
-            edit,
+            form,
             import_offer,
         }
     }
-}
-
-/// The in-place single-field editor as far as the frame can see it (#37).
-///
-/// The frame does not run the editor — [`crate::manage`] does. This is the
-/// projection of the one live field: which Connection is being changed,
-/// which of its fields is on the line, what is on that line, and what the
-/// last rejection said.
-///
-/// **Why the target is carried.** The add sequence can get away with
-/// naming only the field because there is nothing else in play. An edit is
-/// about a specific Connection, and the frame must say which one: the
-/// user is one Enter away from a write to `connections.json`, and "which
-/// Connection did I just change?" must be answerable from the line at the
-/// top of the frame rather than by scanning the list for a cursor that
-/// could have moved.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EditFlow {
-    /// The Connection being edited.
-    pub target: Connection,
-    /// The field on the line now.
-    pub label: &'static str,
-    /// What is on the line, seeded from the field's current value.
-    pub input: String,
-    /// The rejection shown under the header, if the last Enter was refused.
-    pub error: Option<String>,
 }
 
 /// The first-run import offer as far as the frame can see it (#38).
@@ -533,28 +521,23 @@ fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> 
         None => Vec::new(),
     };
 
-    // The add sequence's own history: each answered step settled to a
-    // `◇` line, and the rejection — if there is one — goes last, so a
-    // terminal too short for all of them drops the oldest settled step
-    // before it drops the reason the user is stuck.
-    if let Some(add) = &flow.add {
-        for settled in &add.settled {
-            lines.push(settled_field_line(settled, t));
+    // The form map: six field rows, the rule row, then the ▶ row.
+    //
+    // The rule row is the one that pays for the error line. It is
+    // decorative and the refusal is not, and a `!` at that position still
+    // separates the fields from the button — so the map occupies exactly
+    // eight rows whether or not anything is wrong, which is what keeps the
+    // frame's height constant across the whole form instead of jumping a
+    // line every time a keystroke changes the validation state.
+    if let Some(form) = &flow.form {
+        for row in &form.rows {
+            lines.push(map_row_line(row, form.placeholder, t));
         }
-        if let Some(error) = &add.error {
-            lines.push(error_line(error, t));
+        match &form.error {
+            Some(error) => lines.push(error_line(error, t)),
+            None => lines.push(rule_line(t)),
         }
-    }
-
-    // The editor's own ask: the field on the line, and the rejection if
-    // the last Enter was refused. The ask comes before the error for the
-    // same reason the add sequence puts its reason last — when the budget
-    // cuts, the reason the user is stuck on survives.
-    if let Some(edit) = &flow.edit {
-        lines.push(edit_field_line(edit, t));
-        if let Some(error) = &edit.error {
-            lines.push(error_line(error, t));
-        }
+        lines.push(submit_line(form, t));
     }
 
     if lines.len() > budget {
@@ -564,60 +547,153 @@ fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> 
     lines
 }
 
-/// The live edit field: `◆ Alias  web-01_`.
+/// One row of the form map: `\u2713 Alias  prod`.
 ///
-/// The same shape the add step wears — the field word, the text on the
-/// line, the drawn caret — because it *is* the same kind of thing: one
-/// field, being filled in. What differs is that the line arrives already
-/// holding the value it was seeded from, so the user sees what they are
-/// changing rather than an empty slot, and the header above names the
-/// Connection it belongs to.
+/// The glyph carries the state and the label carries the name, so the row
+/// reads correctly with no colour at all \u2014 the standing requirement for a
+/// surface that owns no background. Colour only *prioritises*: `!` is the
+/// one yellow thing on the map so the eye lands on the problem, `\u25cf` is the
+/// one cyan thing so the eye lands on what is about to be saved.
 ///
-/// The typed text is bold and the caret dim: the text is the fact, the
-/// caret is chrome. Under `NO_COLOR` both survive as themselves.
-fn edit_field_line(edit: &EditFlow, t: &Theme) -> Line<'static> {
+/// The focused row wears `\u25c6` in the accent with a bold label. The caret is
+/// drawn rather than left to the terminal, because an inline frame has no
+/// cursor of its own to park on a row it is not on.
+fn map_row_line(row: &crate::manage::MapRow, placeholder: &str, t: &Theme) -> Line<'static> {
+    use crate::manage::RowGlyph;
+
     let dim = Style::default().fg(t.fg_muted);
     let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
 
-    Line::from(vec![
+    let glyph_style = if row.focused {
+        Style::default().fg(t.accent).add_modifier(Modifier::BOLD)
+    } else {
+        match row.glyph {
+            RowGlyph::Invalid => Style::default().fg(t.warning).add_modifier(Modifier::BOLD),
+            RowGlyph::Changed => Style::default().fg(t.accent),
+            _ => dim,
+        }
+    };
+    let glyph = if row.focused {
+        '◆'
+    } else {
+        row.glyph.char()
+    };
+
+    let mut spans = vec![
         Span::styled(RAIL, Style::default().fg(t.border)),
         Span::styled(GUTTER_PAD, dim),
-        Span::styled(format!("◆ {:<FIELD_LABEL_WIDTH$}  ", edit.label), dim),
-        Span::styled(edit.input.clone(), bold),
-        Span::styled(CARET, dim),
+        Span::styled(format!("{glyph} "), glyph_style),
+        Span::styled(
+            format!("{:<FIELD_LABEL_WIDTH$} ", row.label),
+            if row.focused { bold } else { dim },
+        ),
+    ];
+
+    match &row.value {
+        // The typed text is bold and the caret dim: the text is the fact,
+        // the caret is chrome.
+        Some(value) if row.focused => {
+            spans.push(Span::styled(value.clone(), bold));
+            spans.push(Span::styled(CARET, dim));
+        }
+        Some(value) => spans.push(Span::styled(value.clone(), Style::default().fg(t.fg))),
+        None => {
+            // A required field that is still empty must not read as
+            // optional. The mode's placeholder is for the fields that may
+            // honestly be left alone; everything else says what it is.
+            let text = if row.required {
+                "<required>"
+            } else {
+                placeholder
+            };
+            spans.push(Span::styled(
+                text.to_string(),
+                Style::default().fg(t.fg_placeholder),
+            ));
+        }
+    }
+
+    Line::from(spans)
+}
+
+/// The separator between the fields and the `\u25b6` row.
+///
+/// Decorative, which is precisely why the error line takes this row when
+/// the two compete: the reason the user is stuck beats a horizontal rule.
+fn rule_line(t: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(RAIL, Style::default().fg(t.border)),
+        Span::styled(GUTTER_PAD, Style::default().fg(t.fg_muted)),
+        Span::styled("─".repeat(RULE_WIDTH), Style::default().fg(t.border)),
     ])
 }
 
-/// A settled add step: `◇ Alias  web-01`.
+/// The `\u25b6 Add connection` / `\u25b6 Save changes to web-1` row.
 ///
-/// The label recedes with the note grammar and the value is bold, because
-/// the value is the fact worth scanning back through. An optional field
-/// the user left empty is drawn as `—`, not as nothing: a blank after
-/// `◇ Key` reads as a step that lost its answer, not as one that
-/// deliberately has none.
-fn settled_field_line(settled: &SettledField, t: &Theme) -> Line<'static> {
+/// Deliberately a different look and feel from the field rows above it:
+/// those are inputs, this is the decision. Three states, all readable with
+/// no colour \u2014 the `\u25b6` is always there, so the difference is carried by
+/// weight and tier, never by the glyph appearing or disappearing:
+///
+/// * **not ready** \u2014 the whole row recedes to `fg_muted`. The user can see
+///   the button will not fire, which is why the field glyphs are allowed to
+///   be the only loud signal while filling.
+/// * **ready, cursor elsewhere** \u2014 accent glyph, plain label.
+/// * **ready, cursor here** \u2014 accent + bold glyph and bold label, so the
+///   row the user is about to commit from is unmistakable.
+fn submit_line(form: &FormFlow, t: &Theme) -> Line<'static> {
     let dim = Style::default().fg(t.fg_muted);
-    let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
 
-    let value = match &settled.value {
-        Some(value) => Span::styled(value.clone(), bold),
-        None => Span::styled(ABSENT, dim),
+    // Focus is carried by BOLD on the glyph in *every* readiness state.
+    // Without it the cursor on a not-ready `▶` row is byte-identical to
+    // the cursor not being on it, which breaks the rule that selection
+    // must be readable with no colour at all \u2014 and it breaks it at the
+    // worst moment, when the user is arrowing around trying to find the
+    // one row that will actually do something.
+    let (glyph_style, label_style) = if !form.submit_ready {
+        if form.submit_focused {
+            // Bold on both halves, as in the ready state. The grey tier is
+            // what keeps a form that cannot fire from shouting; the weight is
+            // what keeps the cursor visible once colour is gone.
+            (
+                dim.add_modifier(Modifier::BOLD),
+                dim.add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (dim, dim)
+        }
+    } else if form.submit_focused {
+        (
+            Style::default().fg(t.accent).add_modifier(Modifier::BOLD),
+            Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (
+            Style::default().fg(t.accent),
+            Style::default().fg(t.fg),
+        )
     };
 
     Line::from(vec![
         Span::styled(RAIL, Style::default().fg(t.border)),
         Span::styled(GUTTER_PAD, dim),
-        Span::styled(format!("◇ {:<FIELD_LABEL_WIDTH$}  ", settled.label), dim),
-        value,
+        Span::styled("▶ ", glyph_style),
+        Span::styled(form.submit_label.clone(), label_style),
     ])
 }
 
-/// How a settled optional field reads when the user left it empty.
-const ABSENT: &str = "—";
-
-/// The width every settled step label is padded to, so the values line up
-/// down the sequence instead of stair-stepping.
+/// The width the field labels are padded to, so the values line up in a
+/// column down the map rather than starting wherever the label ends.
 const FIELD_LABEL_WIDTH: usize = 6;
+
+/// How long the form map's separator rule is.
+///
+/// Fixed rather than width-derived because `flow_lines` is handed a line
+/// budget, not a column count, and the rule is decoration: it separates
+/// the fields from the `▶` row, and 34 columns does that at every width
+/// the frame is designed for. Deriving it would mean threading a width
+/// through a function that has no business knowing one.
+const RULE_WIDTH: usize = 34;
 
 /// The step's rejection, shown under the header.
 ///
@@ -1329,30 +1405,25 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// least-needed segment.
 fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) -> Line<'static> {
     // Declared out here so the borrow outlives the `match` that picks one.
-    const ADD_MID: &[&str] = &["Esc back", "Enter next", "Ctrl+C quit"];
-    const ADD_LAST: &[&str] = &["Esc back", "Enter add", "Ctrl+C quit"];
-    const EDITING: &[&str] = &["Esc back", "Enter save", "←→ field", "Ctrl+C quit"];
+    const FORM_FIELD: &[&str] = &["Esc back", "Enter next", "↑↓ move", "Ctrl+C quit"];
+    const FORM_SUBMIT: &[&str] = &["Esc back", "Enter save", "↑↓ move", "Ctrl+C quit"];
     const CONFIRMING: &[&str] = &["Esc back", "y confirm", "N abort", "Ctrl+C quit"];
 
     let hints: &[&str] = if flow.confirming.is_some() || flow.import_offer.is_some() {
         CONFIRMING
-    } else if let Some(add) = &flow.add {
-        // The add step names what Enter means *on this step*: `next`
-        // while there are steps left, `add` on the last one, where the
-        // same keypress commits the Connection. A rail that said `next`
-        // there would be hinting a step that does not exist.
-        if add.last {
-            ADD_LAST
+    } else if let Some(form) = &flow.form {
+        // The rail names what Enter means on the row the cursor is on:
+        // `next` on a field, `save` on the ▶ row. Hinting one meaning for
+        // both keys would be lying about one of them.
+        //
+        // `↑↓ move` is on it because the arrows here move the *form cursor*,
+        // not the list cursor — and with the list hidden behind the map,
+        // nothing else on screen says what they do.
+        if form.submit_focused {
+            FORM_SUBMIT
         } else {
-            ADD_MID
+            FORM_FIELD
         }
-    } else if flow.edit.is_some() {
-        // The editor's rail names the two things that are true only here:
-        // the arrows move the *field*, not the list cursor, and Enter
-        // saves rather than advances. Without `←→ field` on the rail the
-        // arrows would be a mystery — the list uses them for nothing else,
-        // and nothing else on screen says they do anything.
-        EDITING
     } else {
         match mode {
             FrameMode::Pick => &[
@@ -1365,10 +1436,9 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
                 "sshm manage to add or edit",
             ],
             // `Ctrl+A add` and `Ctrl+E edit` are both on the rail (#37):
-            // each chord now does the thing its label names — `Ctrl+A`
-            // walks the five-step sequence and writes the Connection,
-            // `Ctrl+E` opens the in-place single-field editor and writes
-            // through the store.
+            // each chord does the thing its label names. Both open the same
+            // six-field map; `Ctrl+A` starts it blank, `Ctrl+E` starts it
+            // from the selected Connection.
             //
             // `Enter edit` is off it. Six hints do not fit the 75 columns
             // an 80-column terminal leaves the rail, and drop-from-the-end
@@ -1462,55 +1532,24 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
         ]);
     }
 
-    // The add step: the header *is* the step, one line, one ask — the
-    // same grammar the delete confirm uses. The typed text rides on the
-    // header with it because the frame hides the terminal cursor and a
-    // text field with no cursor and no echo of its own is a field the
-    // user cannot see themselves filling.
-    if let Some(add) = &flow.add {
-        let dim = Style::default().fg(t.fg_muted);
-
+    // The form's header names the *ask*, not the field. The old add header
+    // wore the field word because the field was the whole question; on the
+    // map every field is on screen at once, so the question at the top of
+    // the frame is the one the map cannot answer for itself: am I adding,
+    // and if I am editing, of which Connection.
+    //
+    // Same grammar as the delete confirm's header — `&#9670; Edit`, dim folder prefix,
+    // bold alias — so the chords that change a Connection read as the same
+    // kind of thing.
+    if let Some(form) = &flow.form {
         return Line::from(vec![
             Span::styled("◆", Style::default().fg(t.accent)),
             Span::raw(" "),
             Span::styled(
-                add.label.to_string(),
+                form.header.clone(),
                 Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
             ),
-            Span::raw("  "),
-            Span::raw(add.input.clone()),
-            Span::styled(CARET, dim),
         ]);
-    }
-
-    // The edit: the header names the **target**, not the field.
-    //
-    // The add header wears the field word because the field is the whole
-    // ask. Here the field is drawn on its own line just below, and what
-    // the top of the frame must answer instead is "which Connection am I
-    // about to change?" — the one question that cannot be recovered from
-    // the field line, and the one that matters most before a write.
-    //
-    // Same shape as the delete confirm's header: `◆ Edit`, dim folder
-    // prefix, bold alias. The two chords that change a Connection read as
-    // the same kind of thing.
-    if let Some(edit) = &flow.edit {
-        let dim = Style::default().fg(t.fg_muted);
-        let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
-
-        let mut spans = vec![
-            Span::styled("◆", Style::default().fg(t.accent)),
-            Span::raw(" "),
-            Span::styled("Edit ", bold),
-        ];
-
-        if let Some(folder) = edit.target.folder.as_deref().filter(|f| !f.is_empty()) {
-            spans.push(Span::styled(format!("[{folder}] "), dim));
-        }
-
-        spans.push(Span::styled(edit.target.alias.clone(), bold));
-
-        return Line::from(spans);
     }
 
     let title = match mode {

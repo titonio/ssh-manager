@@ -88,15 +88,18 @@ pub enum Phase {
     ConfirmImport { count: usize, path: String },
 }
 
-/// Which field of the add sequence is live.
+/// Which field of the form a map row stands for.
 ///
-/// The five are the spec's five, in the spec's order (#31 user story 24).
-/// Each one carries its own optionality and its own validation, and both
-/// come from the `Connection` model rather than from taste:
+/// Six fields, each carrying its own optionality and its own validation,
+/// and both come from the `Connection` model rather than from taste:
 ///
 /// * **Alias, Host** — required. A `Connection` without one of these is
 ///   not a Connection: no alias and there is nothing to pick or emit; no
 ///   host and `ssh` has nowhere to go. Empty is rejected.
+/// * **User** — optional, and *absent* when left empty. `Connection::user`
+///   is a plain `String` that `ssh::build_ssh_args` reads as "no `user@`,
+///   let ssh use the local login name", so leaving it blank is a real
+///   answer, not a missing one.
 /// * **Port** — optional with the SSH default. Empty settles as `22`,
 ///   which is what [`ConnectionDraft::clear`] seeds and what
 ///   `connections::connection_from` falls back to. Anything that is not
@@ -107,26 +110,28 @@ pub enum Phase {
 ///   `Connection::key_path` and `::folder` are `Option<String>`, and a
 ///   settled empty string would reach `ssh` as `-i ""`.
 ///
-/// There is deliberately **no User step.** The spec names five steps and
-/// `user` is not one of them, so the sequence cannot collect one and the
-/// added Connection carries an empty `user` — exactly what `sshm add`
-/// without `--user` produces, and what `ssh::build_ssh_args` already
-/// treats as "no `user@`, let ssh use the local login name". Adding the
-/// field is a spec change, not this ticket's.
+/// **User is here because it was missing.** The original five-step sequence
+/// named in #31 story 24 has no User step, so every Connection added
+/// through it carried an empty `user` and rendered as `(@192.168.31.7:22)`
+/// — a Connection the user could not name the login for, and could only
+/// repair afterwards. That was a spec gap, not a design: `sshm add --user`
+/// has always accepted one. See `docs/adr/0001-form-map-replaces-the-stepped-add.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddField {
     Alias,
     Host,
+    User,
     Port,
     Key,
     Folder,
 }
 
 impl AddField {
-    /// The order the sequence walks, as the spec writes it.
-    pub const ORDER: [AddField; 5] = [
+    /// The order the map walks, top to bottom.
+    pub const ORDER: [AddField; 6] = [
         AddField::Alias,
         AddField::Host,
+        AddField::User,
         AddField::Port,
         AddField::Key,
         AddField::Folder,
@@ -138,6 +143,7 @@ impl AddField {
         match self {
             AddField::Alias => "Alias",
             AddField::Host => "Host",
+            AddField::User => "User",
             AddField::Port => "Port",
             AddField::Key => "Key",
             AddField::Folder => "Folder",
@@ -184,7 +190,11 @@ impl AddField {
 
         match self {
             AddField::Port => match value.parse::<u16>() {
-                Ok(0) | Err(_) => Err("port must be a number from 1 to 65535".to_string()),
+                // Short on purpose. The full sentence ("must be a number
+                // from 1 to 65535") plus the example plus two other
+                // problems on the line overruns 80 columns; this leaves
+                // room for all three problems *and* the example.
+                Ok(0) | Err(_) => Err("port must be 1–65535 (e.g. 22)".to_string()),
                 Ok(port) => Ok(port.to_string()),
             },
             _ => Ok(value.to_string()),
@@ -200,6 +210,7 @@ impl AddField {
         match self {
             AddField::Alias => &draft.alias,
             AddField::Host => &draft.host,
+            AddField::User => &draft.user,
             AddField::Port => &draft.port,
             AddField::Key => &draft.key_path,
             AddField::Folder => &draft.folder,
@@ -218,13 +229,20 @@ impl AddField {
             .to_string()
     }
 
-    /// The value this field settled to, read back out of the draft.
+    /// Why this field is wrong, if it is. `None` means it is fine.
     ///
-    /// `None` is the honest shape of an optional field the user left
-    /// alone: absent, not empty.
-    fn settled_value(self, draft: &ConnectionDraft) -> Option<String> {
-        let value = self.field_of(draft);
-        (!value.is_empty()).then(|| value.to_string())
+    /// Both kinds of wrong come through here — empty-and-required, and
+    /// content that will not validate — so the map's glyph and the error
+    /// line cannot disagree about which fields are wrong. They are the
+    /// same question asked once.
+    fn problem(self, draft: &ConnectionDraft) -> Option<String> {
+        let raw = self.field_of(draft);
+        if raw.trim().is_empty() {
+            return self
+                .required()
+                .then(|| format!("{} is required", self.label().to_lowercase()));
+        }
+        self.settle(raw).err()
     }
 
     /// Write a settled value into the draft.
@@ -232,6 +250,7 @@ impl AddField {
         match self {
             AddField::Alias => draft.alias = value,
             AddField::Host => draft.host = value,
+            AddField::User => draft.user = value,
             AddField::Port => draft.port = value,
             AddField::Key => draft.key_path = value,
             AddField::Folder => draft.folder = value,
@@ -242,162 +261,388 @@ impl AddField {
 /// The SSH default port, spelled once.
 const DEFAULT_PORT: u16 = 22;
 
-/// The add sequence as a value: where it has got to, and what it holds.
+/// Where the cursor sits in a form map.
+///
+/// The submit row is a row the cursor can be **on**, not a control parked
+/// outside the map. That is what lets `Enter` obey one rule — *act on the
+/// row you are standing on* — instead of meaning "advance" everywhere and
+/// "commit" somewhere else, and it is what makes the button reachable with
+/// the same arrows the fields are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormCursor {
+    Field(AddField),
+    Submit,
+}
+
+impl FormCursor {
+    /// Fields plus the submit row.
+    pub const ROWS: usize = AddField::ORDER.len() + 1;
+
+    /// The row's position, top to bottom.
+    pub fn index(self) -> usize {
+        match self {
+            FormCursor::Field(f) => AddField::ORDER
+                .iter()
+                .position(|x| *x == f)
+                .unwrap_or(0),
+            FormCursor::Submit => AddField::ORDER.len(),
+        }
+    }
+
+    fn from_index(i: usize) -> Self {
+        if i >= AddField::ORDER.len() {
+            FormCursor::Submit
+        } else {
+            FormCursor::Field(AddField::ORDER[i])
+        }
+    }
+
+    /// One row down, stopping at the bottom rather than wrapping.
+    ///
+    /// `↓` saturates because it is the *reading* key: a user walking the
+    /// map with it expects to stop at the end, not to be teleported to the
+    /// top and have to read the whole thing again to find where they were.
+    pub fn down(self) -> Self {
+        Self::from_index((self.index() + 1).min(Self::ROWS - 1))
+    }
+
+    /// One row up, stopping at the top.
+    pub fn up(self) -> Self {
+        Self::from_index(self.index().saturating_sub(1))
+    }
+
+    /// One row down, wrapping top-from-bottom.
+    ///
+    /// `Tab` wraps because it is the *travel* key: on a seven-row map a
+    /// Tab that dies at the end is a Tab the user has to count.
+    pub fn next(self) -> Self {
+        Self::from_index((self.index() + 1) % Self::ROWS)
+    }
+
+    /// One row up, wrapping bottom-from-top.
+    pub fn prev(self) -> Self {
+        Self::from_index((self.index() + Self::ROWS - 1) % Self::ROWS)
+    }
+
+    pub fn is_submit(self) -> bool {
+        matches!(self, FormCursor::Submit)
+    }
+}
+
+/// What a map row's leading glyph says about its field.
+///
+/// Five states, each with its own glyph, because the frame owns no
+/// background and a hue alone vanishes under `NO_COLOR`. The set is
+/// deliberately *ordinal*: `○` and `·` are both "nothing here" but say
+/// different things about whether that is a problem, and collapsing them
+/// is how a required field starts looking optional.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowGlyph {
+    /// Filled and valid.
+    Valid,
+    /// Valid, and different from what the stored Connection holds.
+    Changed,
+    /// Required and still empty.
+    Needed,
+    /// Has content that will not validate.
+    Invalid,
+    /// Optional and empty.
+    Empty,
+}
+
+impl RowGlyph {
+    pub fn char(self) -> char {
+        match self {
+            RowGlyph::Valid => '\u{2713}',
+            RowGlyph::Changed => '\u{25cf}',
+            RowGlyph::Needed => '\u{25cb}',
+            RowGlyph::Invalid => '!',
+            RowGlyph::Empty => '\u{b7}',
+        }
+    }
+}
+
+/// One row of the form map, ready for the frame to draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MapRow {
+    pub field: AddField,
+    pub label: &'static str,
+    /// Whether this field must be filled.
+    ///
+    /// Carried on the row because the frame needs it to pick an honest
+    /// placeholder: a required field that is still empty must never be
+    /// labelled `<optional>`. The real-terminal dump of the first map
+    /// build showed exactly that on Alias and Host.
+    pub required: bool,
+    pub glyph: RowGlyph,
+    /// The field's content, or `None` when it is empty — the frame then
+    /// draws the mode's placeholder in the `fg_placeholder` tier.
+    pub value: Option<String>,
+    pub focused: bool,
+}
+
+/// Every problem with a draft, in map order, as `(label, message)`.
+///
+/// The error line is built from this, so "which fields are wrong" is
+/// answered by the same call that paints the glyphs.
+pub fn field_problems(draft: &ConnectionDraft) -> Vec<(&'static str, String)> {
+    AddField::ORDER
+        .iter()
+        .filter_map(|f| f.problem(draft).map(|m| (f.label(), m)))
+        .collect()
+}
+
+/// The draft with every field run through its own settle rule.
+///
+/// `None` if any field will not settle, which makes this the form's
+/// validity check as well as its normaliser: trim, and the port's
+/// empty-to-`22`, applied at the one moment the value becomes a write.
+pub fn settled_draft(draft: &ConnectionDraft) -> Option<ConnectionDraft> {
+    let mut out = draft.clone();
+    for f in AddField::ORDER {
+        match f.settle(f.field_of(draft)) {
+            Ok(value) => f.commit(&mut out, value),
+            Err(_) => return None,
+        }
+    }
+    Some(out)
+}
+
+/// The map rows for a draft.
+///
+/// `baseline` is what the stored Connection holds. `None` on a new
+/// Connection, where nothing can be *changed* — only filled.
+pub fn map_rows(
+    draft: &ConnectionDraft,
+    focus: FormCursor,
+    baseline: Option<&ConnectionDraft>,
+) -> Vec<MapRow> {
+    AddField::ORDER
+        .iter()
+        .map(|f| {
+            let raw = f.field_of(draft);
+            let blank = raw.trim().is_empty();
+            let glyph = if !blank && f.settle(raw).is_err() {
+                RowGlyph::Invalid
+            } else if blank && f.required() {
+                // Wins over `Changed`: clearing the Host is both, and the
+                // one that blocks the save is the one worth showing.
+                RowGlyph::Needed
+            } else if baseline.is_some_and(|b| f.field_of(b).trim() != raw.trim()) {
+                RowGlyph::Changed
+            } else if blank {
+                RowGlyph::Empty
+            } else {
+                RowGlyph::Valid
+            };
+            MapRow {
+                field: *f,
+                label: f.label(),
+                required: f.required(),
+                glyph,
+                value: (!blank).then(|| raw.to_string()),
+                focused: focus == FormCursor::Field(*f),
+            }
+        })
+        .collect()
+}
+
+/// The refusal line: every problem with the form, joined for one row.
+pub fn refusal_line(problems: &[(&'static str, String)], nothing_changed: bool) -> String {
+    let mut parts: Vec<String> = problems.iter().map(|(_, msg)| msg.clone()).collect();
+    if nothing_changed {
+        parts.push("nothing to save".to_string());
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// The add form as a value: where the cursor is, and what the map holds.
+///
+/// The draft is **live** — every keystroke writes straight into the field
+/// the cursor is on. That is what lets the map show all six fields at once
+/// from one source of truth instead of one step at a time, and it is why
+/// there is no separate `input` line that has to be settled before the row
+/// stops lying: the row *is* the draft.
+///
+/// Normalisation is deliberately **not** applied while typing. Showing `22`
+/// in a field the user left empty would be putting words in their mouth;
+/// the map shows what was typed, and [`settled_draft`] applies the
+/// defaults at the moment the value becomes a write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddSequence {
-    /// The field being answered right now.
-    pub field: AddField,
-    /// The fields already settled. Nothing here has been written anywhere:
-    /// the draft becomes a Connection only when the last step is answered,
-    /// and even then it is the store that decides whether it exists.
+    /// Which row of the map the cursor is on.
+    pub cursor: FormCursor,
+    /// The form's live content. Nothing here has been written anywhere:
+    /// the draft becomes a Connection only when the submit row is
+    /// accepted, and even then the store decides whether it exists.
     pub draft: ConnectionDraft,
-    /// What the user has typed into the live field.
-    pub input: String,
-    /// The last rejection, shown under the header. Cleared by the next
-    /// keystroke, so a fixed mistake stops being reported.
+    /// The last refusal, drawn in the rule row. Cleared by the next
+    /// keystroke that could fix it, so a mistake stops being reported the
+    /// moment the user starts correcting it.
     pub error: Option<String>,
 }
 
 impl AddSequence {
-    /// A sequence at its first step.
+    /// A blank form with the cursor on the first field.
     pub fn start() -> Self {
         Self {
-            field: AddField::Alias,
+            cursor: FormCursor::Field(AddField::Alias),
             draft: ConnectionDraft::default(),
-            input: String::new(),
             error: None,
         }
     }
 
-    /// The steps already settled, as `(label, value)`, in order.
+    /// The map the frame draws.
+    pub fn rows(&self) -> Vec<MapRow> {
+        map_rows(&self.draft, self.cursor, None)
+    }
+
+    /// Whether the `\u{25b6} Add connection` row would be accepted now.
+    pub fn ready(&self) -> bool {
+        settled_draft(&self.draft).is_some()
+    }
+
+    /// Every problem with the form, in map order.
+    pub fn problems(&self) -> Vec<(&'static str, String)> {
+        field_problems(&self.draft)
+    }
+
+    /// Type into the field under the cursor.
     ///
-    /// Everything before the live field. The frame draws these as the
-    /// `◇` trace lines the spec asks for, and an absent optional field
-    /// is `None` so the frame can say *absent* rather than show a blank.
-    pub fn settled(&self) -> Vec<(&'static str, Option<String>)> {
-        AddField::ORDER
-            .iter()
-            .take_while(|f| **f != self.field)
-            .map(|f| (f.label(), f.settled_value(&self.draft)))
-            .collect()
+    /// On the submit row typing does nothing. Appending to whichever field
+    /// was last focused would be the worse failure: the user would be
+    /// changing a row they are not looking at.
+    fn typed(mut self, ch: char) -> Self {
+        if let FormCursor::Field(field) = self.cursor {
+            let mut value = field.field_of(&self.draft).to_string();
+            value.push(ch);
+            field.commit(&mut self.draft, value);
+            self.error = None;
+        }
+        self
     }
 
-    /// The step before this one, with its answer put back on the line for
-    /// editing. `None` at the first step, which is where the sequence is
-    /// abandoned rather than walked back.
-    fn back(&self) -> Option<Self> {
-        let i = AddField::ORDER.iter().position(|f| *f == self.field)?;
-        if i == 0 {
-            return None;
+    /// Delete one character from the field under the cursor.
+    fn deleted(mut self) -> Self {
+        if let FormCursor::Field(field) = self.cursor {
+            let mut value = field.field_of(&self.draft).to_string();
+            value.pop();
+            field.commit(&mut self.draft, value);
+            self.error = None;
         }
-        let field = AddField::ORDER[i - 1];
-        Some(Self {
-            field,
-            draft: self.draft.clone(),
-            input: field.settled_value(&self.draft).unwrap_or_default(),
-            error: None,
-        })
+        self
     }
 }
 
-/// The in-place single-field editor as a value (#37).
+/// The edit form as a value: the same map the add form draws, seeded from
+/// a Connection that already exists.
 ///
-/// The whole editor is one value: which Connection is being edited, which
-/// of its fields is on the line, what is being typed, and what the last
-/// rejection said. As with [`AddSequence`], that is what turns "what does
-/// Enter do here?" into a unit test with no terminal.
+/// **This is the add flow, not a second editor.** `Ctrl+E` opens the same
+/// six-row map, the same cursor, the same ▶ row — the differences are
+/// that the rows arrive filled and the button says *Save* and names the
+/// Connection. Two flows that look alike and behave differently are the
+/// thing users get wrong; one flow with a different starting draft is not.
 ///
-/// **Why one field and not five.** The add sequence has to walk the fields
-/// because it is building a Connection out of nothing. An edit starts
-/// from a Connection that is already whole, and story 26 asks for a small
-/// correction to take *one* step. Re-running the five-step sequence to
-/// change a port would be four steps of nothing.
-///
-/// **Why the field is chosen rather than assumed.** The editor could have
-/// opened on Alias every time, but then correcting a port would mean
-/// arrowing past four fields with no way to see which is live. So the
-/// field is part of the state, `←`/`→` move it, and the header names it —
-/// the same reason the add sequence puts the field word on the header
-/// instead of leaving the user to count steps.
+/// **This deliberately departs from #31 story 26**, which asked that an
+/// edit "change exactly one field". Here Enter advances and the ▶ row
+/// commits, so one save can carry several changed fields. The old shape
+/// committed on every Enter, which meant a two-field correction wrote the
+/// file twice and could not be abandoned halfway through. Changed fields
+/// wear ● so the save is reviewable before it happens.
+/// See `docs/adr/0001-form-map-replaces-the-stepped-add.md`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditSequence {
     /// The Connection being edited, captured by value at the chord.
     ///
-    /// The editor changes one field *of this Connection*. Carrying the
-    /// whole value is what lets the frame show the target by name, lets
-    /// each field be pre-filled from what it actually holds, and lets the
-    /// driver hand the store the id of the thing the user was looking at
-    /// rather than whatever the cursor has since drifted onto.
+    /// Carrying the whole value is what lets the frame name the target on
+    /// the button, lets each field be pre-filled from what it actually
+    /// holds, and lets the driver hand the store the id of the thing the
+    /// user was looking at rather than whatever the cursor has drifted
+    /// onto since.
     pub target: Connection,
-    /// The field on the line right now.
-    pub field: AddField,
-    /// What is on the line. Seeded with the field's current value, so the
-    /// user is editing what is there rather than retyping it.
-    pub input: String,
-    /// The last rejection, shown under the header and cleared by the next
-    /// keystroke that could fix it.
+    /// Which row of the map the cursor is on.
+    pub cursor: FormCursor,
+    /// The live copy, seeded from `target`.
+    pub draft: ConnectionDraft,
+    /// The untouched copy the draft is diffed against.
+    ///
+    /// Kept as a value rather than recomputed from `target` so the diff has
+    /// one obvious source and cannot drift from what the map showed when
+    /// the form opened.
+    pub baseline: ConnectionDraft,
+    /// The last refusal, drawn in the rule row.
     pub error: Option<String>,
 }
 
 impl EditSequence {
-    /// Open the editor on a Connection, at its first field.
+    /// Open the map on a Connection, cursor on the first field.
+    ///
+    /// The cursor starts at the top rather than on the field the user is
+    /// most likely to change: guessing wrong costs a keystroke either way,
+    /// and a predictable starting row beats a clever one the user cannot
+    /// learn.
     pub fn start(target: Connection) -> Self {
+        let draft = ConnectionDraft::from_connection(&target);
         Self {
-            field: AddField::Alias,
-            input: AddField::Alias.current(&target),
+            cursor: FormCursor::Field(AddField::Alias),
+            baseline: draft.clone(),
+            draft,
             target,
             error: None,
         }
     }
 
-    /// The same editor with a different field on the line, its input
-    /// re-seeded from what that field actually holds.
-    ///
-    /// The re-seed is the whole reason moving between fields is safe: the
-    /// line always shows the truth about the field it names, so a user who
-    /// arrows from Host to Port and hits Enter cannot accidentally write
-    /// a hostname into the port.
-    ///
-    /// A field with nothing settled yet comes back empty, which is the
-    /// honest starting point for an optional field that has never had a
-    /// value.
-    fn focused(&self, field: AddField) -> Self {
-        Self {
-            field,
-            input: field.current(&self.target),
-            error: None,
-            ..self.clone()
-        }
+    /// The map the frame draws, with the stored Connection as the diff
+    /// baseline.
+    pub fn rows(&self) -> Vec<MapRow> {
+        map_rows(&self.draft, self.cursor, Some(&self.baseline))
     }
 
-    /// The field `delta` steps away from the live one, wrapping at both
-    /// ends.
+    /// The fields that differ from the stored Connection, in map order.
     ///
-    /// Wrapping is what makes `←` from Alias land on Folder rather than
-    /// doing nothing: on a five-item cycle a key that silently dies reads
-    /// as a broken keybinding, and the rail has already promised the key
-    /// moves the field.
-    fn shifted(&self, delta: isize) -> AddField {
-        let len = AddField::ORDER.len() as isize;
-        let now = AddField::ORDER
+    /// Compared trimmed: typing three spaces into an empty optional is not
+    /// a change to the file, and calling it one would let the button light
+    /// up for a save that changes nothing.
+    pub fn changed(&self) -> Vec<AddField> {
+        AddField::ORDER
             .iter()
-            .position(|f| *f == self.field)
-            .unwrap_or(0) as isize;
-        AddField::ORDER[((now + delta).rem_euclid(len)) as usize]
+            .filter(|f| f.field_of(&self.draft).trim() != f.field_of(&self.baseline).trim())
+            .copied()
+            .collect()
     }
 
-    /// The Connection the draft in `draft` would replace `target` with.
-    ///
-    /// Carries `target`'s id across rather than minting a new one: an
-    /// edit answers about *this* Connection, and a fresh id would orphan
-    /// every reference to the old one. The minting half of
-    /// [`connection_from`] is deliberately not used here — the store owns
-    /// that, and this only owns the "same Connection, one field changed"
-    /// half.
-    fn edited(&self, value: String) -> ConnectionDraft {
-        let mut draft = ConnectionDraft::from_connection(&self.target);
-        self.field.commit(&mut draft, value);
-        draft
+    /// Whether the ▶ Save row would be accepted now: nothing invalid, and
+    /// something actually changed.
+    pub fn ready(&self) -> bool {
+        !self.changed().is_empty() && settled_draft(&self.draft).is_some()
+    }
+
+    /// Every problem with the form, in map order.
+    pub fn problems(&self) -> Vec<(&'static str, String)> {
+        field_problems(&self.draft)
+    }
+
+    /// Type into the field under the cursor. See [`AddSequence::typed`]
+    /// for why the submit row swallows it.
+    fn typed(mut self, ch: char) -> Self {
+        if let FormCursor::Field(field) = self.cursor {
+            let mut value = field.field_of(&self.draft).to_string();
+            value.push(ch);
+            field.commit(&mut self.draft, value);
+            self.error = None;
+        }
+        self
+    }
+
+    /// Delete one character from the field under the cursor.
+    fn deleted(mut self) -> Self {
+        if let FormCursor::Field(field) = self.cursor {
+            let mut value = field.field_of(&self.draft).to_string();
+            value.pop();
+            field.commit(&mut self.draft, value);
+            self.error = None;
+        }
+        self
     }
 }
 
@@ -1154,118 +1399,89 @@ fn import_declined(state: &ManageState) -> ManageState {
     }
 }
 
-/// The add step-sequence: one field on the line at a time.
+/// The add form: the whole map on screen, one row under the cursor.
 ///
-/// Three rules the whole sequence is built on:
+/// Three rules the whole form is built on:
 ///
-/// * **Typing edits the live field, never the filter behind it.** The
-///   filter is what the user returns to; the sequence borrows the frame,
-///   not their search.
-/// * **A rejection is not a transition.** An answer that fails
-///   validation leaves the step, the input and the cursor exactly where
-///   they were and adds one line saying why. The user fixes the field;
-///   they do not start the step over.
-/// * **Nothing is written until the last step is answered**, and even
-///   then the sequence only *asks* — [`settle_add`] is where the frame
-///   learns whether the write happened.
+/// * **Typing edits the field under the cursor, never the filter behind
+///   it.** The filter is what the user returns to; the form borrows the
+///   frame, not their search.
+/// * **Movement is never refused.** `\u{2191}`/`\u{2193}` walk the rows, `Tab` travels
+///   with wrap, and `Enter` advances off any field. A field that will not
+///   validate still moves the cursor, because its `!` glyph and the dim
+///   `\u25b6` row already say what is wrong — trapping the user on the row
+///   to add safety they already have is the thing this map was drawn to
+///   remove.
+/// * **Nothing is written until the `\u25b6` row is accepted**, and even then
+///   the form only *asks* — [`settle_add`] is where the frame learns
+///   whether the write happened.
 fn add_step(state: &ManageState, key: KeyEvent, sequence: &AddSequence) -> Step {
     if is_chord(key, 'c') {
         return Step::exit(state.clone(), InlineOutcome::Cancelled);
     }
 
-    let mut next = sequence.clone();
+    // Every cursor move produces the same shape; `on` wraps it so no arm
+    // re-types the spread.
+    let on = |cursor: FormCursor| {
+        Step::state_only(ManageState {
+            phase: Phase::Add(AddSequence {
+                cursor,
+                ..sequence.clone()
+            }),
+            ..state.clone()
+        })
+    };
+
     match key.code {
-        KeyCode::Enter => return settle_field(state, sequence),
+        KeyCode::Enter => {
+            if sequence.cursor.is_submit() {
+                return submit_add(state, sequence);
+            }
+            on(sequence.cursor.next())
+        }
+        KeyCode::Down => on(sequence.cursor.down()),
+        KeyCode::Up => on(sequence.cursor.up()),
+        KeyCode::Tab => on(sequence.cursor.next()),
+        KeyCode::BackTab => on(sequence.cursor.prev()),
         KeyCode::Esc => {
-            // Back one step, with that step's answer back on the line to
-            // be corrected. Backing off the *first* step is backing out of
-            // the sequence: there is nothing before it, and what the user
-            // needs answered is whether the half of it they typed got
-            // saved. It did not — no `Effect::Add` leaves this module
-            // until the last step is answered — and the note says so.
-            return match sequence.back() {
-                Some(previous) => Step::state_only(ManageState {
-                    phase: Phase::Add(previous),
-                    ..state.clone()
-                }),
-                None => Step::state_only(ManageState {
+            // Esc is the escape hatch, not a second arrow: from any row it
+            // backs up one, and from the top row it leaves the form. Backing
+            // off the first row is backing out of the whole thing, and what
+            // the user needs answered is whether the half-typed form got
+            // saved. It did not — no `Effect::Add` leaves this module until
+            // the `\u25b6` row is accepted — and the note says so.
+            if sequence.cursor.index() == 0 {
+                Step::state_only(ManageState {
                     phase: Phase::List,
                     trace: Some(Trace::AddAbandoned),
                     ..state.clone()
-                }),
-            };
+                })
+            } else {
+                on(sequence.cursor.up())
+            }
         }
-        KeyCode::Backspace => {
-            next.input.pop();
-            next.error = None;
-        }
+        KeyCode::Backspace => Step::state_only(ManageState {
+            phase: Phase::Add(sequence.clone().deleted()),
+            ..state.clone()
+        }),
         KeyCode::Char(ch) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
-            next.input.push(ch);
-            // The user is fixing it. Keep saying it is broken after the
-            // first keystroke of the fix would be reporting a mistake
-            // that is already on its way out.
-            next.error = None;
+            Step::state_only(ManageState {
+                phase: Phase::Add(sequence.clone().typed(ch)),
+                ..state.clone()
+            })
         }
-        _ => return Step::state_only(state.clone()),
+        _ => Step::state_only(state.clone()),
     }
-
-    Step::state_only(ManageState {
-        phase: Phase::Add(next),
-        ..state.clone()
-    })
 }
 
-/// Answer the live step: validate, settle, advance — or refuse.
+/// Accept or refuse the `\u25b6 Add connection` row.
 ///
-/// A refusal keeps everything: the step, the input, the frame. The only
-/// thing it adds is the reason. An acceptance writes the value into the
-/// draft and moves on, and the last step's acceptance is the one thing in
-/// the whole sequence that asks the driver for anything.
-fn settle_field(state: &ManageState, sequence: &AddSequence) -> Step {
-    let value = match sequence.field.settle(&sequence.input) {
-        Ok(value) => value,
-        Err(message) => {
-            return Step::state_only(ManageState {
-                phase: Phase::Add(AddSequence {
-                    error: Some(message),
-                    ..sequence.clone()
-                }),
-                ..state.clone()
-            })
-        }
-    };
-
-    let mut draft = sequence.draft.clone();
-    sequence.field.commit(&mut draft, value);
-
-    match sequence.field.next() {
-        Some(field) => {
-            // The line is re-seeded from the field being landed on, the
-            // same rule [`AddSequence::back`] follows. On the first pass
-            // through the draft's next field is empty, so this is the
-            // blank line it always was; on a pass that has already been
-            // back through, it is the answer the field holds. Either way
-            // the line shows the truth about the field it names — which
-            // is what stops a bare Enter on a re-entered field from
-            // re-settling it from nothing and silently wiping the answer
-            // given the first time.
-            let input = field.settled_value(&draft).unwrap_or_default();
-            Step::state_only(ManageState {
-                phase: Phase::Add(AddSequence {
-                    field,
-                    draft,
-                    input,
-                    error: None,
-                }),
-                ..state.clone()
-            })
-        }
-        // The last step. The sequence is done and the draft is complete,
-        // which is the only point at which this module asks for a write —
-        // and it still does not claim one. `trace` stays empty: the
-        // `◇ added` note is earned from the store's answer, through
-        // [`settle_add`], exactly as `◇ deleted` is.
-        None => Step {
+/// The one keystroke in the add form that asks for a write, and the only
+/// place validation gates anything. A refusal keeps the whole form and adds
+/// the reason: every field that is wrong, in map order, on one line.
+fn submit_add(state: &ManageState, sequence: &AddSequence) -> Step {
+    match settled_draft(&sequence.draft) {
+        Some(draft) => Step {
             state: ManageState {
                 phase: Phase::List,
                 trace: None,
@@ -1273,104 +1489,120 @@ fn settle_field(state: &ManageState, sequence: &AddSequence) -> Step {
             },
             effects: vec![Effect::Add { draft }],
         },
+        None => {
+            let problems = sequence.problems();
+            Step::state_only(ManageState {
+                phase: Phase::Add(AddSequence {
+                    error: Some(refusal_line(&problems, false)),
+                    ..sequence.clone()
+                }),
+                ..state.clone()
+            })
+        }
     }
 }
 
-/// The in-place single-field editor (#37).
+/// The edit form: the same map, seeded from a live Connection.
 ///
-/// The same three rules the add sequence is built on, with one added:
+/// The same three rules [`add_step`] is built on, plus one:
 ///
-/// * **Typing edits the field, never the filter behind it.** The filter
-///   is what the user returns to.
-/// * **A rejection is not a transition.** A bad port leaves the field,
-///   the typed text and the target exactly where they were, plus one line
-///   saying why.
-/// * **Nothing is written until Enter**, and even then the editor only
-///   *asks* — [`settle_edit`] is where the frame learns whether the
-///   write happened.
-/// * **Movement changes which field is on the line, never which
+/// * **Movement changes which row is under the cursor, never which
 ///   Connection is being edited.** The target was captured at the chord.
-///   Arrowing left and right across five fields cannot move the edit onto
-///   a neighbour, for the same reason a cursor cannot move a delete onto
-///   one: the user answered about the thing they were looking at.
+///   Arrowing across six rows and a button cannot move the edit onto a
+///   neighbour, for the same reason a cursor cannot move a delete onto one:
+///   the user answered about the thing they were looking at.
 fn edit_step(state: &ManageState, key: KeyEvent, editor: &EditSequence) -> Step {
     if is_chord(key, 'c') {
         return Step::exit(state.clone(), InlineOutcome::Cancelled);
     }
 
-    // Every arm below produces the editor state the frame becomes;
-    // `editing` wraps it back up so no arm re-types the spread.
-    let editing = |editor: EditSequence| {
+    let on = |cursor: FormCursor| {
         Step::state_only(ManageState {
-            phase: Phase::Edit(editor),
+            phase: Phase::Edit(EditSequence {
+                cursor,
+                ..editor.clone()
+            }),
             ..state.clone()
         })
     };
 
     match key.code {
-        KeyCode::Enter => commit_field(state, editor),
-        // Backing out of an edit is not back *one step* — there is only
-        // one step. It is backing out of the whole thing, and what the
-        // user needs answered is whether the half-typed field got saved.
-        // It did not: no `Effect::Update` leaves this module until Enter
-        // validates it.
-        KeyCode::Esc => Step::state_only(ManageState {
-            phase: Phase::List,
-            trace: Some(Trace::EditAbandoned),
+        KeyCode::Enter => {
+            if editor.cursor.is_submit() {
+                return submit_edit(state, editor);
+            }
+            on(editor.cursor.next())
+        }
+        KeyCode::Down => on(editor.cursor.down()),
+        KeyCode::Up => on(editor.cursor.up()),
+        KeyCode::Tab => on(editor.cursor.next()),
+        KeyCode::BackTab => on(editor.cursor.prev()),
+        KeyCode::Esc => {
+            // Backing out of an edit answers the same question the add
+            // form answers: did the half-typed change get saved? It did
+            // not — no `Effect::Update` leaves this module until the
+            // `\u25b6` row is accepted — so Esc from the top row can say so
+            // honestly, whatever the user had typed into the rows below it.
+            if editor.cursor.index() == 0 {
+                Step::state_only(ManageState {
+                    phase: Phase::List,
+                    trace: Some(Trace::EditAbandoned),
+                    ..state.clone()
+                })
+            } else {
+                on(editor.cursor.up())
+            }
+        }
+        KeyCode::Backspace => Step::state_only(ManageState {
+            phase: Phase::Edit(editor.clone().deleted()),
             ..state.clone()
         }),
-        KeyCode::Left | KeyCode::BackTab => editing(editor.focused(editor.shifted(-1))),
-        KeyCode::Right | KeyCode::Tab => editing(editor.focused(editor.shifted(1))),
-        KeyCode::Backspace => {
-            let mut next = editor.clone();
-            next.input.pop();
-            // The user is fixing it. Keeping the rejection up after the
-            // first keystroke of the fix would be reporting a mistake
-            // that is already on its way out.
-            next.error = None;
-            editing(next)
-        }
         KeyCode::Char(ch) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
-            let mut next = editor.clone();
-            next.input.push(ch);
-            next.error = None;
-            editing(next)
+            Step::state_only(ManageState {
+                phase: Phase::Edit(editor.clone().typed(ch)),
+                ..state.clone()
+            })
         }
         _ => Step::state_only(state.clone()),
     }
 }
 
-/// Answer the live field: validate, then ask the store to write — or
-/// refuse.
+/// Accept or refuse the `\u25b6 Save changes to <alias>` row.
 ///
-/// The refusal keeps the field, the input and the target and adds only the
-/// reason. The acceptance is the one keystroke in the editor that asks for
-/// a write, and it does not claim one: `trace` stays empty until
-/// [`settle_edit`] folds the store's answer in.
-fn commit_field(state: &ManageState, editor: &EditSequence) -> Step {
-    let value = match editor.field.settle(&editor.input) {
-        Ok(value) => value,
-        Err(message) => {
-            return Step::state_only(ManageState {
-                phase: Phase::Edit(EditSequence {
-                    error: Some(message),
-                    ..editor.clone()
-                }),
-                ..state.clone()
-            })
-        }
+/// Two things can stop it, and both are said on the same line: a field that
+/// will not validate, and a form that has not actually changed. The second
+/// is an edit-only refusal — an add with nothing filled is simply not
+/// ready, but an edit that has touched nothing has answered a question
+/// nobody asked, and silently writing the file back would let the user
+/// believe something was saved.
+fn submit_edit(state: &ManageState, editor: &EditSequence) -> Step {
+    let problems = editor.problems();
+    let nothing_changed = editor.changed().is_empty();
+    let settled = if problems.is_empty() {
+        settled_draft(&editor.draft)
+    } else {
+        None
     };
 
-    Step {
-        state: ManageState {
-            phase: Phase::List,
-            trace: None,
-            ..state.clone()
+    match (settled, nothing_changed) {
+        (Some(draft), false) => Step {
+            state: ManageState {
+                phase: Phase::List,
+                trace: None,
+                ..state.clone()
+            },
+            effects: vec![Effect::Update {
+                target: editor.target.clone(),
+                draft,
+            }],
         },
-        effects: vec![Effect::Update {
-            target: editor.target.clone(),
-            draft: editor.edited(value),
-        }],
+        _ => Step::state_only(ManageState {
+            phase: Phase::Edit(EditSequence {
+                error: Some(refusal_line(&problems, nothing_changed)),
+                ..editor.clone()
+            }),
+            ..state.clone()
+        }),
     }
 }
 

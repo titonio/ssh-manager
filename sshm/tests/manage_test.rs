@@ -16,14 +16,31 @@
 //! * `y` must delete exactly one Connection;
 //! * the delete must be scoped to the Connection selected when the chord was
 //!   pressed, not to wherever the cursor drifted to afterwards.
+//!
+//! The two form flows — `Ctrl+A` and `Ctrl+E` — are now **one form map**: six
+//! field rows over a `▶` submit row, walked by a single [`FormCursor`] across
+//! a draft that is live rather than staged one step at a time. That reshapes
+//! almost every assertion below, and it inverts one rule in particular. The
+//! stepped add used to *trap* the user on a field that would not validate;
+//! the map traps nobody. Movement is free, the row's own glyph says what is
+//! wrong, and the only gate in the whole form is the `▶` row.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use sshm::config::{Connection, ImportReport};
+use sshm::connections::ConnectionDraft;
 use sshm::inline::InlineOutcome;
 use sshm::manage::{
-    self, step, AddField, AddSequence, DeleteOutcome, EditOutcome, Effect, ImportOutcome,
-    ManageState, Phase, Trace,
+    self, step, AddField, AddSequence, DeleteOutcome, EditOutcome, Effect, EditSequence, FormCursor,
+    ImportOutcome, ManageState, MapRow, Phase, RowGlyph, Trace,
 };
+
+/// The port's refusal sentence, spelled once. The dash in `1–65535` is an
+/// en dash, not a hyphen, and retyping it wrong in five places is exactly
+/// the kind of drift a constant exists to prevent.
+const PORT_REFUSAL: &str = "port must be 1\u{2013}65535 (e.g. 22)";
+
+/// What `refusal_line` puts between two problems.
+const JOIN: &str = " \u{b7} ";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -232,37 +249,49 @@ fn ctrl_e_with_nothing_selected_routes_nothing() {
     assert_eq!(step.state, ManageState::new());
 }
 
-/// `Ctrl+A` opens the Clack step-sequence the ticket names — `◆ Alias` →
-/// `◆ Host` → `◆ Port` → `◆ Key` → `◆ Folder` — at its first step (#37).
+/// `Ctrl+A` opens the form map — `Alias` `Host` `User` `Port` `Key`
+/// `Folder` over the `▶ Add connection` row — with the cursor on the
+/// first field and every row blank.
 ///
 /// Nothing is asked of the driver yet: opening a question is not an
-/// effect. The sequence is pure state until the last step is answered.
+/// effect. The map is pure state until the `▶` row is accepted.
+///
+/// Six rows, not the five the original ticket walked. `User` is the sixth,
+/// and it is here because its absence was a bug rather than a design; see
+/// `user_is_settable_during_add_and_lands_in_the_draft`.
 #[test]
-fn ctrl_a_opens_the_add_sequence_at_the_alias_step() {
+fn ctrl_a_opens_the_add_map_at_the_alias_row() {
     let step = step(&ManageState::new(), ctrl('a'), Some(&web01()));
 
     let sequence = match &step.state.phase {
         Phase::Add(sequence) => sequence,
-        other => panic!("Ctrl+A must open the add sequence, got {other:?}"),
+        other => panic!("Ctrl+A must open the add map, got {other:?}"),
     };
 
     assert_eq!(
-        sequence.field,
-        AddField::Alias,
-        "the sequence starts at Alias, the first of the spec's five"
+        sequence.cursor,
+        FormCursor::Field(AddField::Alias),
+        "the map opens on Alias, the first of the spec's six fields"
     );
-    assert!(
-        sequence.input.is_empty(),
-        "and starts with nothing typed: {sequence:?}"
+    assert_eq!(
+        sequence.draft,
+        ConnectionDraft::default(),
+        "and opens with nothing typed into any row: {:?}",
+        sequence.draft
+    );
+    assert_eq!(
+        sequence.rows().len(),
+        AddField::ORDER.len(),
+        "the map draws one row per field, with the submit row below them"
     );
     assert!(
         step.effects.is_empty(),
-        "opening a step must ask the driver for nothing: {:?}",
+        "opening a row must ask the driver for nothing: {:?}",
         step.effects
     );
 }
 
-/// The add sequence is reachable from the list whatever the list is doing,
+/// The add map is reachable from the list whatever the list is doing,
 /// and takes the frame off the list without leaving the frame.
 #[test]
 fn ctrl_a_opens_the_sequence_from_a_live_filter_without_losing_it() {
@@ -273,7 +302,7 @@ fn ctrl_a_opens_the_sequence_from_a_live_filter_without_losing_it() {
     assert!(matches!(step.state.phase, Phase::Add(_)));
     assert_eq!(
         step.state.query, "web",
-        "the filter is the user's; the sequence borrows the frame, not the query"
+        "the filter is the user's; the map borrows the frame, not the query"
     );
 }
 
@@ -477,14 +506,260 @@ fn the_store_answer_classifies_into_the_three_outcomes() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Slice 7 — the add step-sequence: typing, settling, validation
+// The map's cursor: travel, and the fact that nothing on a row can stop it
+//
+// The stepped add used to refuse movement out of a field that would not
+// validate, which is what made `Ctrl+A` feel like an interrogation. The map
+// inverts that: **movement is never refused**, from any row, whatever the
+// row holds. `↑`/`↓` saturate at the ends because they are the reading
+// keys, `Tab`/`BackTab` wrap because they are the travel keys, and `Enter`
+// on a field is just another way of moving down one. The single gate in the
+// whole form is the `▶` row, and nothing else.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The sequence is a text field, so the keystrokes it gets are text
-/// keystrokes. They go into the field being answered and nowhere else:
-/// the filter behind it is the user's, and a step that ate the filter
-/// would leave the user with nothing to search with when the sequence
-/// ended.
+/// The map is six field rows under a seven-row cursor. Pinned as numbers
+/// because the frame's constant height is counted from them: 6 fields +
+/// 1 rule row + 1 `▶` row = the 8 rows `VISIBLE_ROWS` promises.
+#[test]
+fn the_map_is_six_field_rows_under_a_seven_row_cursor() {
+    assert_eq!(
+        AddField::ORDER,
+        [
+            AddField::Alias,
+            AddField::Host,
+            AddField::User,
+            AddField::Port,
+            AddField::Key,
+            AddField::Folder
+        ],
+        "six fields, in the order the map draws them"
+    );
+    assert_eq!(
+        AddField::ORDER
+            .iter()
+            .map(|f| f.label())
+            .collect::<Vec<_>>(),
+        vec!["Alias", "Host", "User", "Port", "Key", "Folder"],
+        "each with its own label"
+    );
+    assert_eq!(
+        FormCursor::ROWS,
+        7,
+        "the six fields plus the submit row the cursor can stand on"
+    );
+    assert_eq!(FormCursor::Field(AddField::Alias).index(), 0);
+    assert_eq!(FormCursor::Field(AddField::Folder).index(), 5);
+    assert_eq!(FormCursor::Submit.index(), 6);
+    assert!(FormCursor::Submit.is_submit());
+    assert!(!FormCursor::Field(AddField::Folder).is_submit());
+}
+
+/// `Tab` and `BackTab` wrap at both ends.
+///
+/// A `Tab` that dies at the bottom of a seven-row map is a Tab the user
+/// has to count, so the travel keys come back round instead.
+#[test]
+fn tab_and_backtab_wrap_the_map() {
+    let adding = add_at(FormCursor::Field(AddField::Alias));
+
+    let wrapped = step(&adding, key(KeyCode::BackTab), Some(&web01()));
+    assert_eq!(
+        cursor_of(&wrapped.state),
+        FormCursor::Submit,
+        "BackTab off the first row lands on the `▶` row, not nowhere"
+    );
+
+    let wrapped_back = step(&wrapped.state, key(KeyCode::Tab), Some(&web01()));
+    assert_eq!(
+        cursor_of(&wrapped_back.state),
+        FormCursor::Field(AddField::Alias),
+        "and Tab off the `▶` row comes back round to the top"
+    );
+
+    assert!(
+        wrapped.effects.is_empty() && wrapped_back.effects.is_empty(),
+        "travelling the map asks the driver for nothing: {:?} {:?}",
+        wrapped.effects,
+        wrapped_back.effects
+    );
+}
+
+/// `Up`/`Down` saturate rather than wrap.
+///
+/// These are the reading keys: a user walking the map expects to stop at
+/// the end, not to be teleported to the top and have to re-read the whole
+/// thing to find where they were.
+#[test]
+fn up_and_down_saturate_at_the_ends_of_the_map() {
+    let at_top = add_at(FormCursor::Field(AddField::Alias));
+
+    for _ in 0..3 {
+        let stuck = step(&at_top, key(KeyCode::Up), Some(&web01()));
+        assert_eq!(
+            cursor_of(&stuck.state),
+            FormCursor::Field(AddField::Alias),
+            "`↑` at the top stays at the top"
+        );
+    }
+
+    let at_bottom = add_at(FormCursor::Submit);
+    for _ in 0..3 {
+        let stuck = step(&at_bottom, key(KeyCode::Down), Some(&web01()));
+        assert_eq!(
+            cursor_of(&stuck.state),
+            FormCursor::Submit,
+            "`↓` at the `▶` row stays on the `▶` row"
+        );
+    }
+}
+
+/// Enter on a field is a movement key, not a validation gate: it advances
+/// whatever the field holds, including nothing at all.
+///
+/// This is the inversion of the old stepped add, which held the user on
+/// `◆ Alias` until they typed something. Here the empty Alias simply
+/// advances, its `○` already saying it is still needed, and the refusal —
+/// if there is going to be one — waits at the `▶` row.
+#[test]
+fn enter_on_a_field_never_refuses_even_when_that_field_is_invalid() {
+    let mut state = add_at(FormCursor::Field(AddField::Alias));
+
+    // Six Enters over a completely blank form — every required row is
+    // invalid the whole way — and not one of them refuses to move.
+    let expected = [
+        FormCursor::Field(AddField::Host),
+        FormCursor::Field(AddField::User),
+        FormCursor::Field(AddField::Port),
+        FormCursor::Field(AddField::Key),
+        FormCursor::Field(AddField::Folder),
+        FormCursor::Submit,
+    ];
+    for (i, want) in expected.iter().enumerate() {
+        let moved = step(&state, key(KeyCode::Enter), Some(&web01()));
+        assert_eq!(
+            cursor_of(&moved.state),
+            *want,
+            "Enter #{i} must advance off a blank required field, not trap the \
+             user on it"
+        );
+        assert_eq!(
+            error_of(&moved.state),
+            None,
+            "and must not complain on the way past it"
+        );
+        assert!(
+            moved.effects.is_empty(),
+            "moving never writes: {:?}",
+            moved.effects
+        );
+        state = moved.state;
+    }
+}
+
+/// Enter on a field that is actively invalid still advances, and the bad
+/// value is kept rather than discarded.
+#[test]
+fn enter_advances_off_a_field_holding_an_invalid_value() {
+    let typed = type_str(&add_at(FormCursor::Field(AddField::Port)), "ssh");
+
+    let moved = step(&typed, key(KeyCode::Enter), Some(&web01()));
+
+    assert_eq!(
+        cursor_of(&moved.state),
+        FormCursor::Field(AddField::Key),
+        "a port of `ssh` must not pin the cursor to the Port row"
+    );
+    assert_eq!(
+        add_seq(&moved.state).draft.port,
+        "ssh",
+        "what the user typed is kept in the draft to be corrected later"
+    );
+    assert!(moved.effects.is_empty());
+}
+
+/// `Esc` at index 0 abandons the whole form; `Esc` anywhere else is one
+/// row up.
+///
+/// Backing off the top row is backing out of the thing entirely, and the
+/// note answers the only question the user has at that moment: did the
+/// half-filled form get saved? It did not.
+#[test]
+fn esc_at_the_top_abandons_and_esc_elsewhere_moves_up_one_row() {
+    let at_key = add_at(FormCursor::Field(AddField::Key));
+
+    let up = step(&at_key, key(KeyCode::Esc), Some(&web01()));
+    assert_eq!(
+        cursor_of(&up.state),
+        FormCursor::Field(AddField::Port),
+        "`Esc` mid-map is one row up, not an exit"
+    );
+    assert!(matches!(up.state.phase, Phase::Add(_)));
+    assert!(up.effects.is_empty());
+
+    let abandoned = step(
+        &add_at(FormCursor::Field(AddField::Alias)),
+        key(KeyCode::Esc),
+        None,
+    );
+    assert_eq!(
+        abandoned.state.phase,
+        Phase::List,
+        "`Esc` on the first row leaves the form"
+    );
+    assert_eq!(
+        abandoned.state.trace,
+        Some(Trace::AddAbandoned),
+        "and answers visibly that nothing was saved"
+    );
+    assert!(
+        !abandoned
+            .effects
+            .iter()
+            .any(|e| matches!(e, Effect::Add { .. })),
+        "an abandoned form must never ask for a write: {:?}",
+        abandoned.effects
+    );
+}
+
+/// Typing and Backspace are no-ops while the cursor is on the `▶` row.
+///
+/// The alternative is worse in a way that is easy to miss: appending to
+/// whichever field was focused *last* means the user is changing a row they
+/// are not looking at, several rows above the one under the cursor. Swallow
+/// the keystroke instead.
+#[test]
+fn typing_and_backspace_are_no_ops_on_the_submit_row() {
+    let at_submit = goto(&filled_add(), FormCursor::Submit);
+    let before = add_seq(&at_submit).draft.clone();
+
+    let typed = step(&at_submit, plain('z'), Some(&web01()));
+    assert_eq!(
+        add_seq(&typed.state).draft, before,
+        "a character typed on the `▶` row must not be appended to any field"
+    );
+
+    let deleted = step(&at_submit, key(KeyCode::Backspace), Some(&web01()));
+    assert_eq!(
+        add_seq(&deleted.state).draft, before,
+        "and Backspace on the `▶` row must not eat a character off the last field"
+    );
+
+    assert!(typed.effects.is_empty() && deleted.effects.is_empty());
+    assert_eq!(
+        cursor_of(&typed.state),
+        FormCursor::Submit,
+        "the no-op must not move the cursor either"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Slice 7 — the map is a text field: typing goes to the row under the cursor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The row under the cursor is a text field, so the keystrokes the map gets
+/// are text keystrokes. They go into that row and nowhere else: the filter
+/// behind it is the user's, and a form that ate the filter would leave the
+/// user with nothing to search with when it ended.
 #[test]
 fn typing_at_an_add_step_goes_to_the_field_not_the_filter() {
     let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
@@ -494,16 +769,17 @@ fn typing_at_an_add_step_goes_to_the_field_not_the_filter() {
         state = step(&state, plain(ch), Some(&web01())).state;
     }
 
-    let sequence = match &state.phase {
-        Phase::Add(sequence) => sequence,
-        other => panic!("still expecting the add sequence, got {other:?}"),
-    };
+    let sequence = add_seq(&state);
 
-    assert_eq!(sequence.input, "web-01");
-    assert_eq!(sequence.field, AddField::Alias, "typing does not advance");
+    assert_eq!(sequence.draft.alias, "web-01");
+    assert_eq!(
+        sequence.cursor,
+        FormCursor::Field(AddField::Alias),
+        "typing does not advance"
+    );
     assert_eq!(
         state.query, "",
-        "the filter behind the sequence is untouched"
+        "the filter behind the map is untouched"
     );
 }
 
@@ -515,12 +791,9 @@ fn backspace_at_an_add_step_edits_the_field_not_the_filter() {
 
     let stepped = step(&typed.state, key(KeyCode::Backspace), Some(&web01()));
 
-    let sequence = match &stepped.state.phase {
-        Phase::Add(sequence) => sequence,
-        other => panic!("still expecting the add sequence, got {other:?}"),
-    };
+    let sequence = add_seq(&stepped.state);
 
-    assert_eq!(sequence.input, "w", "the character comes off the field");
+    assert_eq!(sequence.draft.alias, "w", "the character comes off the field");
     assert_eq!(
         stepped.state.query, "web",
         "and not off the filter the user had typed before Ctrl+A"
@@ -539,11 +812,8 @@ fn the_chord_letters_still_type_at_an_add_step() {
     }
     let last = step(&state, plain('x'), Some(&web01()));
 
-    let sequence = match &last.state.phase {
-        Phase::Add(sequence) => sequence,
-        other => panic!("still expecting the add sequence, got {other:?}"),
-    };
-    assert_eq!(sequence.input, "aex");
+    let sequence = add_seq(&last.state);
+    assert_eq!(sequence.draft.alias, "aex");
     assert!(
         last.effects.is_empty(),
         "and none of them fired a management action: {:?}",
@@ -551,14 +821,82 @@ fn the_chord_letters_still_type_at_an_add_step() {
     );
 }
 
+/// **The bug this test exists to kill.**
+///
+/// The original five-step add had no `User` step, so every Connection added
+/// through it carried an empty `user` and rendered as
+/// `(@10.0.0.4:22)` — a Connection whose login nobody could name, fixable
+/// only afterwards. `sshm add --user` had always accepted one; the
+/// interactive flow simply had nowhere to put it. That was a spec gap, not
+/// a design decision, and the sixth row of the map closes it.
+///
+/// Before the map there was no User row to type into, so this test could not
+/// have existed — and every Connection the old flow produced was wrong in
+/// exactly the way it catches.
+#[test]
+fn user_is_settable_during_add_and_lands_in_the_draft() {
+    let typed =
+        type_str(&goto(&add_with_required_filled(), FormCursor::Field(AddField::User)), "deploy");
+
+    assert_eq!(
+        add_seq(&typed).draft.user,
+        "deploy",
+        "the User row must be typeable and must hold what was typed"
+    );
+    assert_eq!(
+        add_seq(&typed).cursor,
+        FormCursor::Field(AddField::User),
+        "and typing there must not move the cursor off it"
+    );
+    assert_eq!(
+        glyph_of(&typed, AddField::User),
+        RowGlyph::Valid,
+        "the row must read as filled"
+    );
+
+    // And it survives the walk to the `▶` row: the value lives in the
+    // draft, not on a line that is discarded when the cursor moves on.
+    let added = submit(&typed);
+    let draft = only_add(&added);
+    assert_eq!(
+        draft.user, "deploy",
+        "the user the operator typed must reach the draft the store is handed"
+    );
+}
+
+/// The User row is optional: leaving it blank is a real answer, not a
+/// missing one, and it never blocks the submit. `Connection::user` empty
+/// means "no `user@`, let ssh use the local login name".
+#[test]
+fn a_blank_user_is_accepted_and_never_blocks_the_submit() {
+    let at_user = goto(&filled_add(), FormCursor::Field(AddField::User));
+    let cleared = backspace_n(&at_user, "deploy".chars().count());
+
+    assert_eq!(add_seq(&cleared).draft.user, "", "setup");
+    assert!(
+        add_seq(&cleared).ready(),
+        "a blank User must not make the form unready: {:?}",
+        add_seq(&cleared).problems()
+    );
+
+    let added = submit(&cleared);
+    assert!(
+        matches!(&added.effects[..], [Effect::Add { .. }]),
+        "the ▶ row must accept a form whose User is blank: {:?}",
+        added.effects
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// Slice 8 — optionality: which fields may be left blank, and what happens
+// Slice 8 — optionality: which rows may be left blank, and what happens
 // when they are
 //
 // The rules come off the `Connection` model, not off taste:
 //
 //   alias, host  — `String`, and a Connection without one is not a
 //                  Connection. Required.
+//   user         — a plain `String` that ssh reads as "no `user@`".
+//                  Optional; blank is the local login name.
 //   port         — `u16`, and the SSH default is 22. Optional, with a
 //                  default; but a value that is not a port is rejected
 //                  rather than quietly coerced.
@@ -566,52 +904,34 @@ fn the_chord_letters_still_type_at_an_add_step() {
 //                  empty — never `Some("")`, which would reach ssh as
 //                  `-i ""`.
 //
-// `user` is not one of the spec's five steps, so the sequence cannot
-// collect one; see `the_sequence_collects_the_five_fields_the_spec_names`.
+// What changed with the map is *where* these bite. They no longer stop the
+// user leaving a row; they stop the `▶` row being accepted.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Type `text` into the live step, then press Enter.
-fn answer(state: &ManageState, text: &str) -> manage::Step {
-    let mut typed = state.clone();
-    for ch in text.chars() {
-        typed = step(&typed, plain(ch), Some(&web01())).state;
-    }
-    step(&typed, key(KeyCode::Enter), Some(&web01()))
-}
-
-/// The live sequence inside a state.
-fn seq(state: &ManageState) -> &AddSequence {
-    match &state.phase {
-        Phase::Add(sequence) => sequence,
-        other => panic!("expected the add sequence, got {other:?}"),
-    }
-}
-
-/// A required field that was answered with nothing does not advance. The
-/// user stays on the step, with what they had typed (nothing) still on
-/// the line and a reason under it — they fix the field, they do not
-/// start the step over.
+/// A required row left empty is not refused *at the row* — Enter walks
+/// straight past it — but it is a problem the map reports, and the `▶` row
+/// will not accept it.
 #[test]
-fn an_empty_alias_is_rejected_and_the_step_stays_on_alias() {
+fn an_empty_alias_is_a_problem_the_map_reports_but_never_a_wall() {
     let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
 
-    let refused = step(&adding.state, key(KeyCode::Enter), Some(&web01()));
+    let advanced = step(&adding.state, key(KeyCode::Enter), Some(&web01()));
 
-    let sequence = seq(&refused.state);
+    let sequence = add_seq(&advanced.state);
     assert_eq!(
-        sequence.field,
-        AddField::Alias,
-        "a rejected answer must not move the user off the step they were on"
+        sequence.cursor,
+        FormCursor::Field(AddField::Host),
+        "an empty Alias does not hold the cursor"
     );
     assert_eq!(
-        sequence.error.as_deref(),
-        Some("alias is required"),
-        "and must tell them why: {sequence:?}"
+        glyph_of(&advanced.state, AddField::Alias),
+        RowGlyph::Needed,
+        "but the row says it is needed: {:?}",
+        sequence.rows()
     );
     assert!(
-        refused.effects.is_empty(),
-        "a rejection asks the driver for nothing: {:?}",
-        refused.effects
+        !sequence.ready(),
+        "and the form is not submittable while it is empty"
     );
 }
 
@@ -619,233 +939,400 @@ fn an_empty_alias_is_rejected_and_the_step_stays_on_alias() {
 /// an alias of `"  "` is not an alias.
 #[test]
 fn a_whitespace_only_alias_is_rejected_as_empty() {
-    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+    // Host is filled so the Alias is the only thing wrong with the form,
+    // and the reported problem isolates the whitespace rule.
+    let with_host = type_str(&add_at(FormCursor::Field(AddField::Host)), "10.0.0.4");
+    let typed = type_str(&goto(&with_host, FormCursor::Field(AddField::Alias)), "   ");
 
-    let refused = answer(&adding.state, "   ");
-
-    let sequence = seq(&refused.state);
-    assert_eq!(sequence.field, AddField::Alias);
-    assert_eq!(sequence.error.as_deref(), Some("alias is required"));
-}
-
-#[test]
-fn an_empty_host_is_rejected_and_the_step_stays_on_host() {
-    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
-    let on_host = answer(&adding.state, "web-01");
-    assert_eq!(seq(&on_host.state).field, AddField::Host, "setup");
-
-    let refused = step(&on_host.state, key(KeyCode::Enter), Some(&web01()));
-
-    let sequence = seq(&refused.state);
-    assert_eq!(sequence.field, AddField::Host);
-    assert_eq!(sequence.error.as_deref(), Some("host is required"));
     assert_eq!(
-        sequence.draft.alias, "web-01",
-        "the step already settled is not undone by the next one failing"
+        glyph_of(&typed, AddField::Alias),
+        RowGlyph::Needed,
+        "three spaces are still an empty required field"
+    );
+    assert_eq!(
+        problems_of(&typed),
+        vec![("Alias", "alias is required".to_string())],
+        "and the problem is reported as the required-field one, not as content"
+    );
+    assert!(
+        !add_seq(&typed).ready(),
+        "and the form still will not submit: {:?}",
+        add_seq(&typed).problems()
     );
 }
 
-/// The happy path between steps: an answer settles into the draft and the
-/// sequence moves to the next field, starting it blank.
+/// An empty Host is a problem, and it does not undo the Alias that was
+/// already filled in above it.
 #[test]
-fn enter_with_an_answer_settles_the_field_and_moves_to_the_next_step() {
-    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+fn an_empty_host_is_a_problem_that_leaves_the_alias_alone() {
+    let typed = type_str(&add_at(FormCursor::Field(AddField::Alias)), "web-01");
+    let on_host = step(&typed, key(KeyCode::Enter), Some(&web01()));
 
-    let advanced = answer(&adding.state, "  web-01  ");
-
-    let sequence = seq(&advanced.state);
-    assert_eq!(sequence.field, AddField::Host);
     assert_eq!(
-        sequence.draft.alias, "web-01",
-        "the settled value is trimmed — a leading space in an alias is a typo, not content"
+        glyph_of(&on_host.state, AddField::Host),
+        RowGlyph::Needed,
+        "the Host row says it is needed"
     );
-    assert_eq!(sequence.input, "", "the new step starts blank");
+    assert_eq!(
+        add_seq(&on_host.state).draft.alias, "web-01",
+        "the row already filled is not undone by the next one being empty"
+    );
+}
+
+/// The happy path between rows: what is typed lands in the draft, the
+/// cursor moves on, and nothing is written.
+///
+/// Note what is *not* true here: the live draft holds `  web-01  ` with the
+/// spaces intact. Normalisation is deliberately not applied while typing —
+/// showing a tidied value the user did not type would be putting words in
+/// their mouth. The trim happens in `settled_draft`, at the moment the
+/// value becomes a write.
+#[test]
+fn enter_with_an_answer_moves_to_the_next_row_without_writing() {
+    let typed = type_str(&add_at(FormCursor::Field(AddField::Alias)), "  web-01  ");
+    let advanced = step(&typed, key(KeyCode::Enter), Some(&web01()));
+
+    let sequence = add_seq(&advanced.state);
+    assert_eq!(sequence.cursor, FormCursor::Field(AddField::Host));
+    assert_eq!(
+        sequence.draft.alias, "  web-01  ",
+        "the live draft shows what was typed, spaces and all"
+    );
     assert_eq!(
         sequence.error, None,
-        "and carries no complaint from the last one"
+        "and carries no complaint from the last row"
     );
     assert!(
         advanced.effects.is_empty(),
-        "settling a field writes nothing: {:?}",
+        "moving off a row writes nothing: {:?}",
         advanced.effects
     );
+
+    // Fill the Host so the form can settle, and the trim shows up there.
+    let with_host = type_str(&advanced.state, "10.0.0.4");
+    let settled = manage::settled_draft(&add_seq(&with_host).draft)
+        .expect("alias and host filled, so the draft settles");
+    assert_eq!(
+        settled.alias, "web-01",
+        "the settled draft is trimmed — a leading space in an alias is a \
+         typo, not content"
+    );
 }
 
-/// Walking the whole sequence field by field, in the spec's order.
+/// Walking the whole map row by row, in the spec's order.
 #[test]
-fn the_sequence_walks_the_five_fields_the_spec_names() {
-    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+fn the_map_walks_the_six_fields_the_spec_names() {
+    let mut state = add_at(FormCursor::Field(AddField::Alias));
 
-    let mut state = answer(&adding.state, "web-01").state;
-    assert_eq!(seq(&state).field, AddField::Host);
-    state = answer(&state, "10.0.0.4").state;
-    assert_eq!(seq(&state).field, AddField::Port);
-    state = answer(&state, "2222").state;
-    assert_eq!(seq(&state).field, AddField::Key);
-    state = answer(&state, "~/.ssh/id_ed25519").state;
-    assert_eq!(seq(&state).field, AddField::Folder);
+    state = type_str(&state, "web-01");
+    state = step(&state, key(KeyCode::Enter), Some(&web01())).state;
+    assert_eq!(cursor_of(&state), FormCursor::Field(AddField::Host));
+    state = type_str(&state, "10.0.0.4");
+    state = step(&state, key(KeyCode::Enter), Some(&web01())).state;
+    assert_eq!(cursor_of(&state), FormCursor::Field(AddField::User));
+    state = type_str(&state, "deploy");
+    state = step(&state, key(KeyCode::Enter), Some(&web01())).state;
+    assert_eq!(cursor_of(&state), FormCursor::Field(AddField::Port));
+    state = type_str(&state, "2222");
+    state = step(&state, key(KeyCode::Enter), Some(&web01())).state;
+    assert_eq!(cursor_of(&state), FormCursor::Field(AddField::Key));
+    state = type_str(&state, "~/.ssh/id_ed25519");
+    state = step(&state, key(KeyCode::Enter), Some(&web01())).state;
+    assert_eq!(cursor_of(&state), FormCursor::Field(AddField::Folder));
 
     assert_eq!(
-        seq(&state).settled(),
-        vec![
-            ("Alias", Some("web-01".into())),
-            ("Host", Some("10.0.0.4".into())),
-            ("Port", Some("2222".into())),
-            ("Key", Some("~/.ssh/id_ed25519".into())),
-        ],
-        "four steps settled behind the live one, in order"
+        add_seq(&state).draft,
+        ConnectionDraft {
+            alias: "web-01".into(),
+            host: "10.0.0.4".into(),
+            user: "deploy".into(),
+            port: "2222".into(),
+            key_path: "~/.ssh/id_ed25519".into(),
+            folder: String::new(),
+        },
+        "every row walked keeps what it was given, in order"
     );
 }
 
-/// The state with Alias and Host answered, so the live step is Port.
-fn at_port() -> ManageState {
-    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
-    let on_host = answer(&adding.state, "web-01").state;
-    answer(&on_host, "10.0.0.4").state
-}
-
-/// A port that is not a number is refused where it was typed. Silently
-/// falling back to 22 here would build a Connection that connects to the
-/// wrong machine, and the user would only find out from `ssh`.
+/// A port that is not a number is a problem the map names where it was
+/// typed. Silently falling back to 22 here would build a Connection that
+/// connects to the wrong machine, and the user would only find out from
+/// `ssh`.
 #[test]
-fn a_non_numeric_port_is_rejected_and_the_step_stays_on_port() {
-    let refused = answer(&at_port(), "ssh");
+fn a_non_numeric_port_is_rejected_at_the_submit_row() {
+    let typed = type_str(&at_port(), "ssh");
 
-    let sequence = seq(&refused.state);
-    assert_eq!(sequence.field, AddField::Port);
     assert_eq!(
-        sequence.error.as_deref(),
-        Some("port must be a number from 1 to 65535")
+        glyph_of(&typed, AddField::Port),
+        RowGlyph::Invalid,
+        "the Port row shows `!` for content that will not validate"
     );
     assert_eq!(
-        sequence.input, "ssh",
-        "what the user typed stays on the line to be corrected"
+        problems_of(&typed),
+        vec![("Port", PORT_REFUSAL.to_string())],
+        "and names the field and the rule"
     );
-    assert!(refused.effects.is_empty());
+    assert!(!add_seq(&typed).ready());
+
+    let refused = submit(&typed);
+    assert_eq!(
+        error_of(&refused.state),
+        Some(PORT_REFUSAL),
+        "the ▶ row refuses with the same sentence"
+    );
+    assert!(
+        refused.effects.is_empty(),
+        "a refusal asks the driver for nothing: {:?}",
+        refused.effects
+    );
+    assert!(
+        matches!(refused.state.phase, Phase::Add(_)),
+        "and the form stays open with what was typed still in it"
+    );
 }
 
 #[test]
 fn a_port_above_the_tcp_range_is_rejected() {
-    let refused = answer(&at_port(), "70000");
+    let typed = type_str(&at_port(), "70000");
 
-    assert_eq!(seq(&refused.state).field, AddField::Port);
-    assert_eq!(
-        seq(&refused.state).error.as_deref(),
-        Some("port must be a number from 1 to 65535")
-    );
+    assert_eq!(glyph_of(&typed, AddField::Port), RowGlyph::Invalid);
+    assert_eq!(problems_of(&typed), vec![("Port", PORT_REFUSAL.to_string())]);
 }
 
 #[test]
 fn port_zero_is_rejected() {
-    let refused = answer(&at_port(), "0");
+    let typed = type_str(&at_port(), "0");
 
-    assert_eq!(seq(&refused.state).field, AddField::Port);
-    assert_eq!(
-        seq(&refused.state).error.as_deref(),
-        Some("port must be a number from 1 to 65535")
-    );
+    assert_eq!(glyph_of(&typed, AddField::Port), RowGlyph::Invalid);
+    assert_eq!(problems_of(&typed), vec![("Port", PORT_REFUSAL.to_string())]);
 }
 
 #[test]
 fn a_negative_port_is_rejected() {
-    let refused = answer(&at_port(), "-1");
+    let typed = type_str(&at_port(), "-1");
 
-    assert_eq!(seq(&refused.state).field, AddField::Port);
+    assert_eq!(glyph_of(&typed, AddField::Port), RowGlyph::Invalid);
+    assert_eq!(problems_of(&typed), vec![("Port", PORT_REFUSAL.to_string())]);
 }
 
-/// The port is the one field that is optional *and* has a value when left
+/// The port is the one row that is optional *and* has a value when left
 /// alone: the SSH default. Blank is not "absent" here — `Connection.port`
-/// is a `u16`, there is no absent to settle to — so it settles as 22.
+/// is a `u16`, there is no absent to settle to — so the settled draft
+/// carries `22`.
+///
+/// The live row keeps the blank, though. The map shows what the user left
+/// it as; the default is applied at the moment the value becomes a write.
 #[test]
 fn an_empty_port_settles_as_the_ssh_default() {
-    let advanced = step(&at_port(), key(KeyCode::Enter), Some(&web01()));
+    let at_port = goto(&filled_add(), FormCursor::Field(AddField::Port));
+    let cleared = backspace_n(&at_port, "2222".chars().count());
 
-    let sequence = seq(&advanced.state);
     assert_eq!(
-        sequence.field,
-        AddField::Key,
-        "blank is an answer here, so it advances"
+        add_seq(&cleared).draft.port,
+        "",
+        "the live row keeps the blank the user left there"
     );
-    assert_eq!(sequence.draft.port, "22");
-    assert!(advanced.effects.is_empty());
+    assert_eq!(
+        glyph_of(&cleared, AddField::Port),
+        RowGlyph::Empty,
+        "and it reads as an optional row left empty, not as a problem"
+    );
+    assert!(
+        add_seq(&cleared).ready(),
+        "a blank port must not block the submit: {:?}",
+        add_seq(&cleared).problems()
+    );
+
+    let added = submit(&cleared);
+    let draft = only_add(&added);
+    assert_eq!(
+        draft.port, "22",
+        "the settled draft normalises the empty port to the SSH default"
+    );
 }
 
 #[test]
 fn a_valid_port_settles_as_typed() {
-    let advanced = answer(&at_port(), "2222");
+    let typed = type_str(&at_port(), "2222");
 
-    let sequence = seq(&advanced.state);
-    assert_eq!(sequence.field, AddField::Key);
-    assert_eq!(sequence.draft.port, "2222");
+    assert_eq!(glyph_of(&typed, AddField::Port), RowGlyph::Valid);
+    let added = submit(&typed);
+    let draft = only_add(&added);
+    assert_eq!(draft.port, "2222");
 }
 
-/// The state with Alias, Host and Port answered, so the live step is Key.
-fn at_key() -> ManageState {
-    answer(&at_port(), "2222").state
-}
-
-/// The state with everything but Folder answered.
-fn at_folder() -> ManageState {
-    answer(&at_key(), "~/.ssh/id_ed25519").state
-}
-
-/// An optional field accepts empty, and what it settles to is **absent**,
+/// An optional row accepts empty, and what it settles to is **absent**,
 /// not the empty string. The difference is not pedantry: `Connection`'s
 /// `key_path` is an `Option<String>`, and a `Some("")` reaches `ssh` as
 /// `-i ""` — an identity file that is a zero-length path.
 #[test]
 fn an_empty_key_is_accepted_and_settles_as_absent() {
-    let advanced = step(&at_key(), key(KeyCode::Enter), Some(&web01()));
+    let at_key = goto(&filled_add(), FormCursor::Field(AddField::Key));
+    let cleared = backspace_n(&at_key, "~/.ssh/id_ed25519".chars().count());
 
-    let sequence = seq(&advanced.state);
     assert_eq!(
-        sequence.field,
-        AddField::Folder,
-        "blank is an answer for an optional field: it advances, it is not refused"
+        glyph_of(&cleared, AddField::Key),
+        RowGlyph::Empty,
+        "blank is an answer for an optional row: it reads as empty, not as needed"
     );
+    assert!(add_seq(&cleared).ready());
+
+    let added = submit(&cleared);
+    let draft = only_add(&added);
     assert_eq!(
-        sequence.settled()[3],
-        ("Key", None),
-        "and it settles as absent, not as an empty value"
+        draft.key_path, "",
+        "the draft carries the empty answer; the store turns it into absent"
     );
-    assert_eq!(sequence.draft.key_path, "");
 }
 
 #[test]
 fn an_empty_folder_is_accepted_and_settles_as_absent() {
-    let finalised = step(&at_folder(), key(KeyCode::Enter), Some(&web01()));
+    let at_folder = goto(&filled_add(), FormCursor::Field(AddField::Folder));
+    let cleared = backspace_n(&at_folder, "prod".chars().count());
 
-    let draft = match &finalised.effects[..] {
-        [Effect::Add { draft }] => draft,
-        other => panic!("the last step must ask for exactly one add, got {other:?}"),
-    };
+    assert_eq!(glyph_of(&cleared, AddField::Folder), RowGlyph::Empty);
+    assert!(add_seq(&cleared).ready());
 
+    let added = submit(&cleared);
+    let draft = only_add(&added);
     assert_eq!(draft.folder, "");
     assert_eq!(
         draft.key_path, "~/.ssh/id_ed25519",
-        "the answered optional field is still there"
+        "the answered optional row is still there"
     );
 }
 
-/// A whitespace-only optional field is the same as a blank one: trimmed to
+/// A whitespace-only optional row is the same as a blank one: trimmed to
 /// nothing, absent. A folder of `"  "` would render as `[  ]` in every
 /// row of the list forever.
 #[test]
 fn a_whitespace_only_optional_field_settles_as_absent_too() {
-    let advanced = answer(&at_key(), "   ");
+    let at_folder = goto(&filled_add(), FormCursor::Field(AddField::Folder));
+    let cleared = backspace_n(&at_folder, "prod".chars().count());
+    let typed = type_str(&cleared, "   ");
 
-    assert_eq!(seq(&advanced.state).field, AddField::Folder);
-    assert_eq!(seq(&advanced.state).settled()[3], ("Key", None));
+    assert_eq!(
+        glyph_of(&typed, AddField::Folder),
+        RowGlyph::Empty,
+        "three spaces in an optional row read as empty"
+    );
+
+    let added = submit(&typed);
+    let draft = only_add(&added);
+    assert_eq!(draft.folder, "", "and the settled draft trims them away");
 }
 
 #[test]
 fn an_answered_optional_field_settles_as_itself() {
-    let advanced = answer(&at_key(), "~/.ssh/id_ed25519");
+    let at_key = goto(&filled_add(), FormCursor::Field(AddField::Key));
+    let cleared = backspace_n(&at_key, "~/.ssh/id_ed25519".chars().count());
+    let typed = type_str(&cleared, "~/.ssh/id_work");
+
+    let added = submit(&typed);
+    let draft = only_add(&added);
+    assert_eq!(draft.key_path, "~/.ssh/id_work");
+}
+
+/// The one refusal that names everything: Enter on the `▶` row over a form
+/// with several bad rows puts **every** bad field on one line, in map
+/// order, rather than making the user discover them one Enter at a time.
+#[test]
+fn enter_on_submit_with_invalid_fields_names_every_bad_field() {
+    let at_port = goto(&add_at(FormCursor::Field(AddField::Alias)), FormCursor::Field(AddField::Port));
+    let typed = type_str(&at_port, "99999");
+
+    let refused = submit(&typed);
 
     assert_eq!(
-        seq(&advanced.state).settled()[3],
-        ("Key", Some("~/.ssh/id_ed25519".into()))
+        error_of(&refused.state),
+        Some(
+            [&format!("alias is required"), &format!("host is required"), PORT_REFUSAL]
+                .join(JOIN)
+                .as_str(),
+        ),
+        "the refusal must name all three bad rows at once, in map order"
     );
+    assert!(
+        refused.effects.is_empty(),
+        "a refusal must not write anything: {:?}",
+        refused.effects
+    );
+    assert!(
+        matches!(refused.state.phase, Phase::Add(_)),
+        "and the phase must be unchanged — the form stays open to be fixed"
+    );
+    assert_eq!(
+        cursor_of(&refused.state),
+        FormCursor::Submit,
+        "the cursor stays on the row that was refused"
+    );
+}
+
+/// A refusal is cleared by the next keystroke that could fix it, so a
+/// mistake stops being reported the moment the user starts correcting it.
+#[test]
+fn a_refusal_is_cleared_by_the_next_keystroke() {
+    let refused = submit(&add_at(FormCursor::Submit));
+    assert!(error_of(&refused.state).is_some(), "setup");
+
+    let at_alias = goto(&refused.state, FormCursor::Field(AddField::Alias));
+    let typed = step(&at_alias, plain('w'), Some(&web01()));
+
+    assert_eq!(
+        error_of(&typed.state),
+        None,
+        "starting to fix the form must clear the complaint"
+    );
+}
+
+/// The glyph decision, in its precedence order.
+///
+/// The frame draws these, and the ordering is the whole point: a cleared
+/// required row is both `Needed` and `Changed`, and showing `Changed`
+/// there would let a blocker look like an ordinary edit.
+#[test]
+fn the_glyph_precedence_shows_the_blocker_before_the_edit() {
+    // Invalid content beats everything.
+    let bad_port = type_str(&at_port(), "ssh");
+    assert_eq!(glyph_of(&bad_port, AddField::Port), RowGlyph::Invalid);
+
+    // Empty-and-required beats Changed: clearing the Host of a live
+    // Connection is both, and the one that blocks the save wins.
+    let cleared_host = backspace_n(
+        &goto(
+            &edit_state(&web01()),
+            FormCursor::Field(AddField::Host),
+        ),
+        "10.0.0.4".chars().count(),
+    );
+    assert_eq!(
+        glyph_of(&cleared_host, AddField::Host),
+        RowGlyph::Needed,
+        "a cleared required row must not read as a harmless change"
+    );
+
+    // A valid edit of a filled row reads as Changed.
+    let changed_alias = type_str(
+        &goto(&edit_state(&web01()), FormCursor::Field(AddField::Alias)),
+        "-x",
+    );
+    assert_eq!(
+        glyph_of(&changed_alias, AddField::Alias),
+        RowGlyph::Changed,
+        "a row that differs from the stored Connection wears ●"
+    );
+
+    // An untouched filled row is Valid; an untouched empty optional is Empty.
+    let fresh = edit_state(&web01());
+    assert_eq!(glyph_of(&fresh, AddField::Host), RowGlyph::Valid);
+    assert_eq!(glyph_of(&fresh, AddField::Key), RowGlyph::Empty);
+
+    // And the glyphs themselves are the five the design names.
+    assert_eq!(RowGlyph::Valid.char(), '\u{2713}');
+    assert_eq!(RowGlyph::Changed.char(), '\u{25cf}');
+    assert_eq!(RowGlyph::Needed.char(), '\u{25cb}');
+    assert_eq!(RowGlyph::Invalid.char(), '!');
+    assert_eq!(RowGlyph::Empty.char(), '\u{b7}');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -853,17 +1340,17 @@ fn an_answered_optional_field_settles_as_itself() {
 // writes nothing
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The last Enter completes the sequence and asks for the write. It does
-/// not claim the write happened. The state machine owns no disk, and
-/// `◇ added` is a claim about `connections.json`.
+/// The `▶` row asks for the write. It does not claim the write happened.
+/// The state machine owns no disk, and `◇ added` is a claim about
+/// `connections.json`.
 #[test]
 fn finishing_the_sequence_asks_for_the_add_without_claiming_it_happened() {
-    let finalised = step(&at_folder(), key(KeyCode::Enter), Some(&web01()));
+    let finalised = submit(&filled_add());
 
     assert_eq!(
         finalised.state.phase,
         Phase::List,
-        "the sequence is over; the frame is back on the list"
+        "the form is over; the frame is back on the list"
     );
     assert_eq!(
         finalised.state.trace, None,
@@ -882,7 +1369,7 @@ fn finishing_the_sequence_asks_for_the_add_without_claiming_it_happened() {
 /// Connection the store handed back — not a reconstruction of the draft.
 #[test]
 fn an_add_the_store_wrote_earns_the_added_note() {
-    let finalised = step(&at_folder(), key(KeyCode::Enter), Some(&web01()));
+    let finalised = submit(&filled_add());
 
     let settled = manage::settle_add(&finalised.state, &[web01()], Ok(web01()))
         .expect("a Connection that was really written settles onto the list");
@@ -901,7 +1388,7 @@ fn an_add_the_store_wrote_earns_the_added_note() {
 /// available to any path where the answer was `Err`.
 #[test]
 fn an_add_the_store_refused_does_not_claim_a_connection_was_added() {
-    let finalised = step(&at_folder(), key(KeyCode::Enter), Some(&web01()));
+    let finalised = submit(&filled_add());
 
     let outcome = manage::settle_add(
         &finalised.state,
@@ -921,30 +1408,10 @@ fn an_add_the_store_refused_does_not_claim_a_connection_was_added() {
     );
 }
 
-/// Esc walks the sequence back one step, with that step's answer put back
-/// on the line so it can be corrected rather than retyped.
-#[test]
-fn esc_at_an_add_step_goes_back_to_the_previous_step_with_its_answer() {
-    let back = step(&at_key(), key(KeyCode::Esc), Some(&web01()));
-
-    let sequence = seq(&back.state);
-    assert_eq!(sequence.field, AddField::Port, "one step back");
-    assert_eq!(
-        sequence.input, "2222",
-        "with the answer that step settled on, on the line"
-    );
-    assert_eq!(sequence.error, None);
-    assert!(
-        back.effects.is_empty(),
-        "walking back writes nothing: {:?}",
-        back.effects
-    );
-}
-
-/// Backing out of the first step is backing out of the sequence. Nothing
-/// was ever written — no `Effect::Add` was ever emitted — and the note
-/// says so, because the question the user has at that moment is whether
-/// the half-filled form got saved.
+/// Backing out of the first row is backing out of the form. Nothing was
+/// ever written — no `Effect::Add` was ever emitted — and the note says
+/// so, because the question the user has at that moment is whether the
+/// half-filled form got saved.
 #[test]
 fn abandoning_the_sequence_mid_way_asks_for_nothing() {
     let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
@@ -955,7 +1422,7 @@ fn abandoning_the_sequence_mid_way_asks_for_nothing() {
     assert_eq!(
         abandoned.state.phase,
         Phase::List,
-        "backing off the first step leaves the sequence, not a step before it"
+        "backing off the first row leaves the form, not a row before it"
     );
     assert_eq!(
         abandoned.state.trace,
@@ -972,60 +1439,59 @@ fn abandoning_the_sequence_mid_way_asks_for_nothing() {
     );
 }
 
-/// Going back and then forward again must not lose the answer that was
-/// already settled on the field being re-entered.
+/// Going back and then forward again must not lose what a row holds.
 ///
-/// `back()` puts the previous step's answer back on the line; the forward
-/// advance owes the same rule. If it starts the re-entered field from an
-/// empty line instead, a bare Enter re-settles that field from nothing —
-/// silently wiping the answer the user gave the first time through. The
-/// line must always show the truth about the field it names, whichever
-/// direction the user arrived from.
+/// The stepped add had to *re-seed* the line from the stored answer on
+/// every move, and getting that wrong wiped a settled field on a bare
+/// Enter. The map has no line to re-seed: the row *is* the draft, so
+/// arriving at a row from either direction shows the same truth, and a
+/// bare Enter on the way back cannot overwrite anything.
 #[test]
-fn going_back_and_forward_again_re_seeds_the_line_from_the_stored_answer() {
-    // Alias, Host, Port=2222 and Key=~/.ssh/id_ed25519 are answered;
-    // Folder is live.
-    let at_folder_state = at_folder();
+fn going_back_and_forward_again_keeps_every_rows_own_value() {
+    let at_folder = goto(&filled_add(), FormCursor::Field(AddField::Folder));
 
-    // Back twice: Folder → Key → Port. Port's line is correctly seeded
-    // with "2222" by back().
-    let at_key_again = step(&at_folder_state, key(KeyCode::Esc), Some(&web01())).state;
+    // Back twice: Folder → Key → Port.
+    let at_key_again = step(&at_folder, key(KeyCode::Esc), Some(&web01())).state;
     let at_port_again = step(&at_key_again, key(KeyCode::Esc), Some(&web01())).state;
-    assert_eq!(seq(&at_port_again).field, AddField::Port);
-    assert_eq!(seq(&at_port_again).input, "2222");
+    assert_eq!(cursor_of(&at_port_again), FormCursor::Field(AddField::Port));
+    assert_eq!(add_seq(&at_port_again).draft.port, "2222");
 
-    // Forward: settle Port (unchanged) and land on Key.
+    // Forward again over Key without touching it.
     let forward = step(&at_port_again, key(KeyCode::Enter), Some(&web01()));
-    let sequence = seq(&forward.state);
-    assert_eq!(sequence.field, AddField::Key);
     assert_eq!(
-        sequence.input, "~/.ssh/id_ed25519",
-        "the line must arrive holding the answer Key already settled to, \
-         not an empty slot waiting to overwrite it"
+        cursor_of(&forward.state),
+        FormCursor::Field(AddField::Key),
+        "setup"
+    );
+    assert_eq!(
+        add_seq(&forward.state).draft.key_path,
+        "~/.ssh/id_ed25519",
+        "the row must arrive holding what it already held, not an empty slot \
+         waiting to overwrite it"
     );
 
-    // And a bare Enter on that re-seeded line keeps the key rather than
-    // settling it absent.
-    let settled_onward = step(&forward.state, key(KeyCode::Enter), Some(&web01()));
-    let sequence = seq(&settled_onward.state);
-    assert_eq!(sequence.field, AddField::Folder);
+    // And walking on to the submit still carries the Key.
+    let added = submit(&forward.state);
+    let draft = only_add(&added);
     assert_eq!(
-        sequence.settled()[3],
-        ("Key", Some("~/.ssh/id_ed25519".to_string())),
-        "re-advancing must not destroy the settled Key"
+        draft.key_path, "~/.ssh/id_ed25519",
+        "walking back and forth must not destroy the answered Key"
     );
 }
 
-/// Walking the whole way back from the last step ends the same way, and
-/// writes nothing at any point on the way.
+/// Walking the whole way back from the bottom ends the same way, and writes
+/// nothing at any point on the way.
 #[test]
 fn walking_all_the_way_back_writes_nothing() {
-    let mut state = at_folder();
+    let mut state = goto(&filled_add(), FormCursor::Field(AddField::Folder));
 
-    for _ in 0..4 {
+    // Folder → Key → Port → User → Host → Alias: five rows up, still in
+    // the form at each one.
+    for _ in 0..5 {
         state = step(&state, key(KeyCode::Esc), Some(&web01())).state;
         assert!(matches!(state.phase, Phase::Add(_)), "still walking back");
     }
+    assert_eq!(cursor_of(&state), FormCursor::Field(AddField::Alias));
 
     let last = step(&state, key(KeyCode::Esc), Some(&web01()));
     assert_eq!(last.state.phase, Phase::List);
@@ -1033,11 +1499,11 @@ fn walking_all_the_way_back_writes_nothing() {
     assert!(last.effects.is_empty());
 }
 
-/// Ctrl+C in the middle of a sequence is the frame's cancel, not the
-/// step's: it leaves, and it leaves nothing behind.
+/// Ctrl+C in the middle of a form is the frame's cancel, not the row's:
+/// it leaves, and it leaves nothing behind.
 #[test]
 fn ctrl_c_mid_sequence_cancels_the_frame_without_writing() {
-    let cancelled = step(&at_folder(), ctrl('c'), Some(&web01()));
+    let cancelled = step(&filled_add(), ctrl('c'), Some(&web01()));
 
     assert_eq!(
         cancelled.effects,
@@ -1169,15 +1635,27 @@ fn ctrl_x_arms_an_inline_confirm_for_the_selected_connection() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Ctrl+E — the in-place single-field editor (#37)
+// Ctrl+E — the same map, seeded from a Connection (#37)
+//
+// `Ctrl+E` is not a second editor. It opens the six-row map `Ctrl+A`
+// opens, with the same cursor and the same `▶` row; the differences are
+// that the rows arrive filled, the button says *Save* and names the
+// Connection, and there is a baseline to diff against so the changed rows
+// wear `●` and the save is reviewable before it happens.
+//
+// This deliberately departs from #31 story 26's "change exactly one
+// field". The old editor committed on every Enter, so a two-field
+// correction wrote the file twice and could not be abandoned halfway
+// through. Here Enter advances and the `▶` row commits, so one save can
+// carry several changed fields in one write.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// `Ctrl+E` opens the editor on the Connection the chord was pressed over,
-/// at its first field, with that field's current value already on the line.
+/// `Ctrl+E` opens the map on the Connection the chord was pressed over,
+/// with every row pre-filled from what that Connection actually holds.
 ///
 /// The pre-fill is what makes this an *edit* rather than a second add: the
-/// user sees the thing they are changing. Starting on Alias with an empty
-/// line would ask them to retype an alias they already have.
+/// user sees the thing they are changing. Starting with empty rows would
+/// ask them to retype a Connection they already have.
 #[test]
 fn ctrl_e_opens_the_editor_on_the_selected_connection_at_its_first_field() {
     let step = step(&ManageState::new(), ctrl('e'), Some(&web01()));
@@ -1190,10 +1668,28 @@ fn ctrl_e_opens_the_editor_on_the_selected_connection_at_its_first_field() {
         web01(),
         "the editor must carry the Connection the chord was pressed over"
     );
-    assert_eq!(editor.field, AddField::Alias);
     assert_eq!(
-        editor.input, "web-01",
-        "the line must arrive holding the field's current value"
+        editor.cursor,
+        FormCursor::Field(AddField::Alias),
+        "the cursor starts at the top, not on the field the user is most \
+         likely to change — a predictable row beats a clever one"
+    );
+    assert_eq!(
+        editor.draft.alias, "web-01",
+        "every row must arrive holding the field's current value"
+    );
+    assert_eq!(editor.draft.host, "10.0.0.4");
+    assert_eq!(editor.draft.user, "deploy");
+    assert_eq!(editor.draft.port, "22");
+    assert_eq!(editor.draft.folder, "prod");
+    assert_eq!(
+        editor.baseline, editor.draft,
+        "the baseline is the untouched copy the diff is taken against"
+    );
+    assert!(
+        editor.changed().is_empty(),
+        "and a freshly opened edit has changed nothing: {:?}",
+        editor.changed()
     );
     assert!(
         step.effects.is_empty(),
@@ -1210,21 +1706,22 @@ fn ctrl_e_with_nothing_selected_opens_nothing() {
         step.effects.is_empty(),
         "with no row under the cursor the frame must not invent a target to edit"
     );
-    assert_eq!(step.state, ManageState::new());
+    assert_eq!(step.state.phase, Phase::List);
 }
 
 /// The editor is scoped to the target captured at the chord, not to the
-/// cursor. Arrowing across five fields must not be able to move the write
-/// onto a neighbour — the same rule that stops a drifting cursor moving a
-/// delete.
+/// cursor. Arrowing across six rows and the `▶` row must not be able to
+/// move the write onto a neighbour — the same rule that stops a drifting
+/// cursor moving a delete.
 #[test]
 fn the_edit_target_is_captured_at_the_chord_and_never_moves() {
     let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
 
-    // Walk the field selector all the way round and back.
+    // Walk the whole map round twice, with the caller reporting a
+    // different selection the entire time.
     let mut state = armed.state.clone();
-    for _ in 0..7 {
-        state = step(&state, key(KeyCode::Right), Some(&web02())).state;
+    for _ in 0..14 {
+        state = step(&state, key(KeyCode::Tab), Some(&web02())).state;
     }
 
     let Phase::Edit(editor) = &state.phase else {
@@ -1240,7 +1737,7 @@ fn the_edit_target_is_captured_at_the_chord_and_never_moves() {
 
 /// `Ctrl+E` clears the note the last action left.
 ///
-/// A stale `◇ deleted` parked above "which field am I editing?" reads as
+/// A stale `◇ deleted` parked above "which row am I editing?" reads as
 /// an answer to a question nobody has asked yet.
 #[test]
 fn ctrl_e_clears_the_note_the_last_action_left() {
@@ -1262,127 +1759,223 @@ fn typing_in_the_editor_edits_the_field_not_the_filter_behind_it() {
     let Phase::Edit(editor) = &state.phase else {
         panic!("still editing, got {:?}", state.phase);
     };
-    assert_eq!(editor.input, "web-01db-01");
+    assert_eq!(editor.draft.alias, "web-01db-01");
     assert_eq!(
         state.query, "",
-        "the keystrokes belong to the field; the filter the user returns to is \
+        "the keystrokes belong to the row; the filter the user returns to is \
          untouched"
     );
 }
 
-/// The field selector re-seeds the line from the field it lands on.
+/// Moving the cursor shows the row it lands on, not the row it left.
 ///
-/// This is what makes moving between fields safe: the line always shows the
-/// truth about the field it names, so a user who arrows from Host to Port
-/// and hits Enter cannot write a hostname into the port.
+/// This is what makes moving between rows safe: the row always shows the
+/// truth about the field it names, so a user who arrows from Alias to Port
+/// cannot be looking at a hostname while about to write a port.
 #[test]
-fn moving_the_field_replaces_the_line_with_that_fields_actual_value() {
+fn moving_the_field_shows_that_fields_actual_value() {
     let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
 
-    let on_host = step(&armed.state, key(KeyCode::Right), Some(&web01())).state;
+    let on_host = step(&armed.state, key(KeyCode::Down), Some(&web01())).state;
 
     let Phase::Edit(editor) = &on_host.phase else {
         panic!("still editing, got {:?}", on_host.phase);
     };
-    assert_eq!(editor.field, AddField::Host);
+    assert_eq!(editor.cursor, FormCursor::Field(AddField::Host));
+    let rows = editor.rows();
     assert_eq!(
-        editor.input, "10.0.0.4",
-        "the line must show the Host, not the Alias it was showing a keystroke ago"
+        row(&rows, AddField::Host).value.as_deref(),
+        Some("10.0.0.4"),
+        "the row must show the Host, not the Alias it was showing a keystroke ago"
+    );
+    assert!(
+        row(&rows, AddField::Host).focused,
+        "and the frame must be able to tell which row that is"
+    );
+    assert!(
+        !row(&rows, AddField::Alias).focused,
+        "with the row it left no longer marked focused"
     );
 }
 
 #[test]
-fn the_field_selector_walks_the_five_fields_in_the_specs_order() {
+fn the_field_selector_walks_the_six_fields_in_the_specs_order() {
     let mut state = step(&ManageState::new(), ctrl('e'), Some(&web01())).state;
-    let mut seen = vec![field_of(&state)];
+    let mut seen = vec![cursor_of(&state)];
 
-    for _ in 0..4 {
-        state = step(&state, key(KeyCode::Right), Some(&web01())).state;
-        seen.push(field_of(&state));
+    for _ in 0..6 {
+        state = step(&state, key(KeyCode::Down), Some(&web01())).state;
+        seen.push(cursor_of(&state));
     }
 
     assert_eq!(
         seen,
         vec![
-            AddField::Alias,
-            AddField::Host,
-            AddField::Port,
-            AddField::Key,
-            AddField::Folder
+            FormCursor::Field(AddField::Alias),
+            FormCursor::Field(AddField::Host),
+            FormCursor::Field(AddField::User),
+            FormCursor::Field(AddField::Port),
+            FormCursor::Field(AddField::Key),
+            FormCursor::Field(AddField::Folder),
+            FormCursor::Submit,
         ],
-        "the editor cycles the same five fields, in the same order, the add \
-         sequence walks"
+        "the editor walks the same six fields, in the same order, the add map \
+         walks, ending on the `▶` row"
+    );
+    assert_eq!(
+        cursor_of(&state),
+        FormCursor::Submit,
+        "`↓` saturates on the `▶` row rather than wrapping"
     );
 }
 
-/// The selector wraps at both ends.
+/// The selector wraps at both ends on the travel keys.
 ///
-/// A `←` that silently dies at the first field reads as a broken keybinding
-/// on a rail that has already promised the arrows move the field.
+/// A `BackTab` that silently dies at the first field reads as a broken
+/// keybinding on a rail that has already promised the keys move the row.
 #[test]
 fn the_field_selector_wraps_at_both_ends() {
     let at_alias = step(&ManageState::new(), ctrl('e'), Some(&web01())).state;
 
-    let back = step(&at_alias, key(KeyCode::Left), Some(&web01())).state;
+    let back = step(&at_alias, key(KeyCode::BackTab), Some(&web01())).state;
     assert_eq!(
-        field_of(&back),
-        AddField::Folder,
-        "← off the first field must land on the last, not nowhere"
+        cursor_of(&back),
+        FormCursor::Submit,
+        "BackTab off the first row must land on the `▶` row, not nowhere"
     );
 
-    let at_folder = step(&at_alias, key(KeyCode::Left), Some(&web01())).state;
+    let forward = step(&back, key(KeyCode::Tab), Some(&web01())).state;
     assert_eq!(
-        field_of(&at_folder),
-        AddField::Folder,
-        "one step back from the first field is the last field"
-    );
-
-    let forward = step(&at_folder, key(KeyCode::Right), Some(&web01())).state;
-    assert_eq!(
-        field_of(&forward),
-        AddField::Alias,
-        "→ off the last field must come back round to the first"
+        cursor_of(&forward),
+        FormCursor::Field(AddField::Alias),
+        "and Tab off the `▶` row must come back round to the first"
     );
 }
 
-#[test]
-fn enter_on_an_unchanged_field_still_asks_for_the_write_it_was_answered() {
-    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
-
-    let step = step(&armed.state, key(KeyCode::Enter), Some(&web01()));
-
-    let Effect::Update { draft, .. } = &step.effects[0] else {
-        panic!("Enter must ask for the write, got {:?}", step.effects);
-    };
-    assert_eq!(
-        draft.alias, "web-01",
-        "the unchanged value is written back as it was read"
-    );
-}
-
-/// Enter writes exactly one field and leaves every other field of the
-/// Connection exactly as it was read.
+/// Enter on a field in the editor advances; it never commits.
 ///
-/// The editor changes one thing; the draft it emits must not be a blank
-/// form with one answer in it. A draft built from `Default` rather than
-/// from the target would silently wipe the host, the user and the folder
-/// off a Connection whose alias was being corrected.
+/// The old editor wrote the file on every Enter, which is what made a
+/// two-field correction two writes. Here Enter is the same movement key it
+/// is in the add map, and the only write is the `▶` row.
 #[test]
-fn committing_a_field_changes_only_that_field() {
+fn enter_on_a_field_in_the_editor_advances_and_writes_nothing() {
     let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
-    let state = type_str(&armed.state, "x");
 
-    let step = step(&state, key(KeyCode::Enter), Some(&web01()));
+    let advanced = step(&armed.state, key(KeyCode::Enter), Some(&web01()));
 
-    let Effect::Update { target, draft } = &step.effects[0] else {
-        panic!("Enter must ask for the write, got {:?}", step.effects);
+    assert_eq!(
+        cursor_of(&advanced.state),
+        FormCursor::Field(AddField::Host),
+        "Enter moves down one row"
+    );
+    assert!(
+        advanced.effects.is_empty(),
+        "and commits nothing: the only write in this form is the ▶ row: {:?}",
+        advanced.effects
+    );
+}
+
+/// **Edit with no changes refuses, and says why.**
+///
+/// An add with nothing filled is simply not ready. An edit that has touched
+/// nothing has answered a question nobody asked, and silently writing the
+/// file back would let the user believe something was saved when the
+/// Connection on disk is byte-identical to the one they started from.
+#[test]
+fn an_edit_with_no_changes_is_refused_as_nothing_to_save() {
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+
+    let refused = submit(&armed.state);
+
+    assert_eq!(
+        error_of(&refused.state),
+        Some("nothing to save"),
+        "the ▶ Save row must refuse an untouched form by name"
+    );
+    assert!(
+        refused.effects.is_empty(),
+        "and must not write the file back unchanged: {:?}",
+        refused.effects
+    );
+    assert!(
+        matches!(refused.state.phase, Phase::Edit(_)),
+        "the editor stays open with its target intact"
+    );
+    assert_eq!(
+        edit_seq(&refused.state).target,
+        web01(),
+        "the refusal must not lose the Connection being edited"
+    );
+}
+
+/// Typing whitespace into an empty optional row is not a change.
+///
+/// Compared trimmed on purpose: if it counted, the `▶ Save` row would light
+/// up for a save that writes exactly what is already there.
+#[test]
+fn whitespace_in_an_untouched_optional_row_is_still_nothing_to_save() {
+    let no_key = Connection {
+        key_path: None,
+        ..web01()
     };
+    let armed = step(&ManageState::new(), ctrl('e'), Some(&no_key));
+    let at_key = goto(&armed.state, FormCursor::Field(AddField::Key));
+    let typed = type_str(&at_key, "   ");
+
+    assert!(
+        edit_seq(&typed).changed().is_empty(),
+        "three spaces in an empty optional row are not a change: {:?}",
+        edit_seq(&typed).changed()
+    );
+
+    let refused = submit(&typed);
+    assert_eq!(error_of(&refused.state), Some("nothing to save"));
+    assert!(refused.effects.is_empty());
+}
+
+/// **Several changed fields, one write.**
+///
+/// The whole point of replacing the per-Enter commit: a correction that
+/// touches the host and the port used to be two writes with a window
+/// between them in which the Connection was half-changed and could not be
+/// backed out of. Here the `▶` row carries every changed field in a single
+/// `Effect::Update`.
+#[test]
+fn an_edit_changing_several_fields_is_one_update_carrying_all_of_them() {
+    let armed = edit_state(&web01());
+
+    let on_host = goto(&armed, FormCursor::Field(AddField::Host));
+    let on_host = backspace_n(&on_host, "10.0.0.4".chars().count());
+    let on_host = type_str(&on_host, "10.0.0.99");
+    let on_port = goto(&on_host, FormCursor::Field(AddField::Port));
+    let on_port = backspace_n(&on_port, "22".chars().count());
+    let on_port = type_str(&on_port, "2222");
+    let on_user = goto(&on_port, FormCursor::Field(AddField::User));
+    let on_user = backspace_n(&on_user, "deploy".chars().count());
+    let changed = type_str(&on_user, "root");
+
+    assert_eq!(
+        edit_seq(&changed).changed(),
+        vec![AddField::Host, AddField::User, AddField::Port],
+        "three rows changed, reported in map order"
+    );
+    assert!(edit_seq(&changed).ready());
+
+    let saved = submit(&changed);
+
+    assert_eq!(
+        saved.effects.len(),
+        1,
+        "three changed fields must be ONE write, not three: {:?}",
+        saved.effects
+    );
+    let (target, draft) = only_update(&saved);
     assert_eq!(target, &web01(), "the request names the target");
-    assert_eq!(draft.alias, "web-01x", "the edited field carries the edit");
-    assert_eq!(draft.host, "10.0.0.4", "host untouched");
-    assert_eq!(draft.user, "deploy", "user untouched");
-    assert_eq!(draft.port, "22", "port untouched");
-    assert_eq!(draft.folder, "prod", "folder untouched");
+    assert_eq!(draft.host, "10.0.0.99", "the host change is carried");
+    assert_eq!(draft.user, "root", "the user change is carried");
+    assert_eq!(draft.port, "2222", "the port change is carried");
+    assert_eq!(draft.alias, "web-01", "and the untouched alias comes along");
+    assert_eq!(draft.folder, "prod", "and the untouched folder too");
 }
 
 /// The id travels with the edit.
@@ -1391,42 +1984,42 @@ fn committing_a_field_changes_only_that_field() {
 /// Connection the user was editing and leave the old row in the list.
 #[test]
 fn the_edit_carries_the_targets_id_not_a_new_one() {
-    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
-    let step = step(&armed.state, key(KeyCode::Enter), Some(&web01()));
+    let armed = edit_state(&web01());
+    let renamed = type_str(
+        &goto(&armed, FormCursor::Field(AddField::Alias)),
+        "-renamed",
+    );
 
-    let Effect::Update { target, draft } = &step.effects[0] else {
-        panic!("expected an Update, got {:?}", step.effects);
-    };
+    let saved = submit(&renamed);
+
+    let (target, draft) = only_update(&saved);
     assert_eq!(target.id, "id-web-01");
     assert_eq!(
-        draft.alias, "web-01",
+        draft.alias, "web-01-renamed",
         "the draft is the whole Connection, so the store can keep the id"
     );
 }
 
-/// The editor validates through the same `settle` the add sequence uses,
+/// The editor validates through the same `settled_draft` the add map uses,
 /// so a field cannot have two different rules depending on which chord
 /// opened it.
 #[test]
 fn the_editor_applies_the_same_per_field_validation_as_the_add_sequence() {
-    let on_port = focus(AddField::Port);
-    assert_eq!(field_of(&on_port), AddField::Port);
+    let armed = edit_state(&web01());
 
-    // Out of range: refused, stays on the field, writes nothing.
+    // Out of range, alongside a real change so the refusal is about the
+    // port and not about there being nothing to save.
+    let on_alias = type_str(&goto(&armed, FormCursor::Field(AddField::Alias)), "x");
+    let on_port = goto(&on_alias, FormCursor::Field(AddField::Port));
     let cleared = backspace_n(&on_port, "22".chars().count());
     let bad = type_str(&cleared, "99999");
-    let refused = step(&bad, key(KeyCode::Enter), Some(&web01()));
 
-    let Phase::Edit(editor) = &refused.state.phase else {
-        panic!(
-            "a refused port must stay on the field, got {:?}",
-            refused.state.phase
-        );
-    };
+    let refused = submit(&bad);
+
     assert_eq!(
-        editor.error.as_deref(),
-        Some("port must be a number from 1 to 65535"),
-        "the same sentence the add sequence gives"
+        error_of(&refused.state),
+        Some(PORT_REFUSAL),
+        "the same sentence the add map gives"
     );
     assert!(
         refused.effects.is_empty(),
@@ -1434,32 +2027,29 @@ fn the_editor_applies_the_same_per_field_validation_as_the_add_sequence() {
         refused.effects
     );
 
-    // Empty: the SSH default, the same answer the add sequence gives.
+    // Empty: the SSH default, the same answer the add map gives.
     let cleared = backspace_n(&bad, "99999".chars().count());
-    let settled = step(&cleared, key(KeyCode::Enter), Some(&web01()));
-    let Effect::Update { draft, .. } = &settled.effects[0] else {
-        panic!(
-            "an empty port settles to the default, got {:?}",
-            settled.effects
-        );
-    };
+    let settled = submit(&cleared);
+    let (_, draft) = only_update(&settled);
     assert_eq!(draft.port, "22");
 }
 
 #[test]
 fn a_refused_edit_keeps_the_typed_text_and_the_target() {
-    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
-    let state = type_str(&armed.state, "");
+    let armed = edit_state(&web01());
 
-    // Blank a required field and press Enter.
-    let cleared = backspace_n(&state, "web-01".len());
-    let refused = step(&cleared, key(KeyCode::Enter), Some(&web01()));
+    // Blank a required field and try to save.
+    let cleared = backspace_n(
+        &goto(&armed, FormCursor::Field(AddField::Alias)),
+        "web-01".chars().count(),
+    );
+    let refused = submit(&cleared);
 
     let Phase::Edit(editor) = &refused.state.phase else {
         panic!("must still be editing, got {:?}", refused.state.phase);
     };
     assert_eq!(editor.target, web01(), "the target survives the refusal");
-    assert_eq!(editor.input, "", "what the user typed stays on the line");
+    assert_eq!(editor.draft.alias, "", "what the user left stays where it is");
     assert_eq!(
         editor.error.as_deref(),
         Some("alias is required"),
@@ -1470,8 +2060,8 @@ fn a_refused_edit_keeps_the_typed_text_and_the_target() {
 
 #[test]
 fn esc_abandons_the_edit_and_promises_nothing_was_saved() {
-    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
-    let typed = type_str(&armed.state, "-typo");
+    let armed = edit_state(&web01());
+    let typed = type_str(&armed, "-typo");
 
     let step = step(&typed, key(KeyCode::Esc), Some(&web01()));
 
@@ -1484,6 +2074,32 @@ fn esc_abandons_the_edit_and_promises_nothing_was_saved() {
     );
 }
 
+/// Esc partway down the edit map moves up one row rather than abandoning,
+/// so a user correcting the Port can back off a row without losing the
+/// whole edit.
+#[test]
+fn esc_in_the_editor_moves_up_one_row_before_it_abandons() {
+    let on_port = goto(&edit_state(&web01()), FormCursor::Field(AddField::Port));
+
+    let up = step(&on_port, key(KeyCode::Esc), Some(&web01()));
+    assert_eq!(
+        cursor_of(&up.state),
+        FormCursor::Field(AddField::User),
+        "one Esc is one row up"
+    );
+    assert!(matches!(up.state.phase, Phase::Edit(_)));
+
+    let up = step(&up.state, key(KeyCode::Esc), Some(&web01()));
+    assert_eq!(cursor_of(&up.state), FormCursor::Field(AddField::Host));
+
+    let up = step(&up.state, key(KeyCode::Esc), Some(&web01()));
+    assert_eq!(cursor_of(&up.state), FormCursor::Field(AddField::Alias));
+
+    let abandoned = step(&up.state, key(KeyCode::Esc), Some(&web01()));
+    assert_eq!(abandoned.state.phase, Phase::List);
+    assert_eq!(abandoned.state.trace, Some(Trace::EditAbandoned));
+}
+
 #[test]
 fn ctrl_c_inside_the_editor_cancels_the_frame_without_writing() {
     let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
@@ -1493,20 +2109,31 @@ fn ctrl_c_inside_the_editor_cancels_the_frame_without_writing() {
     assert_eq!(step.effects, vec![Effect::Exit(InlineOutcome::Cancelled)]);
 }
 
-/// List movement does nothing while the editor is open.
+/// The list's own cursor cannot move while the editor is open.
 ///
-/// The target is captured at the chord, so there is nothing for the cursor
-/// to change — and a stray arrow that moved the target mid-edit would put
-/// the write somewhere the user never pointed.
+/// The target is captured at the chord, so there is nothing for the list
+/// cursor to change — and a stray arrow that moved it mid-edit would put
+/// the write somewhere the user never pointed. `↑`/`↓` *do* move the form
+/// row now; what must not move is `selection` and the Connection being
+/// edited.
 #[test]
-fn list_movement_does_nothing_while_the_editor_is_open() {
-    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+fn the_list_cursor_cannot_move_while_the_editor_is_open() {
+    let armed = ManageState {
+        selection: 3,
+        ..edit_state(&web01())
+    };
 
-    for code in [KeyCode::Up, KeyCode::Down] {
-        let step = step(&armed.state, key(code), Some(&web02()));
+    for code in [KeyCode::Up, KeyCode::Down, KeyCode::Tab, KeyCode::BackTab] {
+        let step = step(&armed, key(code), Some(&web02()));
+
         assert_eq!(
-            step.state, armed.state,
-            "{code:?} must not change the edit in any way"
+            step.state.selection, 3,
+            "{code:?} must not move the list cursor while editing"
+        );
+        assert_eq!(
+            edit_seq(&step.state).target,
+            web01(),
+            "{code:?} must not move the edit onto another Connection"
         );
         assert!(step.effects.is_empty());
     }
@@ -1516,7 +2143,7 @@ fn list_movement_does_nothing_while_the_editor_is_open() {
 /// empty string.
 ///
 /// A `key_path: Some("")` would reach ssh as `-i ""`. The same rule the
-/// add sequence enforces, reached through the same `settle`.
+/// add map enforces, reached through the same `settled_draft`.
 #[test]
 fn clearing_an_optional_field_makes_it_absent() {
     let with_key = Connection {
@@ -1529,30 +2156,65 @@ fn clearing_an_optional_field_makes_it_absent() {
         folder: Some("prod".into()),
     };
 
-    let armed = step(&ManageState::new(), ctrl('e'), Some(&with_key));
-    // Alias → Host → Port → Key
-    let on_key = step(
-        &step(
-            &step(&armed.state, key(KeyCode::Right), Some(&with_key)).state,
-            key(KeyCode::Right),
-            Some(&with_key),
-        )
-        .state,
-        key(KeyCode::Right),
-        Some(&with_key),
-    )
-    .state;
-    assert_eq!(field_of(&on_key), AddField::Key);
-
+    let on_key = goto(&edit_state(&with_key), FormCursor::Field(AddField::Key));
     let cleared = backspace_n(&on_key, "~/.ssh/id_ed25519".chars().count());
-    let step = step(&cleared, key(KeyCode::Enter), Some(&with_key));
+    let step = submit(&cleared);
 
-    let Effect::Update { draft, .. } = &step.effects[0] else {
-        panic!("expected an Update, got {:?}", step.effects);
-    };
+    let (_, draft) = only_update(&step);
     assert_eq!(
         draft.key_path, "",
         "the draft carries the empty answer; the store turns it into absent"
+    );
+}
+
+/// The edit is the same map as the add, not a second editor with its own
+/// shape.
+///
+/// Story 26 asked for a small correction to take *one* step, and the old
+/// answer was a single-field editor. The new answer is the same thing by
+/// different means: the add's own six-row map, seeded, with one `▶` row
+/// that commits. Two flows that look alike and behave differently are the
+/// thing users get wrong, so the shared shape is the promise — and one
+/// Enter on `▶` is still the whole save.
+#[test]
+fn the_edit_is_the_same_map_as_the_add_with_one_submit_row() {
+    let adding = add_at(FormCursor::Field(AddField::Alias));
+    let editing = edit_state(&web01());
+
+    let add_rows: Vec<(AddField, &'static str)> = add_seq(&adding)
+        .rows()
+        .iter()
+        .map(|r| (r.field, r.label))
+        .collect();
+    let edit_rows: Vec<(AddField, &'static str)> = edit_seq(&editing)
+        .rows()
+        .iter()
+        .map(|r| (r.field, r.label))
+        .collect();
+
+    assert_eq!(
+        add_rows, edit_rows,
+        "both chords open the same six rows, labelled the same, in the same order"
+    );
+    assert_eq!(
+        cursor_of(&adding),
+        cursor_of(&editing),
+        "and both start the cursor on the same row"
+    );
+
+    let saved = submit(&type_str(
+        &goto(&editing, FormCursor::Field(AddField::Alias)),
+        "x",
+    ));
+    assert_eq!(
+        saved.effects.len(),
+        1,
+        "one Enter on the ▶ row is the whole edit"
+    );
+    assert!(matches!(saved.effects[0], Effect::Update { .. }));
+    assert!(
+        !matches!(saved.state.phase, Phase::Add(_)),
+        "Ctrl+E must never open the add flow"
     );
 }
 
@@ -1678,29 +2340,6 @@ fn the_edit_outcome_classifies_the_store_answer() {
     assert_eq!(
         EditOutcome::from_update(Err("nope".into())),
         EditOutcome::Failed("nope".into())
-    );
-}
-
-/// The editor is not the add sequence.
-///
-/// Story 26 asks for a small correction to take *one* step. If `Ctrl+E`
-/// opened the five-field walk, correcting a port would be four steps of
-/// nothing followed by one step of the thing the user wanted.
-#[test]
-fn the_edit_is_one_step_not_a_five_field_walk() {
-    let armed = step(&ManageState::new(), ctrl('e'), Some(&web01()));
-
-    let step = step(&armed.state, key(KeyCode::Enter), Some(&web01()));
-
-    assert_eq!(
-        step.effects.len(),
-        1,
-        "one Enter on the opened editor must be the whole edit"
-    );
-    assert!(matches!(step.effects[0], Effect::Update { .. }));
-    assert!(
-        !matches!(step.state.phase, Phase::Add(_)),
-        "Ctrl+E must never open the add sequence"
     );
 }
 
@@ -2093,19 +2732,179 @@ fn a_declined_offer_leaves_nothing_for_the_settle_path_to_claim() {
 // Test helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Open the editor and walk the selector to `field`.
-fn focus(field: AddField) -> ManageState {
-    let mut state = step(&ManageState::new(), ctrl('e'), Some(&web01())).state;
-    while field_of(&state) != field {
-        state = step(&state, key(KeyCode::Right), Some(&web01())).state;
-    }
+/// The add map, opened with `Ctrl+A` and with the cursor parked on `at`.
+fn add_at(at: FormCursor) -> ManageState {
+    let opened = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+    goto(&opened.state, at)
+}
+
+/// The add map with only the two required rows filled, cursor on Folder.
+///
+/// The fixture for tests that want a form the `▶` row will accept while
+/// still holding something specific to prove about a row the required
+/// fields say nothing about — the User row, chiefly. Deriving those tests
+/// from a blank map instead would have them refused for reasons that have
+/// nothing to do with what they are testing.
+fn add_with_required_filled() -> ManageState {
+    let mut state = add_at(FormCursor::Field(AddField::Alias));
+    state = type_str(&state, "web-03");
+    state = goto(&state, FormCursor::Field(AddField::Host));
+    state = type_str(&state, "10.0.0.7");
+    assert_eq!(
+        add_seq(&state).draft.user, "",
+        "setup: the User row must start empty for the test to prove anything"
+    );
     state
 }
 
-fn field_of(state: &ManageState) -> AddField {
+/// The edit map opened over `conn`.
+fn edit_state(conn: &Connection) -> ManageState {
+    step(&ManageState::new(), ctrl('e'), Some(conn)).state
+}
+
+/// The add map with every one of the six rows filled, cursor on Folder.
+///
+/// Deliberately a *valid* form, so a test that wants a refusal has to say
+/// which row it broke rather than inheriting one from the fixture.
+fn filled_add() -> ManageState {
+    let rows: [(AddField, &str); 6] = [
+        (AddField::Alias, "web-03"),
+        (AddField::Host, "10.0.0.7"),
+        (AddField::User, "deploy"),
+        (AddField::Port, "2222"),
+        (AddField::Key, "~/.ssh/id_ed25519"),
+        (AddField::Folder, "prod"),
+    ];
+
+    let mut state = add_at(FormCursor::Field(AddField::Alias));
+    for (field, value) in rows {
+        state = goto(&state, FormCursor::Field(field));
+        state = type_str(&state, value);
+    }
+    assert!(
+        add_seq(&state).ready(),
+        "the fixture must be a form the ▶ row would accept: {:?}",
+        add_seq(&state).problems()
+    );
+    state
+}
+
+/// The add form with Alias, Host and User answered, cursor on Port.
+fn at_port() -> ManageState {
+    let mut state = add_at(FormCursor::Field(AddField::Alias));
+    state = type_str(&state, "web-01");
+    state = goto(&state, FormCursor::Field(AddField::Host));
+    state = type_str(&state, "10.0.0.4");
+    state = goto(&state, FormCursor::Field(AddField::User));
+    state = type_str(&state, "deploy");
+    goto(&state, FormCursor::Field(AddField::Port))
+}
+
+/// Move the form cursor to `target` using the saturating arrows, which
+/// reach every row from every other row.
+fn goto(state: &ManageState, target: FormCursor) -> ManageState {
+    let current = cursor_of(state);
+    let mut s = state.clone();
+    let (code, steps) = if target.index() >= current.index() {
+        (KeyCode::Down, target.index() - current.index())
+    } else {
+        (KeyCode::Up, current.index() - target.index())
+    };
+    for _ in 0..steps {
+        s = step(&s, key(code), Some(&web01())).state;
+    }
+    assert_eq!(
+        cursor_of(&s),
+        target,
+        "the test helper could not move the cursor to {target:?}"
+    );
+    s
+}
+
+/// Press Enter on the `▶` row, wherever the cursor currently is.
+fn submit(state: &ManageState) -> manage::Step {
+    let at_submit = goto(state, FormCursor::Submit);
+    step(&at_submit, key(KeyCode::Enter), Some(&web01()))
+}
+
+/// The form cursor, whichever of the two maps is open.
+fn cursor_of(state: &ManageState) -> FormCursor {
     match &state.phase {
-        Phase::Edit(editor) => editor.field,
-        other => panic!("expected the editor, got {other:?}"),
+        Phase::Add(sequence) => sequence.cursor,
+        Phase::Edit(editor) => editor.cursor,
+        other => panic!("expected a form map, got {other:?}"),
+    }
+}
+
+/// The live add sequence inside a state.
+fn add_seq(state: &ManageState) -> &AddSequence {
+    match &state.phase {
+        Phase::Add(sequence) => sequence,
+        other => panic!("expected the add map, got {other:?}"),
+    }
+}
+
+/// The live edit sequence inside a state.
+fn edit_seq(state: &ManageState) -> &EditSequence {
+    match &state.phase {
+        Phase::Edit(editor) => editor,
+        other => panic!("expected the edit map, got {other:?}"),
+    }
+}
+
+/// The last refusal shown on either map.
+fn error_of(state: &ManageState) -> Option<&str> {
+    match &state.phase {
+        Phase::Add(sequence) => sequence.error.as_deref(),
+        Phase::Edit(editor) => editor.error.as_deref(),
+        other => panic!("expected a form map, got {other:?}"),
+    }
+}
+
+/// Every problem with the open map, in map order.
+fn problems_of(state: &ManageState) -> Vec<(&'static str, String)> {
+    match &state.phase {
+        Phase::Add(sequence) => sequence.problems(),
+        Phase::Edit(editor) => editor.problems(),
+        other => panic!("expected a form map, got {other:?}"),
+    }
+}
+
+/// The glyph the map is showing for one field.
+fn glyph_of(state: &ManageState, field: AddField) -> RowGlyph {
+    let rows = match &state.phase {
+        Phase::Add(sequence) => sequence.rows(),
+        Phase::Edit(editor) => editor.rows(),
+        other => panic!("expected a form map, got {other:?}"),
+    };
+    row(&rows, field).glyph
+}
+
+/// Find one field's row.
+fn row<'a>(rows: &'a [MapRow], field: AddField) -> &'a MapRow {
+    rows.iter()
+        .find(|r| r.field == field)
+        .unwrap_or_else(|| panic!("no row for {field:?} in {rows:?}"))
+}
+
+/// Unwrap the single `Effect::Add` a submit was expected to produce.
+///
+/// A helper rather than a `let-else` at each call site because the
+/// assertion is always the same one — *exactly* one add, nothing else in
+/// the list — and a test that unpacked `effects[0]` alone would let a
+/// second, unexpected effect slip past.
+fn only_add(step: &manage::Step) -> &ConnectionDraft {
+    match &step.effects[..] {
+        [Effect::Add { draft }] => draft,
+        other => panic!("expected exactly one Add, got {other:?}"),
+    }
+}
+
+/// Unwrap the single `Effect::Update` a save was expected to produce.
+fn only_update(step: &manage::Step) -> (&Connection, &ConnectionDraft) {
+    match &step.effects[..] {
+        [Effect::Update { target, draft }] => (target, draft),
+        other => panic!("expected exactly one Update, got {other:?}"),
     }
 }
 

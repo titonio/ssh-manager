@@ -104,6 +104,21 @@ pub struct Theme {
     /// Caution signal: reserved for warning states; no live surface paints it
     /// yet, but the role exists so a warning never invents a hue.
     pub warning: Color,
+    /// The faintest tier: a field's placeholder, `<optional>` / `<not set>`.
+    ///
+    /// This role exists to be **fainter than `fg_muted`**, because a
+    /// placeholder that wears the field label's colour cannot be told apart
+    /// from a label — which is the defect this tier was cut to fix. That
+    /// makes it the one role deliberately below the informational contrast
+    /// floor, and it is exempt from
+    /// `every_informational_role_clears_the_reference_contrast_floor` for
+    /// the same reason `border` is: it carries no state.
+    ///
+    /// A placeholder is an invitation shown where a value is absent. If it
+    /// were unreadable the user loses a hint, not information — the field's
+    /// own glyph (`○` required, `·` optional) already says whether it needs
+    /// filling, so the tier may recede without any state riding on it.
+    pub fg_placeholder: Color,
 }
 
 impl Theme {
@@ -149,6 +164,7 @@ impl Theme {
             highlight: Color::Green,
             success: Color::Green,
             warning: Color::Yellow,
+            fg_placeholder: Color::Indexed(240),
         }
     }
 
@@ -171,6 +187,7 @@ impl Theme {
             highlight: Color::Reset,
             success: Color::Reset,
             warning: Color::Reset,
+            fg_placeholder: Color::Reset,
         }
     }
 
@@ -193,6 +210,11 @@ impl Theme {
             ColorSupport::Monochrome => Self::monochrome(),
             ColorSupport::Ansi16 => Self {
                 fg_muted: Color::DarkGray,
+                // A 16-colour terminal has no grey ramp to sit below
+                // `fg_muted` in, so the placeholder collapses onto the same
+                // token. It loses its extra recession and gains nothing that
+                // carries state, which is the trade the role is built for.
+                fg_placeholder: Color::DarkGray,
                 ..*self
             },
             _ => *self,
@@ -391,6 +413,7 @@ mod tests {
             ("highlight", t.highlight),
             ("success", t.success),
             ("warning", t.warning),
+            ("fg_placeholder", t.fg_placeholder),
         ] {
             assert!(
                 allowed(color),

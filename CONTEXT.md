@@ -22,3 +22,28 @@ seeds the picker from the buffer, and the `**` completion trigger that opens
 the picker unfiltered. The `**<TAB>` route is zsh-only; the widget falls
 through to normal `.expand-or-complete` when the trigger token is absent.
 _Avoid_: override, hook, completion menu
+
+**Form Map**:
+The six-row surface that both `Ctrl+A` and `Ctrl+E` open — Alias, Host, User,
+Port, Key, Folder, each row carrying a glyph that states its condition
+(`✓` valid, `●` changed from what is stored, `○` required and empty, `!`
+will not validate, `·` optional and empty), with the cursor row wearing `◆`.
+`Ctrl+A` opens it blank; `Ctrl+E` opens it seeded from the selected
+Connection. It is one surface with two starting drafts, not two forms — the
+distinction is what keeps the keymap honest.
+_Avoid_: stepper, wizard, form, multi-step prompt, edit screen
+
+**Submit Row**:
+The `▶` row at the foot of the Form Map, and the only place the form can
+commit. It is a row the cursor can be *on*, which is what lets Enter mean
+"act on the row you are standing on" everywhere. `▶ Add connection` on a
+new Connection, `▶ Save changes to <alias>` on an existing one.
+_Avoid_: button, footer action, confirm key
+
+**Live Draft**:
+The Form Map's content model: every keystroke writes straight into the field
+under the cursor, so a drawn row *is* the value rather than a view of a
+value that must be settled first. Normalisation (trim, the port's
+empty-to-`22`) is deferred to the Submit Row, so the map never displays a
+value the user did not type.
+_Avoid_: pending input, staged field, settled line
