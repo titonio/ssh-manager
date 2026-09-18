@@ -57,6 +57,40 @@ jobs:
     - name: Run tests
       run: cargo test --manifest-path sshm/Cargo.toml --all-features
 
+  design:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: sshm
+
+    # Deterministic design rules plus the terminal capability matrix: the detector
+    # runs once per colour mode, since ColorSupport::detect() reads the
+    # environment. The script unsets NO_COLOR for the colour passes on purpose —
+    # a non-interactive shell carries NO_COLOR=1/TERM=dumb, which would otherwise
+    # make every pass silently monochrome and the matrix prove nothing.
+    - name: Terminal capability matrix
+      run: ./scripts/design-matrix.sh
+
+    - name: Upload frames for review
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: design-frames
+        path: sshm/target/design-frames/
+        if-no-files-found: warn
+
   coverage:
     needs: test
     runs-on: ubuntu-latest

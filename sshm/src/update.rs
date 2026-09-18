@@ -21,6 +21,28 @@ pub struct UpdateInfo {
     pub new_version: String,
 }
 
+/// Parse a dotted numeric version like `"0.1.11"` into `(major, minor, patch)`.
+/// Returns `None` for anything that isn't exactly three dot-separated integers.
+fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let major = parts[0].parse::<u64>().ok()?;
+    let minor = parts[1].parse::<u64>().ok()?;
+    let patch = parts[2].parse::<u64>().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Returns `true` if `candidate` is strictly newer than `current`.
+/// Unparseable versions are treated as "not newer" — quiet beats a lie.
+fn is_newer(candidate: &str, current: &str) -> bool {
+    match (parse_version(candidate), parse_version(current)) {
+        (Some(c), Some(cur)) => c > cur,
+        _ => false,
+    }
+}
+
 fn get_cache_dir() -> Result<PathBuf, String> {
     let config_dir = dirs::config_dir()
         .ok_or("Failed to get config directory")?
@@ -210,6 +232,56 @@ pub fn force_check_for_update() -> UpdateResult {
     check_for_update_inner()
 }
 
+/// The update note a frame shows above itself.
+///
+/// `Ok(Some(info))` names both versions of a newer release, `Ok(None)` means
+/// there is nothing to show, and `Err` carries the reason the check failed —
+/// which each surface words in its own way.
+///
+/// Inside a source checkout this returns `Ok(None)` without going near the
+/// The version a previous run cached, with **no network**.
+///
+/// This is the reader the inline frame's paint path uses (#39). It opens
+/// the cache file and reports the `new_version` a *previous* run left
+/// there — or `None` when there is no cache, the cache holds no update,
+/// the cached version is not newer than the running binary, or the file
+/// cannot be read. It never calls the update checker, never opens a
+/// socket, and never blocks first paint: the whole point of the note is
+/// that it is already known before the frame draws.
+///
+/// A source checkout returns `None` without reading: running the tool
+/// from a checkout should not surface a note, and the cache a checkout's
+/// own test runs leave behind is not the user's update state.
+///
+/// The cached version is compared against `env!("CARGO_PKG_VERSION")`
+/// before it is returned. After `sshm update` the running binary is the
+/// new version, so the cached note would be a lie; returning `None` here
+/// keeps the note honest without a network round-trip.
+pub fn cached_update_version() -> Option<String> {
+    if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
+        return None;
+    }
+
+    let cached = read_cache().ok().flatten().and_then(|c| c.new_version)?;
+    if is_newer(&cached, env!("CARGO_PKG_VERSION")) {
+        Some(cached)
+    } else {
+        None
+    }
+}
+
+/// Turn the outcome of an update check into the note a surface shows.
+pub fn note_from(result: UpdateResult) -> Result<Option<UpdateInfo>, String> {
+    match result {
+        UpdateResult::UpdateAvailable { version } => Ok(Some(UpdateInfo {
+            current_version: env!("CARGO_PKG_VERSION").to_string(),
+            new_version: version,
+        })),
+        UpdateResult::NoUpdate => Ok(None),
+        UpdateResult::Error(message) => Err(message),
+    }
+}
+
 fn check_for_update_inner() -> UpdateResult {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
 
@@ -374,6 +446,7 @@ mod tests {
     use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_should_check_update_no_cache() {
         let result = should_check_update();
         assert!(result.is_ok());
@@ -647,6 +720,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_should_check_update_error_handling() {
         // Test that should_check_update returns a Result
         let result = should_check_update();
@@ -856,6 +930,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_for_update_basic() {
         let result = check_for_update();
         assert!(matches!(
@@ -865,6 +940,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_force_check_for_update_basic() {
         let result = force_check_for_update();
         assert!(matches!(
@@ -1156,6 +1232,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_should_check_update_with_cargo_env_skips() {
         let old_value = std::env::var("CARGO_MANIFEST_DIR").ok();
         std::env::set_var("CARGO_MANIFEST_DIR", "/tmp/test");
@@ -1462,6 +1539,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_check_for_update_returns_result_variant() {
         let result = check_for_update();
         match result {
@@ -1476,6 +1554,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_force_check_for_update_returns_result_variant() {
         let result = force_check_for_update();
         match result {
@@ -1753,5 +1832,168 @@ mod tests {
 
         assert!(cache_file.starts_with(&cache_dir));
         assert_eq!(cache_file.file_name().unwrap(), "update_cache.json");
+    }
+
+    // The update note a frame reads. These live with the note itself, not with
+    // the Connection set that has nothing to do with versions.
+
+    #[test]
+    fn an_available_update_becomes_a_note_naming_both_versions() {
+        match note_from(UpdateResult::UpdateAvailable {
+            version: "9.9.9".to_string(),
+        }) {
+            Ok(Some(info)) => {
+                assert_eq!(info.new_version, "9.9.9");
+                assert_eq!(info.current_version, env!("CARGO_PKG_VERSION"));
+            }
+            other => panic!("expected an available-update note, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_failed_update_check_becomes_the_reason_it_failed() {
+        match note_from(UpdateResult::Error("network down".to_string())) {
+            Err(reason) => assert_eq!(reason, "network down"),
+            other => panic!("expected a failed-update note, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_update_means_no_note() {
+        assert!(matches!(note_from(UpdateResult::NoUpdate), Ok(None)));
+    }
+
+    // The cache-only reader the frame's paint path uses (#39). These pin
+    // that it reads the cached version and nothing else — no network, no
+    // freshness gate, no panic on a missing or corrupt file.
+
+    #[test]
+    #[serial]
+    fn cached_update_version_reports_the_version_a_previous_run_left() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        let cache = CacheData {
+            last_check: 12345,
+            new_version: Some("0.2.0".to_string()),
+        };
+        fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        assert_eq!(cached_update_version().as_deref(), Some("0.2.0"));
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn cached_update_version_is_none_when_the_cache_holds_no_new_version() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        let cache = CacheData {
+            last_check: 12345,
+            new_version: None,
+        };
+        fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        assert_eq!(cached_update_version(), None);
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn cached_update_version_is_none_when_the_cache_is_unreadable() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        fs::write(&cache_path, "not json at all").unwrap();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        // A corrupt cache is a silent no-note, never a panic and never a
+        // network call: the paint path must survive it.
+        assert_eq!(cached_update_version(), None);
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn cached_update_version_is_none_when_there_is_no_cache_at_all() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        assert_eq!(cached_update_version(), None);
+    }
+
+    #[test]
+    #[serial]
+    fn cached_update_version_is_none_when_cached_version_equals_running_version() {
+        // After `sshm update` the running binary IS the cached version.
+        // Returning Some here would make the note a lie.
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        let current = env!("CARGO_PKG_VERSION").to_string();
+        let cache = CacheData {
+            last_check: 12345,
+            new_version: Some(current),
+        };
+        fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        assert_eq!(cached_update_version(), None);
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn cached_update_version_is_none_when_cached_version_is_older() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        let cache = CacheData {
+            last_check: 12345,
+            new_version: Some("0.0.1".to_string()),
+        };
+        fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        assert_eq!(cached_update_version(), None);
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn cached_update_version_is_none_when_cached_version_is_unparseable() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        let cache = CacheData {
+            last_check: 12345,
+            new_version: Some("not-a-version".to_string()),
+        };
+        fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
+        std::env::remove_var("CARGO_MANIFEST_DIR");
+
+        // Unparseable = not newer = quiet. A lie is worse than silence.
+        assert_eq!(cached_update_version(), None);
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    #[test]
+    #[serial]
+    fn cached_update_version_stays_quiet_inside_a_source_checkout() {
+        // A checkout must never surface a note, even if a cache file with a
+        // version happens to exist on the machine running the test.
+        let previous = std::env::var_os("CARGO_MANIFEST_DIR");
+        std::env::set_var("CARGO_MANIFEST_DIR", env!("CARGO_MANIFEST_DIR"));
+
+        assert_eq!(cached_update_version(), None);
+
+        match previous {
+            Some(value) => std::env::set_var("CARGO_MANIFEST_DIR", value),
+            None => std::env::remove_var("CARGO_MANIFEST_DIR"),
+        }
     }
 }

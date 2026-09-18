@@ -1,6 +1,7 @@
 # SSH Manager (sshm)
 
-A modern Terminal User Interface (TUI) for managing SSH connections, built with Rust and Ratatui.
+A terminal SSH connection manager that draws an **inline frame** inside your own
+shell — no alternate screen, no takeover — built with Rust and Ratatui.
 
 ## Features
 
@@ -13,7 +14,7 @@ A modern Terminal User Interface (TUI) for managing SSH connections, built with 
 - **Inline Picker**: Filter-as-you-type selector triggered from the shell (Ctrl+Alt+S or `**<TAB>`)
 - **Shell Integration**: `sshm init zsh|bash` emits ZLE/widget scripts with trigger bindings
 - **Automatic Updates**: Built-in update checker with GitHub release integration
-- **Nord Theme**: Beautiful Nordic-inspired color scheme
+- **Transparent Frame**: A Clack-grammar frame (`◆` step, `│` rail, `❯` cursor) that borrows your terminal's own background — no alternate screen, no painted panel
 
 ## Installation
 
@@ -44,22 +45,35 @@ Download the pre-built binary for your platform from the [GitHub Releases](https
 sshm
 ```
 
+Bare `sshm` opens the inline frame; Enter runs `ssh` against the selected
+Connection.
+
 ### Command Line Options
 
-- `-c, --check-update`: Check for updates without running the TUI
+- `-c, --check-update`: Check for updates without opening the frame
 
 ### Subcommands
 
-- `add`: Add a new SSH connection
-- `completions`: Generate shell completion scripts
-- `check-update`: Check for updates
-- `init`: Generate shell initialization scripts (zsh, bash) for the inline picker widget
-- `pick`: Open an inline fuzzy picker to select a Connection (inserts `ssh` command, doesn't execute)
+Three commands open the same inline frame and differ only in what Enter means
+(the `--emit` axis); the rest draw nothing.
+
+| Command | Enter / effect |
+|---------|----------------|
+| `sshm` (bare) | Executes `ssh` against the selected Connection |
+| `sshm pick` | Writes the chosen **alias** to stdout, for the shell to insert. Under `$(sshm pick)` the pipe carries only the alias — the frame is drawn to `/dev/tty` |
+| `sshm manage` | Opens the frame with the manage header and routes the selection to the edit path (the edit itself is #36/#37; nothing is written yet) |
+| `sshm add` | Add a new SSH connection without the frame |
+| `sshm init zsh\|bash` | Emit the shell integration script |
+| `sshm completions <shell>` | Generate shell completion scripts |
+| `sshm check-update` | Check for updates |
+
+`Esc` / `Ctrl-C` cancels any frame, leaves the shell buffer untouched, and
+exits 130.
 
 ### Shell Integration (Inline Picker)
 
 Source the init script to bind an inline fuzzy picker that lets you select an SSH
-connection and insert its `ssh` command onto the command line without executing it:
+connection and insert its alias onto the command line without executing it:
 
 ```bash
 # Zsh (recommended)
@@ -74,7 +88,7 @@ eval "$(sshm init bash)"
 #### Trigger key: Ctrl+Alt+S
 
 Opens the inline picker seeded with the current buffer text as a filter query.
-Pick a connection → the `ssh` command is inserted at the cursor. Cancel (Esc/Ctrl-C)
+Pick a connection → the chosen alias is inserted at the cursor. Cancel (Esc/Ctrl-C)
 → the buffer is left untouched.
 
 Override the bind key via the `SSHM_BIND_KEY` environment variable (zsh notation
@@ -99,9 +113,10 @@ eval "$(sshm init zsh --no-bind)"
 
 #### Completion trigger: `**<TAB>` (zsh only)
 
-Type `**` at the end of the buffer and press Tab to open the picker (showing all
-connections). Pick a connection → the `ssh` command is inserted at the cursor.
-When the trigger token isn't present, normal zsh completion runs unchanged.
+Type `**` at the end of the buffer and press Tab to open the picker, seeded with
+the buffer minus the `**`. Pick a connection → the chosen alias is inserted at
+the cursor. When the trigger token isn't present, normal zsh completion runs
+unchanged.
 
 This works alongside Ctrl+Alt+S — the bound key remains the primary entry,
 `**<TAB>` is the completion-style alternative.
@@ -135,29 +150,29 @@ sshm completions powershell | Out-String | Invoke-Expression
 
 ### Keyboard Shortcuts
 
-#### Fullscreen TUI
+There is one surface, so there is one key set. The frame reads these keys in
+every mode; anything else is ignored.
 
 | Key | Action |
 |-----|--------|
-| `↑`/`↓` or `j`/`k` | Navigate connection list |
-| `Enter` | Connect to selected server |
-| `a` | Add new connection |
-| `e` | Edit selected connection |
-| `d` | Delete selected connection |
-| `f` | Filter/search connections |
-| `i` | Import from ~/.ssh/config |
-| `q` | Quit application |
-| `?` | Show help |
+| any printable character | Append to the fuzzy query (filter as you type) |
+| `Backspace` | Remove the last query character |
+| `↑` / `k` | Move the cursor up |
+| `↓` / `j` | Move the cursor down |
+| `Enter` | Resolve the selection along the command's emit axis: run `ssh`, insert the alias, or route to the edit path |
+| `Esc` / `Ctrl-C` | Cancel, leave the shell buffer untouched (exit 130) |
 
-#### Shell Inline Picker
+The management chords the design calls for (`Ctrl+A` / `Ctrl+E` / `Ctrl+X`) are
+#36's work — no handler reads them yet, so the frame hints nothing that names
+them.
+
+Opening the frame from the shell:
 
 | Trigger | Action |
 |---------|--------|
-| `Ctrl+Alt+S` | Open picker (seeded with buffer as query) |
-| `**<TAB>` (zsh) | Open picker (showing all connections) |
-| `Enter` in picker | Insert selected `ssh` command at cursor |
-| `Esc`/`Ctrl-C` in picker | Cancel, leave buffer untouched |
-| `↑`/`↓` or `j`/`k` in picker | Navigate connections in picker |
+| `Ctrl+Alt+S` | Open the frame seeded with the current buffer as the query |
+| `**<TAB>` (zsh) | Open the frame with the buffer minus `**` as the query; without `**`, normal zsh completion runs unchanged |
+| `**<TAB>` (bash) | Same, but Tab is bound to the picker and does nothing without `**` — readline cannot chain back to normal completion from `bind -x` |
 
 ## Configuration
 
@@ -203,24 +218,33 @@ The application stores its configuration in:
 
 ```
 ssh-manager/
-├── sshm/                    # Main application
+├── sshm/                    # The crate
 │   ├── src/
-│   │   ├── main.rs          # Entry point, CLI dispatch, init script generation
-│   │   ├── app.rs           # TUI application logic
+│   │   ├── main.rs          # Entry point, CLI dispatch, shell init script generation
+│   │   ├── lib.rs           # Crate root — the modules the tests drive
+│   │   ├── frame.rs         # The inline frame view-model (Clack grammar + fit geometry)
+│   │   ├── inline.rs        # The inline render + settle-collapse driver
+│   │   ├── emit.rs          # The emit axis: what Enter means per command
+│   │   ├── theme.rs         # Colour tokens (Clack palette, colour support, ANSI serializer)
 │   │   ├── config.rs        # Configuration management
-│   │   ├── picker.rs        # Inline fuzzy picker (ratatui) + ssh command builder
-│   │   ├── runtime.rs       # Runtime and cleanup
-│   │   ├── ssh.rs           # SSH connection handling
+│   │   ├── connections.rs   # The Connection manager: add, edit, delete, import
+│   │   ├── ssh.rs           # SSH command building and execution
 │   │   └── update.rs        # Update checking
 │   ├── Cargo.toml           # Rust dependencies
-│   └── tests/               # Unit tests
+│   └── tests/               # Integration tests — see sshm/tests/README.md
+├── .dsh/skills/sshm-design/ # Binding UI design rules (tokens, surfaces, verification)
 ├── .github/
 │   └── workflows/
 │       └── ci.yml           # CI/CD pipeline
+├── AGENTS.md                # Agent skills index
 ├── CONTEXT.md               # Domain language and glossary
-├── TUI_DESIGN_GUIDELINES.md # TUI design documentation
 └── README.md                # This file
 ```
+
+There is no `app.rs`, `picker.rs` or `runtime.rs`: the fullscreen TUI and the
+old opaque picker were deleted in the #35 cut-over, and their live
+responsibilities now sit in `frame.rs` (the view-model), `inline.rs` (the
+driver) and `emit.rs` (the emit axis).
 
 ### Dependencies
 
