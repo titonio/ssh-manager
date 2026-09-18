@@ -145,16 +145,18 @@ output into the line editor.
   highest-risk surface despite containing no rendering.
 - **Two entry points, one contract.** The bound key (default Ctrl+Alt+S)
   seeds the picker's query from the current buffer; the `**<TAB>` trigger
-  strips its own trigger token and seeds the query from what is left. Both
-  put the chosen **alias** on the line and neither executes it — the widget
-  inserts, it does not run.
+  (zsh only) strips its own trigger token and seeds the query from what is
+  left. Both put the chosen **alias** on the line and neither executes it —
+  the widget inserts, it does not run.
 - **The `**<TAB>` fallthrough differs by shell, and the difference is real.**
   In zsh, when the trigger token is absent the widget chains to
-  `zle .expand-or-complete`, so Tab still does normal completion. In bash a
-  `bind -x` function cannot chain back to normal completion, so Tab is bound
-  to the picker and **does nothing** unless the line ends with `**`. Any
-  change must preserve the zsh fallthrough; the bash limitation is a property
-  of readline, not something this code can fix.
+  `zle expand-or-complete` — the non-dot widget form, so the completion
+  system runs. The dot form (`zle .expand-or-complete`) invokes the raw ZLE
+  builtin, bypasses compsys and completes nothing (#23). In bash a
+  `bind -x` function cannot chain back to normal completion, so bash never
+  rebinds TAB: binding it would cost all of bash's completion for a trigger
+  that cannot fall through. The bash limitation is a property of readline,
+  not something this code can fix — the fix is not to bind it.
 - **Configurable binding** via `SSHM_BIND_KEY`, in zsh notation for zsh
   (`\e^S`) and readline notation for bash (`\e\C-s`) — the two are not
   interchangeable. `--no-bind` (or `SSHM_NO_BIND=1`) suppresses the bind

@@ -13,7 +13,7 @@ shell — no alternate screen, no takeover — built with Rust and Ratatui.
 - **Organized by Folders**: Group connections into folders for better organization
 - **Custom SSH Keys**: Support for custom private key paths
 - **Non-Standard Ports**: Configure custom SSH ports (default: 22)
-- **Inline Picker**: Filter-as-you-type selector triggered from the shell (Ctrl+Alt+S or `**<TAB>`)
+- **Inline Picker**: Filter-as-you-type selector triggered from the shell (Ctrl+Alt+S, or `**<TAB>` in zsh)
 - **Shell Integration**: `sshm init zsh|bash` emits ZLE/widget scripts with trigger bindings
 - **Automatic Updates**: Built-in update checker with GitHub release integration
 - **Transparent Frame**: A Clack-grammar frame (`◆` step, `│` rail, `❯` cursor) that borrows your terminal's own background — no alternate screen, no painted panel
@@ -125,11 +125,12 @@ This works alongside Ctrl+Alt+S — the bound key remains the primary entry,
 
 The Tab binding is suppressed under `SSHM_NO_BIND=1`.
 
-#### Bash caveat for `**<TAB>`
+#### `**<TAB>` in bash: not bound
 
-When sourced in bash, `**<TAB>` opens the picker only when `**` is present at the
-end of `READLINE_LINE`. Without `**`, Tab has no effect (bash cannot chain from
-`bind -x` into normal completion).
+`**<TAB>` is zsh-only. In bash, `sshm init bash` never rebinds Tab: readline
+cannot chain from a `bind -x` function back to normal completion, so binding
+Tab would kill completion for the whole session. Bash's Tab completion is left
+exactly as it was; use Ctrl+Alt+S as the entry point in bash.
 
 ### Shell Completion
 
@@ -174,7 +175,6 @@ Opening the frame from the shell:
 |---------|--------|
 | `Ctrl+Alt+S` | Open the frame seeded with the current buffer as the query |
 | `**<TAB>` (zsh) | Open the frame with the buffer minus `**` as the query; without `**`, normal zsh completion runs unchanged |
-| `**<TAB>` (bash) | Same, but Tab is bound to the picker and does nothing without `**` — readline cannot chain back to normal completion from `bind -x` |
 
 ## Configuration
 

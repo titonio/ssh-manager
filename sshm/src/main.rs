@@ -466,7 +466,7 @@ _sshm_completion_picker() {
         
         zle reset-prompt
     else
-        zle .expand-or-complete
+        zle expand-or-complete
     fi
 }
 
@@ -544,7 +544,7 @@ _sshm_completion_picker() {{
         
         zle reset-prompt
     else
-        zle .expand-or-complete
+        zle expand-or-complete
     fi
 }}
 
@@ -568,8 +568,12 @@ fn print_init_zsh_script() {
     print!("{}", generate_init_zsh_script());
 }
 
-/// Generate the bash initialization script for the inline picker widget and
-/// **<TAB> completion trigger.
+/// Generate the bash initialization script for the inline picker widget.
+///
+/// TAB is deliberately never rebound here: readline cannot chain from a
+/// `bind -x` function back to normal completion, so binding TAB kills it
+/// for the whole session (#23). The `**<TAB>` trigger is zsh-only; bash
+/// users enter the picker via the bound key (Ctrl+Alt+S by default).
 ///
 /// Returns the script content as a string for testing and printing.
 fn generate_init_bash_script() -> String {
@@ -586,7 +590,7 @@ fn generate_init_bash_script() -> String {
     let bind_key = std::env::var("SSHM_BIND_KEY").unwrap_or_else(|_| default_bind_key.to_string());
 
     if no_bind {
-        r###"# sshm init bash - Inline Picker Widget + **<TAB> completion trigger (no bind)
+        r###"# sshm init bash - Inline Picker Widget (no bind)
 # Sourced via: eval "$(sshm init bash)"
 # Note: Bind lines suppressed by SSHM_NO_BIND=1
 
@@ -602,32 +606,11 @@ _sshm_inline_picker() {
         READLINE_POINT=${#READLINE_LINE}
     fi
 }
-
-# **<TAB> completion trigger (bash): when READLINE_LINE ends with **,
-# pressing Tab opens the inline picker. Note: without **, Tab has no
-# effect (bash cannot chain to normal completion from a key-bound function).
-_sshm_completion_picker() {
-    if [[ "$READLINE_LINE" == *'**' ]]; then
-        local saved="$READLINE_LINE"
-        local stripped="${READLINE_LINE%'**'}"
-        local result exit_code
-        result=$(sshm pick --query "$stripped")
-        exit_code=$?
-        if [[ $exit_code -ne 0 ]]; then
-            READLINE_LINE="$saved"
-            return
-        fi
-        if [[ -n "$result" ]]; then
-            READLINE_LINE="$result"
-            READLINE_POINT=${#READLINE_LINE}
-        fi
-    fi
-}
 "###
         .to_string()
     } else {
         format!(
-            r###"# sshm init bash - Inline Picker Widget + **<TAB> completion trigger
+            r###"# sshm init bash - Inline Picker Widget
 # Sourced via: eval "$(sshm init bash)"
 # Bind key: {bind_key} (override with SSHM_BIND_KEY)
 
@@ -644,32 +627,8 @@ _sshm_inline_picker() {{
     fi
 }}
 
-# **<TAB> completion trigger (bash): when READLINE_LINE ends with **,
-# pressing Tab opens the inline picker. Note: without **, Tab has no
-# effect (bash cannot chain to normal completion from a key-bound function).
-_sshm_completion_picker() {{
-    if [[ "$READLINE_LINE" == *'**' ]]; then
-        local saved="$READLINE_LINE"
-        local stripped="${{READLINE_LINE%'**'}}"
-        local result exit_code
-        result=$(sshm pick --query "$stripped")
-        exit_code=$?
-        if [[ $exit_code -ne 0 ]]; then
-            READLINE_LINE="$saved"
-            return
-        fi
-        if [[ -n "$result" ]]; then
-            READLINE_LINE="$result"
-            READLINE_POINT=${{#READLINE_LINE}}
-        fi
-    fi
-}}
-
 # Bind the widget to the trigger key (Ctrl+Alt+S)
 bind -x '"{bind_key}":_sshm_inline_picker'
-
-# Bind **<TAB> completion trigger (Tab key)
-bind -x '"\C-i":_sshm_completion_picker'
 "###
         )
     }
@@ -1090,7 +1049,7 @@ pub mod tests {
                 
                 zle reset-prompt
             else
-                zle .expand-or-complete
+                zle expand-or-complete
             fi
         }
 
@@ -1182,7 +1141,7 @@ pub mod tests {
                 
                 zle reset-prompt
             else
-                zle .expand-or-complete
+                zle expand-or-complete
             fi
         }
 
@@ -1271,7 +1230,7 @@ pub mod tests {
                 
                 zle reset-prompt
             else
-                zle .expand-or-complete
+                zle expand-or-complete
             fi
         }
 
@@ -1389,8 +1348,22 @@ pub mod tests {
     #[test]
     fn test_init_zsh_completion_falls_through_to_expand_or_complete() {
         let script = generate_init_zsh_script();
-        // When ** is not present, fall through to normal completion
-        assert!(script.contains("zle .expand-or-complete"));
+        // When ** is not present, fall through to normal completion. The fallthrough
+        // must be the non-dot widget form: `zle .expand-or-complete` invokes the raw
+        // ZLE builtin, which bypasses the completion system and completes nothing in
+        // any shell that has run compinit (#23).
+        assert!(script.contains("zle expand-or-complete"));
+        assert!(!script.contains("zle .expand-or-complete"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_init_zsh_no_bind_variant_falls_through_to_completion_system() {
+        std::env::set_var("SSHM_NO_BIND", "1");
+        let script = generate_init_zsh_script();
+        assert!(script.contains("zle expand-or-complete"));
+        assert!(!script.contains("zle .expand-or-complete"));
+        std::env::remove_var("SSHM_NO_BIND");
     }
 
     #[test]
@@ -1458,7 +1431,7 @@ pub mod tests {
 
         let script = generate_init_bash_script();
         insta::assert_snapshot!(script, @r###"
-        # sshm init bash - Inline Picker Widget + **<TAB> completion trigger
+        # sshm init bash - Inline Picker Widget
         # Sourced via: eval "$(sshm init bash)"
         # Bind key: \e\C-s (override with SSHM_BIND_KEY)
 
@@ -1475,32 +1448,8 @@ pub mod tests {
             fi
         }
 
-        # **<TAB> completion trigger (bash): when READLINE_LINE ends with **,
-        # pressing Tab opens the inline picker. Note: without **, Tab has no
-        # effect (bash cannot chain to normal completion from a key-bound function).
-        _sshm_completion_picker() {
-            if [[ "$READLINE_LINE" == *'**' ]]; then
-                local saved="$READLINE_LINE"
-                local stripped="${READLINE_LINE%'**'}"
-                local result exit_code
-                result=$(sshm pick --query "$stripped")
-                exit_code=$?
-                if [[ $exit_code -ne 0 ]]; then
-                    READLINE_LINE="$saved"
-                    return
-                fi
-                if [[ -n "$result" ]]; then
-                    READLINE_LINE="$result"
-                    READLINE_POINT=${#READLINE_LINE}
-                fi
-            fi
-        }
-
         # Bind the widget to the trigger key (Ctrl+Alt+S)
         bind -x '"\e\C-s":_sshm_inline_picker'
-
-        # Bind **<TAB> completion trigger (Tab key)
-        bind -x '"\C-i":_sshm_completion_picker'
         "###);
     }
 
@@ -1513,7 +1462,7 @@ pub mod tests {
 
         let script = generate_init_bash_script();
         insta::assert_snapshot!(script, @r###"
-        # sshm init bash - Inline Picker Widget + **<TAB> completion trigger (no bind)
+        # sshm init bash - Inline Picker Widget (no bind)
         # Sourced via: eval "$(sshm init bash)"
         # Note: Bind lines suppressed by SSHM_NO_BIND=1
 
@@ -1527,27 +1476,6 @@ pub mod tests {
             if [[ -n "$result" ]]; then
                 READLINE_LINE="$result"
                 READLINE_POINT=${#READLINE_LINE}
-            fi
-        }
-
-        # **<TAB> completion trigger (bash): when READLINE_LINE ends with **,
-        # pressing Tab opens the inline picker. Note: without **, Tab has no
-        # effect (bash cannot chain to normal completion from a key-bound function).
-        _sshm_completion_picker() {
-            if [[ "$READLINE_LINE" == *'**' ]]; then
-                local saved="$READLINE_LINE"
-                local stripped="${READLINE_LINE%'**'}"
-                local result exit_code
-                result=$(sshm pick --query "$stripped")
-                exit_code=$?
-                if [[ $exit_code -ne 0 ]]; then
-                    READLINE_LINE="$saved"
-                    return
-                fi
-                if [[ -n "$result" ]]; then
-                    READLINE_LINE="$result"
-                    READLINE_POINT=${#READLINE_LINE}
-                fi
             fi
         }
         "###);
@@ -1565,7 +1493,7 @@ pub mod tests {
 
         let script = generate_init_bash_script();
         insta::assert_snapshot!(script, @r###"
-        # sshm init bash - Inline Picker Widget + **<TAB> completion trigger
+        # sshm init bash - Inline Picker Widget
         # Sourced via: eval "$(sshm init bash)"
         # Bind key: \C-t (override with SSHM_BIND_KEY)
 
@@ -1582,32 +1510,8 @@ pub mod tests {
             fi
         }
 
-        # **<TAB> completion trigger (bash): when READLINE_LINE ends with **,
-        # pressing Tab opens the inline picker. Note: without **, Tab has no
-        # effect (bash cannot chain to normal completion from a key-bound function).
-        _sshm_completion_picker() {
-            if [[ "$READLINE_LINE" == *'**' ]]; then
-                local saved="$READLINE_LINE"
-                local stripped="${READLINE_LINE%'**'}"
-                local result exit_code
-                result=$(sshm pick --query "$stripped")
-                exit_code=$?
-                if [[ $exit_code -ne 0 ]]; then
-                    READLINE_LINE="$saved"
-                    return
-                fi
-                if [[ -n "$result" ]]; then
-                    READLINE_LINE="$result"
-                    READLINE_POINT=${#READLINE_LINE}
-                fi
-            fi
-        }
-
         # Bind the widget to the trigger key (Ctrl+Alt+S)
         bind -x '"\C-t":_sshm_inline_picker'
-
-        # Bind **<TAB> completion trigger (Tab key)
-        bind -x '"\C-i":_sshm_completion_picker'
         "###);
 
         // Clean up
@@ -1685,64 +1589,46 @@ pub mod tests {
         assert!(normal_return_count >= 1);
     }
 
-    // ── sshm init bash **<TAB> completion trigger contract tests ───────────────────────────
-
-    #[test]
-    fn test_init_bash_has_completion_trigger_function() {
-        let script = generate_init_bash_script();
-        assert!(script.contains("_sshm_completion_picker"));
-    }
-
-    #[test]
-    fn test_init_bash_completion_checks_readline_for_doublestar() {
-        let script = generate_init_bash_script();
-        // The widget checks if READLINE_LINE ends with ** ($READLINE_LINE is quoted)
-        assert!(script.contains("\"$READLINE_LINE\" == *'**'"));
-    }
-
-    #[test]
-    fn test_init_bash_completion_strips_doublestar() {
-        let script = generate_init_bash_script();
-        assert!(script.contains("${READLINE_LINE%'**'}"));
-    }
+    // ── sshm init bash TAB-safety contract tests (#23) ─────────────────────────────────────
 
     #[test]
     #[serial]
-    fn test_init_bash_completion_binds_tab_by_default() {
+    fn test_init_bash_never_rebinds_tab() {
         std::env::remove_var("SSHM_NO_BIND");
         std::env::remove_var("SSHM_BIND_KEY");
 
         let script = generate_init_bash_script();
-        assert!(script.contains(r###"bind -x '"\C-i":_sshm_completion_picker'"###));
+        // bash cannot chain from a `bind -x` function back to normal completion,
+        // so binding TAB kills completion for the whole session. The bash init
+        // must never touch \C-i, and must not ship the picker function at all.
+        assert!(!script.contains("\\C-i"));
+        assert!(!script.contains("_sshm_completion_picker"));
     }
 
     #[test]
     #[serial]
-    fn test_init_bash_completion_binds_tab_suppressed_with_no_bind() {
+    fn test_init_bash_no_bind_never_rebinds_tab() {
         std::env::set_var("SSHM_NO_BIND", "1");
 
         let script = generate_init_bash_script();
-        assert!(!script.contains(r###"\C-i":_sshm_completion_picker"###));
+        assert!(!script.contains("\\C-i"));
+        assert!(!script.contains("_sshm_completion_picker"));
 
         std::env::remove_var("SSHM_NO_BIND");
     }
 
     #[test]
-    fn test_init_bash_completion_saves_buffer_before_stripping() {
-        let script = generate_init_bash_script();
-        let saved_before = script
-            .find("local saved=\"$READLINE_LINE\"")
-            .expect("must save buffer");
-        let strip_pos = script.find("${READLINE_LINE%'**'}").expect("must strip **");
-        assert!(
-            saved_before < strip_pos,
-            "saved must be captured before stripping **"
-        );
-    }
+    #[serial]
+    fn test_init_bash_custom_key_still_never_rebinds_tab() {
+        std::env::remove_var("SSHM_NO_BIND");
+        std::env::set_var("SSHM_BIND_KEY", "\\C-t");
 
-    #[test]
-    fn test_init_bash_completion_seeds_query_with_stripped_line() {
         let script = generate_init_bash_script();
-        assert!(script.contains("--query \"$stripped\""));
+        assert!(!script.contains("\\C-i"));
+        assert!(!script.contains("_sshm_completion_picker"));
+        // The custom key still binds the inline picker.
+        assert!(script.contains(r###"bind -x '"\C-t":_sshm_inline_picker'"###));
+
+        std::env::remove_var("SSHM_BIND_KEY");
     }
 }
