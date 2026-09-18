@@ -23,8 +23,9 @@ in `sshm/src/theme.rs` (`t.fg_muted`, `t.border`, `t.accent`). A literal
 `Color::Rgb(..)` in render code is a palette fork: unthemeable, unauditable,
 and it duplicates a token that already exists.
 `no_color_literals_outside_the_theme_module` greps for it. Need a colour with
-no role yet? Add the role first — and make it a named ANSI colour or `Reset`,
-never a fixed RGB (`the_clack_palette_is_named_ansi_only`).
+no role yet? Add the role first — and make it a named ANSI colour, `Reset`, or
+a neutral grey off the 24-step ramp (232..=255); never a fixed RGB, and never
+an indexed **hue** (`the_clack_palette_is_named_ansi_or_neutral_grey`).
 
 **2. Selection must be readable with no colour at all.** A glyph marker, not a
 hue. The frame's `❯` is built in `cursor_span` — bold, in the accent role,
@@ -58,10 +59,15 @@ Full constraints per surface: `references/surfaces.md`.
 1. Read the relevant surface in `references/surfaces.md` — the frame and the
    shell widget disagree about everything except that neither may damage the
    user's command line.
-2. Pick roles in `theme.rs`. A role is a named ANSI colour or `Reset`; there
-   is no contrast table to check a pair against, because the frame has no
-   background of its own. If the role carries a state, that state must also
-   be carried by a glyph or a modifier. See `references/tokens.md`.
+2. Pick roles in `theme.rs`. A role is a named ANSI colour, `Reset`, or a
+   neutral grey off the 232..=255 ramp. There is no *guaranteed* contrast
+   table — the frame owns no background — but there is a reference one:
+   `every_informational_role_clears_the_reference_contrast_floor` resolves
+   each role against two pinned palettes and fails with the computed ratio.
+   If the role carries a state, that state must also be carried by a glyph or
+   a modifier — `BOLD`, never `DIM`: Windows Terminal ignores SGR 2
+   (microsoft/terminal#6703), so recession has to come from the token, not the
+   attribute. See `references/tokens.md`.
 3. Render it at 80×24 and at a large size, in truecolour **and** under
    `NO_COLOR`.
 4. Run the loop in `references/verification.md`. Every step, every time.

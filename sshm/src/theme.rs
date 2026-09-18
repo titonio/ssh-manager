@@ -11,7 +11,7 @@
 //! what pixels that role owns. `tests/design_system_test.rs` enforces it.
 //!
 //! ```text
-//! render code  ──▶  Theme role  ──▶  Clack token  ──▶  Color (named ANSI | Reset)
+//! render code  ──▶  Theme role  ──▶  Clack token  ──▶  Color (named ANSI | neutral grey | Reset)
 //!                  (semantic)       (single source)     (mapped by the terminal)
 //! ```
 //!
@@ -20,7 +20,13 @@
 //! contrast its text against; with that render path deleted, no live surface
 //! owns a background, so there is nothing left for a fixed-RGB palette to
 //! govern. The transparent inline frame borrows the user's terminal, and its
-//! palette is named ANSI colours and `Reset` — see [`Theme::clack`].
+//! palette is named ANSI colours plus one indexed neutral grey — see
+//! [`Theme::clack`].
+//!
+//! Two things this module learned the hard way, both from issue #42: a role that
+//! no render code reads governs nothing (that was `fg` until it was wired in),
+//! and inheriting the terminal's own ink is not the same as being readable —
+//! some schemes set that ink to their comment colour.
 
 use ratatui::style::Color;
 
@@ -98,20 +104,48 @@ pub struct Theme {
     /// Caution signal: reserved for warning states; no live surface paints it
     /// yet, but the role exists so a warning never invents a hue.
     pub warning: Color,
+    /// The faintest tier: a field's placeholder, `<optional>` / `<not set>`.
+    ///
+    /// This role exists to be **fainter than `fg_muted`**, because a
+    /// placeholder that wears the field label's colour cannot be told apart
+    /// from a label — which is the defect this tier was cut to fix. That
+    /// makes it the one role deliberately below the informational contrast
+    /// floor, and it is exempt from
+    /// `every_informational_role_clears_the_reference_contrast_floor` for
+    /// the same reason `border` is: it carries no state.
+    ///
+    /// A placeholder is an invitation shown where a value is absent. If it
+    /// were unreadable the user loses a hint, not information — the field's
+    /// own glyph (`○` required, `·` optional) already says whether it needs
+    /// filling, so the tier may recede without any state riding on it.
+    pub fg_placeholder: Color,
 }
 
 impl Theme {
-    /// The Clack palette: named ANSI colours and modifiers, **no fixed RGB**.
+    /// The Clack palette: named ANSI colours, one indexed neutral grey, and
+    /// **no fixed RGB**.
     ///
     /// This is the palette the transparent inline frame (#33) draws with. A
-    /// transparent frame borrows the user's terminal background, which it
-    /// cannot measure — so a body-text hue of its own is a liability: `White`
-    /// on a white terminal is 1.35:1. Instead:
+    /// transparent frame borrows the user's terminal background, so a hue of
+    /// its own is a liability: `White` on a white terminal is 1.35:1.
     ///
-    /// * **Body text is `Reset`** — the terminal's own foreground, which is by
-    ///   construction readable on the terminal's own background.
-    /// * **Emphasis is a modifier, not a hue** — `BOLD`/`DIM` survive a light
-    ///   terminal, `NO_COLOR`, and colour-blindness alike.
+    /// **`Reset` is NOT "readable by construction".** That claim used to live
+    /// here and issue #42 disproves it. The common One Dark scheme for Windows
+    /// Terminal sets `foreground` to `#5C6370` — Atom's *comment* colour, not
+    /// its text colour — which is **2.67:1** against that scheme's own
+    /// `#1E2127` background. A frame that inherits that ink is unreadable no
+    /// matter how principled the inheritance is. Body text therefore names
+    /// ANSI 7 (`Gray`), which is One Dark's actual text colour at 7.57:1.
+    ///
+    /// * **Body text is `Gray`** (ANSI 7) — the palette's own text tone.
+    /// * **The muted tier is `Indexed(245)`** (`#8A8A8A`, 4.67:1) — the one
+    ///   neutral step the 16-colour set cannot supply. The 16-colour collapse
+    ///   is handled in [`Theme::resolve`].
+    /// * **Emphasis is a modifier, not a hue** — `BOLD` survives a light
+    ///   terminal, `NO_COLOR`, and colour-blindness alike. `DIM` is **not**
+    ///   used on informational text: Windows Terminal ignores SGR 2 entirely
+    ///   (microsoft/terminal#6703), so emitting it is a claim the target
+    ///   terminal cannot honour.
     /// * **Only state gets a hue**, and only from the two named colours Clack
     ///   uses: `Cyan` for the active step, `Green` for a match.
     ///
@@ -123,13 +157,14 @@ impl Theme {
     /// bold alias, not by a filled row.
     pub const fn clack() -> Self {
         Self {
-            fg: Color::Reset,
-            fg_muted: Color::DarkGray,
+            fg: Color::Gray,
+            fg_muted: Color::Indexed(245),
             accent: Color::Cyan,
             border: Color::DarkGray,
             highlight: Color::Green,
             success: Color::Green,
             warning: Color::Yellow,
+            fg_placeholder: Color::Indexed(240),
         }
     }
 
@@ -138,6 +173,11 @@ impl Theme {
     /// Structure has to survive on glyphs and layout alone here — which is the
     /// same argument as designing for a monochrome terminal, so nothing may rely
     /// on color to carry meaning.
+    ///
+    /// **This is not a readability fallback.** Every role is `Reset`, which is
+    /// the terminal's own ink — and on the scheme behind issue #42 that ink is
+    /// `#5C6370` at 2.67:1. `NO_COLOR` means "give me no colour", and that is
+    /// what this delivers, including its consequences.
     pub const fn monochrome() -> Self {
         Self {
             fg: Color::Reset,
@@ -147,21 +187,36 @@ impl Theme {
             highlight: Color::Reset,
             success: Color::Reset,
             warning: Color::Reset,
+            fg_placeholder: Color::Reset,
         }
     }
 
     /// Resolve the theme for a given terminal capability.
     ///
-    /// The Clack palette is named ANSI colours and `Reset`, and named colours
-    /// are valid in every colour mode — the terminal maps them to its own
-    /// palette at the user's chosen values. So the only mode that changes
-    /// anything is `Monochrome`, where every role collapses to `Reset` and the
-    /// frame emits no colour at all. (A fixed-RGB palette would need snapping
-    /// here; that is what the deleted Nord `resolve` did, and why a
-    /// named-colour palette is what a transparent frame gets to be.)
+    /// Named ANSI colours are valid in every colour mode — the terminal maps
+    /// them to its own palette at the user's chosen values — so `Ansi256` and
+    /// `Truecolor` pass through untouched, and `Monochrome` collapses every
+    /// role to `Reset`.
+    ///
+    /// `Ansi16` is the one mode that needs snapping, and it exists purely
+    /// because of `fg_muted`. `Indexed(245)` lives in the 256-colour cube; a
+    /// 16-colour terminal has no such cell, so the emitted `38;5;245` is
+    /// dropped or mapped unpredictably rather than degrading gracefully. It
+    /// snaps to `DarkGray`, the nearest thing a 16-colour set offers. The
+    /// muted tier is a 256-colour luxury; the body tier (`Gray`, index 7) is
+    /// valid everywhere and does not move.
     pub fn resolve(&self, support: ColorSupport) -> Self {
         match support {
             ColorSupport::Monochrome => Self::monochrome(),
+            ColorSupport::Ansi16 => Self {
+                fg_muted: Color::DarkGray,
+                // A 16-colour terminal has no grey ramp to sit below
+                // `fg_muted` in, so the placeholder collapses onto the same
+                // token. It loses its extra recession and gains nothing that
+                // carries state, which is the trade the role is built for.
+                fg_placeholder: Color::DarkGray,
+                ..*self
+            },
             _ => *self,
         }
     }
@@ -342,8 +397,13 @@ mod tests {
     use ratatui::text::{Line, Span};
 
     #[test]
-    fn clack_tokens_are_named_ansi_or_reset() {
-        let named_or_reset = |c: Color| !matches!(c, Color::Rgb(..) | Color::Indexed(..));
+    fn clack_tokens_are_named_ansi_or_neutral_grey() {
+        // Mirrors `the_clack_palette_is_named_ansi_or_neutral_grey`: a named
+        // colour, Reset, or a grey off the 24-step ramp. An indexed *hue* is a
+        // palette fork and must not pass.
+        let neutral_grey = |c: Color| matches!(c, Color::Indexed(n) if (232..=255).contains(&n));
+        let allowed =
+            |c: Color| !matches!(c, Color::Rgb(..) | Color::Indexed(_)) || neutral_grey(c);
         let t = Theme::clack();
         for (role, color) in [
             ("fg", t.fg),
@@ -353,13 +413,18 @@ mod tests {
             ("highlight", t.highlight),
             ("success", t.success),
             ("warning", t.warning),
+            ("fg_placeholder", t.fg_placeholder),
         ] {
             assert!(
-                named_or_reset(color),
-                "role `{role}` is a fixed colour ({color:?}) — the Clack palette \
-                 is named ANSI colours or Reset only"
+                allowed(color),
+                "role `{role}` is {color:?} — named ANSI, Reset, or a neutral \
+                 grey from the 232..=255 ramp only"
             );
         }
+        // The exception is exercised, not just permitted: the muted tier is the
+        // grey the 16-colour set cannot supply (issue #42).
+        assert_eq!(t.fg_muted, Color::Indexed(245));
+        assert!(neutral_grey(t.fg_muted));
     }
 
     #[test]
@@ -386,6 +451,30 @@ mod tests {
             assert_eq!(t.accent, Color::Cyan, "{support:?} rewrote the accent");
             assert_eq!(t.highlight, Color::Green, "{support:?} rewrote the hit");
             assert_eq!(t.border, Color::DarkGray, "{support:?} rewrote the rail");
+        }
+    }
+
+    #[test]
+    fn ansi16_snaps_the_muted_grey_it_cannot_render() {
+        // Indexed(245) lives in the 256-colour cube. A 16-colour terminal has no
+        // such cell, so the emitted `38;5;245` is dropped or mapped
+        // unpredictably rather than degrading gracefully — it must be snapped.
+        let t = Theme::clack().resolve(ColorSupport::Ansi16);
+        assert_eq!(
+            t.fg_muted,
+            Color::DarkGray,
+            "Ansi16 must not ship an index the palette does not have"
+        );
+        // The body tier is index 7, valid everywhere, and must not move.
+        assert_eq!(t.fg, Color::Gray, "Ansi16 must not downgrade the body tier");
+
+        // The cube exists at 256 and above, so the muted grey survives there.
+        for support in [ColorSupport::Ansi256, ColorSupport::Truecolor] {
+            assert_eq!(
+                Theme::clack().resolve(support).fg_muted,
+                Color::Indexed(245),
+                "{support:?} has a grey ramp and should keep the muted tier"
+            );
         }
     }
 

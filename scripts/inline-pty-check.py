@@ -61,6 +61,14 @@ LEFT = b"\x1b[D"
 ENTER = b"\r"
 ESC = b"\x1b"
 BACKSPACE = b"\x7f"
+TAB = b"\t"
+
+# The form map's own geometry, in rows below the header. Six fields, then
+# the rule row (which the error line takes over), then the `▶` row — the
+# eight rows `VISIBLE_ROWS` is spent on.
+FIELD_ORDER = ["Alias", "Host", "User", "Port", "Key", "Folder"]
+RULE_OFFSET = 7
+SUBMIT_OFFSET = 8
 
 CHECKS = []
 
@@ -113,9 +121,16 @@ class Screen:
         self.rows = rows
         self.cols = cols
         self.buf = [[" "] * cols for _ in range(rows)]
+        # The SGR run each cell was painted under, kept alongside the glyph.
+        # The text model ignores colour; the *checks* cannot. "`▶` is lit"
+        # and "`▶` is dim" are the same characters and nothing else, so a
+        # screen that throws the escape away cannot tell a ready submit row
+        # from a dead one — and a check that cannot fail is not a check.
+        self.style = [[""] * cols for _ in range(rows)]
         self.r = 0
         self.c = 0
         self.alt_screen = False
+        self.sgr = ""
 
     def feed(self, s):
         i = 0
@@ -196,7 +211,11 @@ class Screen:
         elif cmd == "@":
             pass
         elif cmd == "m":
-            pass
+            # Track the active SGR run so a check can ask what colour a
+            # given cell was painted in. `0` / empty is a full reset;
+            # anything else replaces the run, which is close enough to how
+            # the emitters here work — they end every run with a reset.
+            self.sgr = "" if params in ("", "0", ";") else params
         elif cmd in ("h", "l"):
             if "1049" in params or "1047" in params:
                 self.alt_screen = True
@@ -213,14 +232,17 @@ class Screen:
     def _put(self, ch):
         while len(self.buf) <= self.r:
             self.buf.append([" "] * self.cols)
+            self.style.append([""] * self.cols)
         w = cell_width(ch)
         if self.c < self.cols:
             self.buf[self.r][self.c] = ch
+            self.style[self.r][self.c] = self.sgr
             # A double-width glyph owns the cell after it as well; blanking it
             # keeps the column arithmetic honest.
             for k in range(1, w):
                 if self.c + k < self.cols:
                     self.buf[self.r][self.c + k] = ""
+                    self.style[self.r][self.c + k] = self.sgr
             self.c += w
 
     def _erase_line(self, mode):
@@ -228,16 +250,20 @@ class Screen:
             return
         if mode == 2:
             self.buf[self.r] = [" "] * self.cols
+            self.style[self.r] = [""] * self.cols
         elif mode == 0:
             for c in range(self.c, self.cols):
                 self.buf[self.r][c] = " "
+                self.style[self.r][c] = ""
         elif mode == 1:
             for c in range(0, min(self.c + 1, self.cols)):
                 self.buf[self.r][c] = " "
+                self.style[self.r][c] = ""
 
     def _erase_display(self, mode):
         if mode == 2:
             self.buf = [[" "] * self.cols for _ in range(self.rows)]
+            self.style = [[""] * self.cols for _ in range(self.rows)]
             self.r = 0
             self.c = 0
 
@@ -798,17 +824,32 @@ def scenario_manage_error():
 
 
 def scenario_manage_add():
-    """#37: the `Ctrl+A` add step-sequence on the real binary.
+    """#41: the `Ctrl+A` form map, driven on the real binary.
 
     Same throwaway-HOME discipline as the delete scenario: every verdict
     about persistence is a sha256 of the real `connections.json`, not a
     claim. The chord byte is 0x01 — what a terminal sends for Ctrl+A.
 
-    The walk covers every way a step can answer: a required field refusing
-    empty, a port refusing out-of-range, an optional field settling as
-    *absent* rather than blank, the completed sequence earning its
-    `◇ added` note from a write that really happened, and an abandoned
-    sequence leaving the file byte-identical.
+    The map replaces the old stepped walk. All six fields sit on the glass
+    at once, the cursor is a *row* rather than a step, and the only gate
+    left in the whole form is the `▶` row. So the walk covers what that
+    actually changed:
+
+    * the map opens whole, with `◆` on exactly one row;
+    * Enter on a required field **advances** — it no longer refuses,
+      because the row's own `○`/`!` glyph already says what is wrong;
+    * the one refusal left lives on the `▶` row and names every field
+      that is wrong, in map order;
+    * the typed **User reaches `connections.json`** — the bug this map
+      exists to fix, proven against the file rather than asserted;
+    * nothing is written until `▶` is accepted, so Esc and Ctrl+C leave
+      the file byte-identical.
+
+    Colour is switched on for this scenario (`TERM=xterm-256color`,
+    `NO_COLOR` cleared). The harness otherwise runs monochrome, and
+    "`▶` is lit" versus "`▶` is dim" is carried by colour and nothing
+    else — under `NO_COLOR` a ready button and a dead one are the same
+    bytes, and a check that cannot fail is not a check.
     """
     home = tempfile.mkdtemp(prefix="sshm-pty-add-")
     cfg = os.path.join(home, ".ssh", "connections.json")
@@ -833,161 +874,366 @@ def scenario_manage_add():
         with open(cfg, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()
 
-    CTRL_A, CTRL_C = b"\x01", b"\x03"
+    def on_disk():
+        with open(cfg) as f:
+            return json.load(f)["connections"]
 
-    # ── run 1: the full five-step walk, refusing where it should ──────
+    CTRL_A, CTRL_C = b"\x01", b"\x03"
+    COLOUR = {"TERM": "xterm-256color", "NO_COLOR": ""}
+
+    # ── map readers: every claim below is read off the glass ────────────
+    def fields(d):
+        """The six field rows of the map, as painted."""
+        return d.screen.text()[FRAME_ROW + 1:FRAME_ROW + 7]
+
+    def labels(d):
+        return [r[6:12].strip() for r in fields(d)]
+
+    def glyphs(d):
+        return [r[4] if len(r) > 4 else "" for r in fields(d)]
+
+    def field_row(d, name):
+        for r in fields(d):
+            if r[6:12].strip() == name:
+                return r
+        return None
+
+    def field_glyph(d, name):
+        r = field_row(d, name)
+        return r[4] if r and len(r) > 4 else None
+
+    def field_value(d, name):
+        """The row's text, with the focused row's caret taken off.
+
+        The frame paints `_` after the value on the row the cursor is on.
+        The caret is chrome, not content, so a check that wants the value
+        asks for it stripped; a check that wants the caret asks for it by
+        name. Both are read off the same row.
+        """
+        r = field_row(d, name)
+        if not r or len(r) <= 13:
+            return None
+        v = r[13:]
+        if r[4] == "◆" and v.endswith("_"):
+            v = v[:-1]
+        return v
+
+    def caret(d, name):
+        """Does the focused row show its caret?"""
+        r = field_row(d, name)
+        return bool(r) and r[4] == "◆" and r.endswith("_")
+
+    def rule_row(d):
+        return d.screen.text()[FRAME_ROW + RULE_OFFSET]
+
+    def submit_row(d):
+        return d.screen.text()[FRAME_ROW + SUBMIT_OFFSET]
+
+    def submit_sgr(d):
+        row = FRAME_ROW + SUBMIT_OFFSET
+        for c, ch in enumerate(d.screen.buf[row]):
+            if ch == "▶":
+                return d.screen.style[row][c] or ""
+        return None
+
+    def submit_lit(d):
+        """Is `▶` painted in the accent rather than the muted tier?
+
+        `fg_muted` is `38;5;245`; the accent is `36`. A ready submit row
+        carries the accent, a not-ready one never does.
+        """
+        return "36" in (submit_sgr(d) or "")
+
+    def open_map():
+        d = Demo(["manage"], bin=SSH_BIN, home=home, env=COLOUR)
+        d.pump(0.7)
+        d.send(CTRL_A, 0.4)
+        return d
+
+    def check_shape(d, where):
+        rows = fields(d)
+        check(f"{where}: all six field rows are on the glass at once",
+              len(rows) == 6 and labels(d) == FIELD_ORDER,
+              f"{len(rows)} rows, labels {labels(d)}")
+        g = glyphs(d)
+        check(f"{where}: `◆` sits on exactly one row",
+              g.count("◆") == 1, f"glyphs {g}")
+
+    # ── run 1: the map opens whole and Enter advances ─────────────────
     seed()
     h0 = sha()
     print(f"    seeded connections.json sha256: {h0}")
 
-    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d = Demo(["manage"], bin=SSH_BIN, home=home, env=COLOUR)
     d.pump(0.7)
     d.dump("CA. manage frame open — Ctrl+A on the rail")
     height = len(d.screen.frame_rows())
 
     d.send(CTRL_A, 0.4)
-    d.dump("CB. Ctrl+A — the sequence opens on the Alias step")
-    check("the first step is Alias, caret on the line",
-          d.screen.text()[FRAME_ROW] == "◆ Alias  _",
+    d.dump("CB. Ctrl+A — the whole map opens, ◆ on Alias")
+    check("the header names the ask",
+          d.screen.text()[FRAME_ROW] == "◆ New connection",
           repr(d.screen.text()[FRAME_ROW]))
+    check_shape(d, "the map at open")
+    check("the cursor opens on Alias", field_glyph(d, "Alias") == "◆",
+          f"Alias row: {field_row(d, 'Alias')!r}")
+    check("a required field that is still empty says `<required>`, not `<optional>`",
+          field_value(d, "Alias") == "<required>"
+          and field_value(d, "Host") == "<required>",
+          f"Alias {field_value(d, 'Alias')!r} Host {field_value(d, 'Host')!r}")
+    check("an optional empty field says `<optional>`",
+          field_value(d, "Key") == "<optional>"
+          and field_value(d, "Folder") == "<optional>",
+          f"Key {field_value(d, 'Key')!r} Folder {field_value(d, 'Folder')!r}")
+    check("an empty required row wears `○`, an empty optional one `·`",
+          field_glyph(d, "Host") == "○" and field_glyph(d, "User") == "·",
+          f"Host {field_glyph(d, 'Host')!r} User {field_glyph(d, 'User')!r}")
+    check("with nothing filled the `▶` row is dim, not lit",
+          not submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
     rail = d.screen.text()[FRAME_ROW + height - 2]
-    check("the step rail names what the step reads",
+    check("the rail names what Enter means on a field row",
           "Esc back" in rail and "Enter next" in rail and "Ctrl+C quit" in rail,
           repr(rail))
-    check("the sequence did not grow the frame",
+    check("the map did not grow the frame",
           len(d.screen.frame_rows()) == height,
           f"{height} -> {len(d.screen.frame_rows())}")
 
     d.send(ENTER, 0.4)
-    d.dump("CC. Enter on an empty required Alias — refused, stays put")
+    d.dump("CC. Enter on an empty required Alias — it ADVANCES, it does not refuse")
     joined = "\n".join(d.screen.frame_rows())
-    check("the refusal names the field",
-          "│   ! alias is required" in joined, joined)
-    check("still on the Alias step", d.screen.text()[FRAME_ROW] == "◆ Alias  _",
-          repr(d.screen.text()[FRAME_ROW]))
-    check("nothing settled behind the refusal", "◇ Alias" not in joined, joined)
-    check("a refused required field wrote nothing", sha() == h0)
+    check("Enter moved the cursor off Alias onto Host",
+          field_glyph(d, "Host") == "◆" and field_glyph(d, "Alias") == "○",
+          f"Alias {field_glyph(d, 'Alias')!r} Host {field_glyph(d, 'Host')!r}")
+    check("advancing is not a refusal: no `!` line was raised",
+          not rule_row(d).startswith("│   !"), repr(rule_row(d)))
+    check("the left-behind Alias still reads as blocked (`○`)",
+          field_glyph(d, "Alias") == "○", repr(field_row(d, "Alias")))
+    check("the `▶` row is still dim — nothing became ready",
+          not submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
+    check("moving off an empty required field wrote nothing", sha() == h0)
 
     d.send(b"db-01", 0.3)
-    d.dump("CD. typing echoes into the live field, not the filter behind it")
-    check("the field echoes what is typed",
-          d.screen.text()[FRAME_ROW] == "◆ Alias  db-01_",
-          repr(d.screen.text()[FRAME_ROW]))
+    d.dump("CD. typing lands on the focused row, not the filter behind it")
+    check("the focused row echoes what is typed",
+          field_value(d, "Host") == "db-01" and caret(d, "Host"),
+          repr(field_row(d, "Host")))
     check("the keystrokes did not filter the list",
           "No matches" not in "\n".join(d.screen.frame_rows()),
-          "the Connections behind the sequence are still listed")
+          "the Connections behind the map are still listed")
+    d.send(UP, 0.3)
+    check("Up walks the cursor back to Alias", field_glyph(d, "Alias") == "◆",
+          repr(field_row(d, "Alias")))
+    d.send(DOWN, 0.3)
+    check("Down walks it forward again", field_glyph(d, "Host") == "◆",
+          repr(field_row(d, "Host")))
 
-    d.send(ENTER, 0.4)
-    d.dump("CE. the Alias settles to ◇ and the header moves to Host")
-    joined = "\n".join(d.screen.frame_rows())
-    check("the settled Alias leaves a ◇ trace",
-          "│   ◇ Alias   db-01" in joined, joined)
-    check("the next step is Host", d.screen.text()[FRAME_ROW] == "◆ Host  _",
-          repr(d.screen.text()[FRAME_ROW]))
-
-    d.send(ENTER, 0.4)
-    d.dump("CF. Enter on an empty required Host — refused, stays on Host")
-    joined = "\n".join(d.screen.frame_rows())
-    check("the refusal names the field", "│   ! host is required" in joined, joined)
-    check("still on the Host step", d.screen.text()[FRAME_ROW] == "◆ Host  _",
-          repr(d.screen.text()[FRAME_ROW]))
-
-    d.send(b"10.1.1.7", 0.3)
-    d.send(ENTER, 0.4)
-    d.dump("CG. the Host settles and the Port step opens")
-    joined = "\n".join(d.screen.frame_rows())
-    check("the settled Host leaves a ◇ trace",
-          "│   ◇ Host    10.1.1.7" in joined, joined)
-    check("the next step is Port", d.screen.text()[FRAME_ROW] == "◆ Port  _",
-          repr(d.screen.text()[FRAME_ROW]))
-
-    d.send(b"99999", 0.3)
-    d.send(ENTER, 0.4)
-    d.dump("CH. a port above the TCP range — refused, stays on Port")
-    joined = "\n".join(d.screen.frame_rows())
-    check("the refusal states the range",
-          "│   ! port must be a number from 1 to 65535" in joined, joined)
-    check("still on the Port step with the bad input kept for fixing",
-          d.screen.text()[FRAME_ROW] == "◆ Port  99999_",
-          repr(d.screen.text()[FRAME_ROW]))
-
+    # Fill Alias, Host, User and Port by advancing with Enter, the way the
+    # map is meant to be used: type, Enter, type, Enter. The Host row is
+    # cleared first — it is still holding the `db-01` typed above, and a
+    # fill that appends to a leftover is not a fill.
     for _ in range(5):
-        d.send(BACKSPACE, 0.1)
+        d.send(BACKSPACE, 0.1)   # clear the Host row back to empty
+    d.send(UP, 0.25)             # Host -> Alias
+    d.send(b"db-01", 0.3)
+    d.send(ENTER, 0.25)          # Alias -> Host
+    d.send(b"10.1.1.7", 0.3)
+    d.send(ENTER, 0.25)          # Host -> User
+    d.send(b"ops", 0.3)
+    d.send(ENTER, 0.25)          # User -> Port
     d.send(b"2222", 0.3)
-    d.send(ENTER, 0.4)
-    d.dump("CI. a valid port settles; the Key step opens")
-    joined = "\n".join(d.screen.frame_rows())
-    check("the settled Port leaves a ◇ trace",
-          "│   ◇ Port    2222" in joined, joined)
-    check("the next step is Key", d.screen.text()[FRAME_ROW] == "◆ Key  _",
-          repr(d.screen.text()[FRAME_ROW]))
+    d.dump("CE. Alias, Host, User and Port filled by advancing with Enter")
+    check("Alias settled valid", field_glyph(d, "Alias") == "✓",
+          repr(field_row(d, "Alias")))
+    check("Host settled valid", field_glyph(d, "Host") == "✓",
+          repr(field_row(d, "Host")))
+    check("the Host holds the host, not a mash of the earlier typing",
+          field_value(d, "Host") == "10.1.1.7", repr(field_row(d, "Host")))
+    check("the typed User is on the glass", field_value(d, "User") == "ops",
+          repr(field_row(d, "User")))
+    check("with the required fields filled the `▶` row is lit",
+          submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
+    check("filling the form wrote nothing — `▶` is the only write",
+          sha() == h0)
 
-    d.send(ENTER, 0.4)
-    d.dump("CJ. the empty optional Key settles as absent, not blank")
-    joined = "\n".join(d.screen.frame_rows())
-    check("the absent Key is drawn as — not as nothing",
-          "│   ◇ Key     —" in joined, joined)
-    check("the last step is Folder", d.screen.text()[FRAME_ROW] == "◆ Folder  _",
-          repr(d.screen.text()[FRAME_ROW]))
+    d.send(ENTER, 0.25)          # Port -> Key
+    d.send(ENTER, 0.25)          # Key -> Folder
+    d.send(b"staging", 0.3)      # the Folder value
+    d.send(ENTER, 0.25)          # Folder -> Submit
+    d.dump("CF. cursor on the `▶` row")
+    check("the cursor reached the `▶` row",
+          submit_row(d).startswith("│   ▶ Add connection"), repr(submit_row(d)))
+    check("the `▶` row is lit and bold once the form is ready",
+          submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
     rail = d.screen.text()[FRAME_ROW + height - 2]
-    check("the last step's rail says what Enter means there",
-          "Enter add" in rail and "Enter next" not in rail, repr(rail))
+    check("the rail switches to what Enter means on the `▶` row",
+          "Enter save" in rail and "Enter next" not in rail, repr(rail))
 
-    d.send(b"staging", 0.3)
-    d.send(ENTER, 0.5)
-    d.dump("CK. Folder settles — the store wrote, the list returns with ◇ added")
+    d.send(ENTER, 0.6)
+    d.dump("CG. Enter on `▶` — one Connection written, the user landed")
     joined = "\n".join(d.screen.frame_rows())
     check("the frame is back on the list",
           d.screen.text()[FRAME_ROW] == "◆ Manage Connections",
           repr(d.screen.text()[FRAME_ROW]))
     check("the dim note names the added Connection with its folder",
           "│   ◇ added [staging] db-01" in joined, joined)
-    check("the new Connection is in the list",
-          "[staging] db-01 (@10.1.1.7:2222)" in joined, joined)
-    check("the whole sequence kept the frame at its constant height",
+    check("the new Connection is on the glass with the typed user",
+          "[staging] db-01 (ops@10.1.1.7:2222)" in joined, joined)
+    check("the whole map kept the frame at its constant height",
           len(d.screen.frame_rows()) == height,
           f"{height} -> {len(d.screen.frame_rows())}")
     h1 = sha()
     check("the completed add changed connections.json", h1 != h0, f"{h0} -> {h1}")
-    on_disk = open(cfg).read()
-    check("the added Connection is on disk with its settled fields",
-          '"alias": "db-01"' in on_disk and '"port": 2222' in on_disk
-          and '"folder": "staging"' in on_disk, on_disk)
+    saved = on_disk()
+    added = [c for c in saved if c["alias"] == "db-01"]
+    check("exactly one Connection was added", len(saved) == 3 and len(added) == 1,
+          f"{len(saved)} connections, {len(added)} named db-01")
+    check("THE FIX: the typed User is in connections.json",
+          bool(added) and added[0].get("user") == "ops",
+          json.dumps(added[0] if added else {}))
+    check("the settled Port landed as typed",
+          bool(added) and added[0].get("port") == 2222,
+          json.dumps(added[0] if added else {}))
+    check("the Folder landed",
+          bool(added) and added[0].get("folder") == "staging",
+          json.dumps(added[0] if added else {}))
     check("the empty Key stayed absent — no empty key_path was written",
-          '"key_path": ""' not in on_disk, on_disk)
+          '"key_path": ""' not in open(cfg).read(), open(cfg).read())
     d.send(ESC, 0.4)
 
-    # ── run 2: walking all the way back abandons the sequence, and the
-    # ── file never learns it happened ──────────────────────────────────
+    # ── run 1b: the `▶` row focused while the form is still invalid ───
+    # Fresh baseline. Run 1 legitimately wrote a Connection, so `h0` is
+    # stale by here; this run asks only that *its own* refused `▶` added
+    # nothing, which is a comparison against the file as run 1 left it.
+    h1b = sha()
+    d = open_map()
+    for _ in range(6):
+        d.send(DOWN, 0.2)        # Down saturates on the `▶` row
+    d.dump("CF2. cursor walked onto `▶` with the form still empty")
+    check("Down saturated the cursor onto the `▶` row",
+          "Enter save" in d.screen.text()[FRAME_ROW + height - 2],
+          repr(d.screen.text()[FRAME_ROW + height - 2]))
+    check("focused does not mean ready: `▶` carries no accent",
+          not submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
+    check("and no field row is focused while `▶` is",
+          "◆" not in "".join(glyphs(d)), f"glyphs {glyphs(d)}")
+    d.send(ENTER, 0.5)
+    d.dump("CF3. Enter on `▶` with every field empty — refused, naming both required fields")
+    check("the refusal names every field that is wrong, in map order",
+          rule_row(d) == "│   ! alias is required \u00b7 host is required",
+          repr(rule_row(d)))
+    check("the refusal kept the map at eight rows",
+          len(d.screen.frame_rows()) == height,
+          f"{height} -> {len(d.screen.frame_rows())}")
+    check("an empty-form refusal wrote nothing", sha() == h1b)
+    d.send(ESC, 0.4)
+
+    # ── run 2: an invalid Port advances, and only `▶` stops the write ──
     seed()
-    h0b = sha()
-    print(f"    re-seeded connections.json sha256: {h0b}")
-
-    d = Demo(["manage"], bin=SSH_BIN, home=home)
-    d.pump(0.7)
-    d.send(CTRL_A, 0.4)
+    h2 = sha()
+    d = open_map()
     d.send(b"db-01", 0.3)
-    d.send(ENTER, 0.3)
+    d.send(ENTER, 0.25)          # -> Host
     d.send(b"10.1.1.7", 0.3)
-    d.send(ENTER, 0.4)
-    d.dump("CL. mid-sequence at Port — two steps settled, nothing written yet")
-    joined = "\n".join(d.screen.frame_rows())
-    check("two steps are settled on the glass",
-          "◇ Alias   db-01" in joined and "◇ Host    10.1.1.7" in joined, joined)
-    check("two settled steps still wrote nothing", sha() == h0b)
+    d.send(ENTER, 0.25)          # -> User
+    d.send(b"ops", 0.3)
+    d.send(ENTER, 0.25)          # -> Port
+    d.send(b"abc", 0.3)
+    d.send(ENTER, 0.4)           # Port -> Key, even though Port is garbage
+    d.dump("CG. an invalid Port ADVANCES; the row wears `!` and `▶` stays dim")
+    check("Enter on the garbage Port moved off it",
+          field_glyph(d, "Key") == "◆", repr(field_row(d, "Key")))
+    check("the invalid Port row wears `!`",
+          field_glyph(d, "Port") == "!", repr(field_row(d, "Port")))
+    check("the bad value is kept on the row for fixing",
+          field_value(d, "Port") == "abc", repr(field_row(d, "Port")))
+    check("with a bad Port the `▶` row stays dim",
+          not submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
+    check("an invalid Port wrote nothing", sha() == h2)
 
-    d.send(ESC, 0.3)
-    d.dump("CM. Esc walks back to Host with its answer back on the line")
-    check("Host is live again with its answer re-seeded",
-          d.screen.text()[FRAME_ROW] == "◆ Host  10.1.1.7_",
+    d.send(ENTER, 0.25)          # Key -> Folder
+    d.send(b"staging", 0.3)
+    d.send(ENTER, 0.25)          # Folder -> Submit
+    d.dump("CH. cursor on `▶` with the bad Port still in the form")
+    check("the `▶` row is still dim with the Port invalid",
+          not submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
+    d.send(ENTER, 0.5)
+    d.dump("CI. Enter on `▶` while invalid — refused, naming the field")
+    joined = "\n".join(d.screen.frame_rows())
+    check("the refusal states the range and names the field",
+          rule_row(d) == "│   ! port must be 1–65535 (e.g. 22)",
+          repr(rule_row(d)))
+    check("the refusal took the rule row, so the map is still eight rows",
+          len(d.screen.frame_rows()) == height,
+          f"{height} -> {len(d.screen.frame_rows())}")
+    check("the frame stayed on the form — it did not fall back to the list",
+          d.screen.text()[FRAME_ROW] == "◆ New connection",
           repr(d.screen.text()[FRAME_ROW]))
-    d.send(ESC, 0.3)
-    d.dump("CN. Esc walks back to Alias with its answer back on the line")
-    check("Alias is live again with its answer re-seeded",
-          d.screen.text()[FRAME_ROW] == "◆ Alias  db-01_",
-          repr(d.screen.text()[FRAME_ROW]))
+    check("a refused `▶` wrote nothing", sha() == h2)
+
+    d.send(UP, 0.25)
+    d.send(UP, 0.25)
+    d.send(UP, 0.25)             # Submit -> Folder -> Key -> Port
+    d.dump("CJ. walked back to the Port to fix it")
+    check("the cursor is back on the Port", field_glyph(d, "Port") == "◆",
+          repr(field_row(d, "Port")))
+    for _ in range(3):
+        d.send(BACKSPACE, 0.12)
+    d.dump("CK. the first Backspace stops reporting the old mistake")
+    check("the refusal is gone once the user is fixing it",
+          not rule_row(d).startswith("│   !"), repr(rule_row(d)))
+    d.send(b"2222", 0.3)
+    d.dump("CL. a valid Port typed — the `▶` row lights again")
+    check("the Port row holds the fixed value",
+          field_value(d, "Port") == "2222" and caret(d, "Port"),
+          repr(field_row(d, "Port")))
+    check("with the form valid the `▶` row is lit",
+          submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
+    d.send(DOWN, 0.25)           # Port -> Key
+    # The focused row always wears `◆`, so the Port's own glyph is only
+    # readable once the cursor has left it.
+    check("the fixed Port row reports `✓` once the cursor leaves it",
+          field_glyph(d, "Port") == "✓", repr(field_row(d, "Port")))
+    d.send(DOWN, 0.25)           # Key -> Folder
+    d.send(DOWN, 0.25)           # Folder -> Submit
+    d.send(ENTER, 0.6)
+    d.dump("CM. Enter on `▶` now — the write happens")
+    joined = "\n".join(d.screen.frame_rows())
+    h3 = sha()
+    check("the fixed form changed connections.json", h3 != h2, f"{h2} -> {h3}")
+    saved = [c for c in on_disk() if c["alias"] == "db-01"]
+    check("the fixed Port landed as 2222",
+          bool(saved) and saved[0].get("port") == 2222,
+          json.dumps(saved[0] if saved else {}))
+    check("the typed User landed too",
+          bool(saved) and saved[0].get("user") == "ops",
+          json.dumps(saved[0] if saved else {}))
+    check("the note names the added Connection",
+          "│   ◇ added [staging] db-01" in joined, joined)
     d.send(ESC, 0.4)
-    d.dump("CO. Esc off the first step abandons the sequence — nothing saved")
+
+    # ── run 3: Esc off the top row abandons; the file never hears ─────
+    seed()
+    h4 = sha()
+    d = open_map()
+    d.send(b"db-01", 0.3)
+    d.send(ENTER, 0.25)
+    d.send(b"10.1.1.7", 0.3)
+    d.send(ENTER, 0.25)
+    d.send(b"ops", 0.3)
+    d.dump("CN. half-filled map, cursor on Port")
+    check("three rows are filled on the glass",
+          field_value(d, "Alias") == "db-01"
+          and field_value(d, "Host") == "10.1.1.7"
+          and field_value(d, "User") == "ops",
+          f"{[field_value(d, n) for n in ('Alias', 'Host', 'User')]}")
+    check("a half-filled map has written nothing", sha() == h4)
+    d.send(UP, 0.2)
+    d.send(UP, 0.2)
+    d.send(UP, 0.2)              # Port -> User -> Host -> Alias
+    check("the cursor is on the top row", field_glyph(d, "Alias") == "◆",
+          repr(field_row(d, "Alias")))
+    d.send(ESC, 0.5)
+    d.dump("CO. Esc off the top row abandons the map — nothing saved")
     joined = "\n".join(d.screen.frame_rows())
     check("the frame is back on the list",
           d.screen.text()[FRAME_ROW] == "◆ Manage Connections",
@@ -996,31 +1242,30 @@ def scenario_manage_add():
           "│   ◇ add abandoned — nothing saved" in joined, joined)
     check("no ◇ added note — the write never happened",
           "added" not in joined, joined)
-    h2 = sha()
-    check("abandoning mid-sequence left connections.json byte-identical",
-          h2 == h0b, f"{h0b} -> {h2}")
+    h5 = sha()
+    check("abandoning the map left connections.json byte-identical",
+          h5 == h4, f"{h4} -> {h5}")
 
-    # ── run 3: Ctrl+C mid-sequence cancels the frame and writes nothing ──
-    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    # ── run 4: Ctrl+C mid-form cancels and writes nothing ─────────────
+    d = Demo(["manage"], bin=SSH_BIN, home=home, env=COLOUR)
     d.pump(0.7)
     d.send(CTRL_A, 0.4)
+    d.send(b"db-01", 0.3)
+    d.send(ENTER, 0.25)
     d.send(b"half-typed", 0.3)
     d.send(CTRL_C, 0.5)
-    d.dump("CP. Ctrl+C mid-sequence — the frame cancels clean")
+    d.dump("CP. Ctrl+C mid-form — the frame cancels clean")
     check("Ctrl+C leaves the cancel trace",
           d.screen.text()[FRAME_ROW] == "◆ cancelled",
           repr(d.screen.text()[FRAME_ROW]))
-    check("Ctrl+C mid-sequence wrote nothing", sha() == h0b)
+    check("Ctrl+C mid-form wrote nothing", sha() == h4)
     check("no alternate screen on any add path", not d.screen.alt_screen)
 
-    # ── run 4: adding while a filter is active must still SHOW the new
-    # ── Connection — the spec's "the list is refreshed and shows the
-    # ── resulting Connection" is a promise about the glass. ─────────────
+    # ── run 5: adding under a filter must still SHOW the new row ──────
     seed()
-    h0c = sha()
-    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    h6 = sha()
+    d = Demo(["manage"], bin=SSH_BIN, home=home, env=COLOUR)
     d.pump(0.7)
-    # Filter to "web" — the new db-01 will not match it.
     d.send(b"web", 0.4)
     d.dump("CQ. filtered to `web` — two rows match, the new one would not")
     joined = "\n".join(d.screen.frame_rows())
@@ -1028,15 +1273,23 @@ def scenario_manage_add():
           "web-01" in joined and "db-01" not in joined, joined)
     d.send(CTRL_A, 0.4)
     d.send(b"db-01", 0.3)
-    d.send(ENTER, 0.3)
+    d.send(ENTER, 0.25)
     d.send(b"10.1.1.7", 0.3)
-    d.send(ENTER, 0.3)
+    d.send(ENTER, 0.25)
+    d.send(b"ops", 0.3)
+    d.send(ENTER, 0.25)
     d.send(b"2222", 0.3)
-    d.send(ENTER, 0.3)
-    d.send(ENTER, 0.3)  # empty Key -> absent
+    d.send(ENTER, 0.25)
+    d.send(ENTER, 0.25)
     d.send(b"staging", 0.3)
-    d.send(ENTER, 0.5)
-    d.dump("CR. added db-01 under a `web` filter — the filter clears, the new row shows")
+    d.send(ENTER, 0.25)          # Folder -> Submit
+    d.dump("CR. the map filled under a `web` filter, cursor on `▶`")
+    check("the map covers the filtered list — the filter is not visible",
+          "No matches" not in "\n".join(d.screen.frame_rows())
+          and "web-01" not in "\n".join(fields(d)),
+          "\n".join(d.screen.frame_rows()))
+    d.send(ENTER, 0.6)
+    d.dump("CS. added db-01 under a `web` filter — the filter clears")
     joined = "\n".join(d.screen.frame_rows())
     check("the frame is back on the list",
           d.screen.text()[FRAME_ROW] == "◆ Manage Connections",
@@ -1044,26 +1297,40 @@ def scenario_manage_add():
     check("the note names the added Connection",
           "│   ◇ added [staging] db-01" in joined, joined)
     check("the new Connection is actually on the glass — the filter cleared",
-          "[staging] db-01 (@10.1.1.7:2222)" in joined, joined)
+          "[staging] db-01 (ops@10.1.1.7:2222)" in joined, joined)
     check("the cursor is on the new row, not stranded where the filter left it",
           "❯ [staging] db-01" in joined, joined)
-    check("the add really landed on disk", sha() != h0c)
+    check("the add really landed on disk", sha() != h6)
+    saved = [c for c in on_disk() if c["alias"] == "db-01"]
+    check("and the user typed under a filter is on disk too",
+          bool(saved) and saved[0].get("user") == "ops",
+          json.dumps(saved[0] if saved else {}))
     d.send(ESC, 0.4)
 
 
 def scenario_manage_edit():
-    """#37: the `Ctrl+E` in-place single-field editor on the real binary.
+    """#41: the `Ctrl+E` form map, seeded from a live Connection.
 
     Same throwaway-HOME discipline as the add and delete scenarios: every
     verdict about persistence is a sha256 of the real
     `connections.json`, not a claim. The chord byte is 0x05 — what a
     terminal sends for Ctrl+E.
 
-    The walk covers what makes an edit an edit rather than a second add:
-    the line arrives holding the value being changed, the field selector
-    re-seeds it from the field it lands on, a refusal writes nothing, the
-    completed edit earns its `◇ edited` note from a file that really
-    changed, and abandoning leaves the file byte-identical.
+    The edit map is the add map with a baseline under it, and that one
+    difference is what the walk has to prove:
+
+    * it opens **seeded** — every row holds the stored value, and nothing
+      is `●` yet, because nothing has been changed yet;
+    * a row the user actually changes turns `●`, and only that row;
+    * Enter on `▶` performs **exactly one write** carrying **both**
+      changes, against the Connection the chord captured;
+    * Enter on `▶` with nothing changed refuses with `nothing to save`
+      rather than silently rewriting the file;
+    * Esc off the top row and Ctrl+C both leave the file byte-identical.
+
+    Colour is switched on for the same reason the add scenario needs it:
+    `●`-against-`✓` and a lit-against-dim `▶` are the whole of the
+    signal, and under `NO_COLOR` they are invisible.
     """
     home = tempfile.mkdtemp(prefix="sshm-pty-edit-")
     cfg = os.path.join(home, ".ssh", "connections.json")
@@ -1088,197 +1355,342 @@ def scenario_manage_edit():
         with open(cfg, "rb") as f:
             return hashlib.sha256(f.read()).hexdigest()
 
-    CTRL_E, CTRL_C = b"\x05", b"\x03"
+    def on_disk():
+        with open(cfg) as f:
+            return json.load(f)["connections"]
 
-    # ── run 1: the editor opens, edits one field, and writes ───────────
+    CTRL_E, CTRL_C = b"\x05", b"\x03"
+    COLOUR = {"TERM": "xterm-256color", "NO_COLOR": ""}
+
+    def fields(d):
+        return d.screen.text()[FRAME_ROW + 1:FRAME_ROW + 7]
+
+    def labels(d):
+        return [r[6:12].strip() for r in fields(d)]
+
+    def glyphs(d):
+        return [r[4] if len(r) > 4 else "" for r in fields(d)]
+
+    def field_row(d, name):
+        for r in fields(d):
+            if r[6:12].strip() == name:
+                return r
+        return None
+
+    def field_glyph(d, name):
+        r = field_row(d, name)
+        return r[4] if r and len(r) > 4 else None
+
+    def field_value(d, name):
+        """The row's text, with the focused row's caret taken off.
+
+        The frame paints `_` after the value on the row the cursor is on.
+        The caret is chrome, not content, so a check that wants the value
+        asks for it stripped; a check that wants the caret asks for it by
+        name. Both are read off the same row.
+        """
+        r = field_row(d, name)
+        if not r or len(r) <= 13:
+            return None
+        v = r[13:]
+        if r[4] == "◆" and v.endswith("_"):
+            v = v[:-1]
+        return v
+
+    def caret(d, name):
+        """Does the focused row show its caret?"""
+        r = field_row(d, name)
+        return bool(r) and r[4] == "◆" and r.endswith("_")
+
+    def rule_row(d):
+        return d.screen.text()[FRAME_ROW + RULE_OFFSET]
+
+    def submit_row(d):
+        return d.screen.text()[FRAME_ROW + SUBMIT_OFFSET]
+
+    def submit_sgr(d):
+        row = FRAME_ROW + SUBMIT_OFFSET
+        for c, ch in enumerate(d.screen.buf[row]):
+            if ch == "▶":
+                return d.screen.style[row][c] or ""
+        return None
+
+    def submit_lit(d):
+        return "36" in (submit_sgr(d) or "")
+
+    def open_edit():
+        d = Demo(["manage"], bin=SSH_BIN, home=home, env=COLOUR)
+        d.pump(0.7)
+        d.send(CTRL_E, 0.4)
+        return d
+
+    # ── run 1: the map opens seeded, and nothing is `●` ───────────────
     seed()
     h0 = sha()
     print(f"    seeded connections.json sha256: {h0}")
 
-    d = Demo(["manage"], bin=SSH_BIN, home=home)
+    d = Demo(["manage"], bin=SSH_BIN, home=home, env=COLOUR)
     d.pump(0.7)
     d.dump("EA. manage frame open — Ctrl+E on the rail")
     height = len(d.screen.frame_rows())
     rail = d.screen.text()[FRAME_ROW + height - 2]
     check("Ctrl+E is on the rail because it now does what it says",
-          "Ctrl+E" in rail, repr(rail))
+          "Ctrl+E edit" in rail, repr(rail))
 
     d.send(CTRL_E, 0.4)
-    d.dump("EB. Ctrl+E — the header names the target, the field line is seeded")
-    check("the header names the Connection being edited, not the field",
+    d.dump("EB. Ctrl+E — the map opens seeded from the selected Connection")
+    check("the header names the Connection being edited",
           d.screen.text()[FRAME_ROW] == "◆ Edit [prod] web-01",
           repr(d.screen.text()[FRAME_ROW]))
-    field = d.screen.text()[FRAME_ROW + 1]
-    check("the field line carries the field, its current value and the caret",
-          field == "│   ◆ Alias   web-01_", repr(field))
-    check("the editor did not grow the frame",
+    check("all six field rows are on the glass at once",
+          len(fields(d)) == 6 and labels(d) == FIELD_ORDER,
+          f"{len(fields(d))} rows, labels {labels(d)}")
+    check("the cursor opens on Alias", field_glyph(d, "Alias") == "◆",
+          repr(field_row(d, "Alias")))
+    check("every row arrived holding the stored value",
+          field_value(d, "Alias") == "web-01"
+          and field_value(d, "Host") == "10.0.0.4"
+          and field_value(d, "User") == "deploy"
+          and field_value(d, "Port") == "22"
+          and field_value(d, "Folder") == "prod",
+          f"{[field_value(d, n) for n in FIELD_ORDER]}")
+    check("the seeded value arrives on the line, caret and all",
+          caret(d, "Alias"), repr(field_row(d, "Alias")))
+    check("NOTHING shows as `●` — nothing has been changed yet",
+          "●" not in "".join(glyphs(d)), f"glyphs {glyphs(d)}")
+    check("the one field the store does not hold reads `<not set>`, not `<optional>`",
+          field_value(d, "Key") == "<not set>", repr(field_row(d, "Key")))
+    check("the `▶` row is dim — there is nothing to save yet",
+          not submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
+    check("the `▶` row names the Connection the write is about",
+          submit_row(d) == "│   ▶ Save changes to web-01", repr(submit_row(d)))
+    check("the edit map did not grow the frame",
           len(d.screen.frame_rows()) == height,
           f"{height} -> {len(d.screen.frame_rows())}")
-    rail = d.screen.text()[FRAME_ROW + height - 2]
-    check("the edit rail names the selector and what Enter means here",
-          "Esc back" in rail and "\u2190\u2192 field" in rail
-          and "Enter save" in rail and "Ctrl+C quit" in rail,
-          repr(rail))
     check("opening the editor wrote nothing", sha() == h0)
 
     d.send(b"x", 0.3)
-    d.dump("EC. typing edits the field, not the filter behind it")
-    field = d.screen.text()[FRAME_ROW + 1]
-    check("the field echoes into the live value",
-          field == "│   ◆ Alias   web-01x_", repr(field))
+    d.dump("EC. typing turns exactly one row `●`")
+    check("the focused row echoes the keystroke",
+          field_value(d, "Alias") == "web-01x" and caret(d, "Alias"),
+          repr(field_row(d, "Alias")))
+    check("with a change pending the `▶` row is lit",
+          submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
+    d.send(DOWN, 0.25)           # Alias -> Host, so Alias can show its own glyph
+    check("the changed row reports `●` once the cursor leaves it",
+          field_glyph(d, "Alias") == "●", repr(field_row(d, "Alias")))
+    check("and only that row — the untouched rows keep `✓`",
+          [g for n, g in (("Host", field_glyph(d, "Host")),
+                         ("User", field_glyph(d, "User")),
+                         ("Folder", field_glyph(d, "Folder"))) if g == "●"] == [],
+          f"glyphs {glyphs(d)}")
     check("the keystroke did not filter the list",
           "No matches" not in "\n".join(d.screen.frame_rows()),
-          "the Connections behind the editor are still listed")
-    check("typing still wrote nothing — Enter is the write", sha() == h0)
+          "the Connections behind the map are still listed")
+    check("typing still wrote nothing — `▶` is the write", sha() == h0)
 
-    d.send(ENTER, 0.4)
-    d.dump("ED. Enter — the edit lands and the note reports the real write")
-    check("back on the list",
-          d.screen.text()[FRAME_ROW] == "◆ Manage Connections",
-          repr(d.screen.text()[FRAME_ROW]))
-    joined = "\n".join(d.screen.frame_rows())
-    check("the note is the ticket's own string",
-          "│   ◇ edited [prod] web-01x" in joined, joined)
-    check("the list is refreshed and shows the changed Connection",
-          "web-01x" in joined, joined)
-    h1 = sha()
-    check("the edit really changed connections.json", h1 != h0, f"{h0} -> {h1}")
-    with open(cfg) as f:
-        saved = json.load(f)
-    check("exactly one Connection changed, and only its alias",
-          saved["connections"][0]["alias"] == "web-01x"
-          and saved["connections"][0]["host"] == "10.0.0.4"
-          and saved["connections"][0]["port"] == 22
-          and saved["connections"][0]["id"] == "id-web-01",
-          json.dumps(saved["connections"][0]))
-    check("the neighbour is untouched",
-          saved["connections"][1]["alias"] == "web-02",
-          json.dumps(saved["connections"][1]))
-    check("the id survived the edit — no orphaned row",
-          len(saved["connections"]) == 2)
-
-    # ── run 2: the field selector re-seeds the line from the field ─────
+    # ── run 2: two changes, one write ─────────────────────────────────
     seed()
+    h1 = sha()
+    d = open_edit()
+    d.send(b"-live", 0.3)        # Alias -> web-01-live
+    d.send(ENTER, 0.25)         # -> Host
+    d.send(ENTER, 0.25)         # -> User
+    d.send(ENTER, 0.25)         # -> Port
+    for _ in range(2):
+        d.send(BACKSPACE, 0.12)  # clear the stored "22"
+    d.send(b"2222", 0.3)        # Port -> 2222
+    d.dump("ED. two rows changed — Alias and Port")
+    check("the Port row holds the new port with the caret on it",
+          field_value(d, "Port") == "2222" and caret(d, "Port"),
+          repr(field_row(d, "Port")))
+    check("the Alias row still reports its own change",
+          field_glyph(d, "Alias") == "●", repr(field_row(d, "Alias")))
+    d.send(DOWN, 0.25)          # Port -> Key, so the Port can show its own glyph
+    d.dump("ED2. cursor one row below — both changed rows now readable")
+    check("the changed Alias wears `●`", field_glyph(d, "Alias") == "●",
+          repr(field_row(d, "Alias")))
+    check("the changed Port wears `●`", field_glyph(d, "Port") == "●",
+          repr(field_row(d, "Port")))
+    check("the rows nobody touched are NOT `●`",
+          field_glyph(d, "Host") == "✓" and field_glyph(d, "User") == "✓"
+          and field_glyph(d, "Folder") == "✓",
+          f"glyphs {glyphs(d)}")
+    check("exactly two rows report a change",
+          glyphs(d).count("●") == 2, f"glyphs {glyphs(d)}")
+    check("two pending changes have still written nothing", sha() == h1)
+
+    d.send(ENTER, 0.25)         # Key -> Folder
+    d.send(ENTER, 0.25)         # Folder -> Submit
+    d.dump("EE. cursor on `▶` with both changes pending")
+    check("the `▶` row is lit", submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
+    rail = d.screen.text()[FRAME_ROW + height - 2]
+    check("the rail says `Enter save` on the `▶` row",
+          "Enter save" in rail and "Enter next" not in rail, repr(rail))
+    d.send(ENTER, 0.6)
+    d.dump("EF. Enter on `▶` — ONE write carrying BOTH changes")
+    joined = "\n".join(d.screen.frame_rows())
     h2 = sha()
-    d = Demo(["manage"], bin=SSH_BIN, home=home)
-    d.pump(0.7)
-    d.send(CTRL_E, 0.4)
-    d.send(RIGHT, 0.3)
-    d.dump("EE. \u2192 to Host — the line now holds the Host, not the Alias")
-    check("the header still names the target",
+    check("the edit changed connections.json", h2 != h1, f"{h1} -> {h2}")
+    saved = on_disk()
+    check("exactly one write: the file still holds two Connections",
+          len(saved) == 2, f"{len(saved)} connections")
+    check("both changes are in the file",
+          saved[0]["alias"] == "web-01-live" and saved[0]["port"] == 2222,
+          json.dumps(saved[0]))
+    check("the fields nobody changed came through untouched",
+          saved[0]["host"] == "10.0.0.4" and saved[0]["user"] == "deploy"
+          and saved[0]["folder"] == "prod",
+          json.dumps(saved[0]))
+    check("the id survived the edit — no orphaned row",
+          saved[0]["id"] == "id-web-01", json.dumps(saved[0]))
+    check("the neighbour is untouched",
+          saved[1]["alias"] == "web-02" and saved[1]["port"] == 22,
+          json.dumps(saved[1]))
+    check("the note names the Connection the store actually wrote",
+          "│   ◇ edited [prod] web-01-live" in joined, joined)
+    check("the list is refreshed and shows the changed Connection",
+          "[prod] web-01-live (deploy@10.0.0.4:2222)" in joined, joined)
+    d.send(ESC, 0.4)
+
+    # ── run 3: Enter on `▶` with nothing changed refuses ──────────────
+    seed()
+    h3 = sha()
+    d = open_edit()
+    for _ in range(6):
+        d.send(ENTER, 0.2)      # walk Alias -> Submit without touching a row
+    d.dump("EG. walked to `▶` with nothing changed")
+    check("no row wears `●` after a walk that changed nothing",
+          "●" not in "".join(glyphs(d)), f"glyphs {glyphs(d)}")
+    check("the `▶` row stays dim with nothing changed",
+          not submit_lit(d), f"▶ sgr {submit_sgr(d)!r}")
+    d.send(ENTER, 0.5)
+    d.dump("EH. Enter on `▶` with nothing changed — `nothing to save`")
+    check("the refusal says `nothing to save`",
+          rule_row(d) == "│   ! nothing to save", repr(rule_row(d)))
+    check("the frame stayed on the edit map",
           d.screen.text()[FRAME_ROW] == "◆ Edit [prod] web-01",
           repr(d.screen.text()[FRAME_ROW]))
-    field = d.screen.text()[FRAME_ROW + 1]
-    check("the field line re-seeded to the Host",
-          field == "│   ◆ Host    10.0.0.4_", repr(field))
+    check("the refusal took the rule row, so the height never moved",
+          len(d.screen.frame_rows()) == height,
+          f"{height} -> {len(d.screen.frame_rows())}")
+    check("a `nothing to save` refusal wrote nothing", sha() == h3)
+    d.send(ESC, 0.4)
 
-    d.send(RIGHT, 0.3)
-    d.dump("EF. \u2192 to Port — the line holds the port")
-    field = d.screen.text()[FRAME_ROW + 1]
-    check("the field line re-seeded to the Port",
-          field == "│   ◆ Port    22_", repr(field))
-
-    d.send(BACKSPACE, 0.2)
-    d.send(BACKSPACE, 0.2)
-    d.send(b"99999", 0.3)
-    d.send(ENTER, 0.4)
-    d.dump("EG. an out-of-range port is refused, in place")
-    joined = "\n".join(d.screen.frame_rows())
-    check("the refusal names the rule",
-          "! port must be a number from 1 to 65535" in joined, joined)
-    check("still on the Port field with the bad value kept for fixing",
-          d.screen.text()[FRAME_ROW + 1] == "│   ◆ Port    99999_",
-          repr(d.screen.text()[FRAME_ROW + 1]))
-    check("a refused field wrote nothing", sha() == h2)
-
-    d.send(BACKSPACE, 0.2)
-    d.dump("EH. the first keystroke of a fix stops reporting the old mistake")
-    joined = "\n".join(d.screen.frame_rows())
-    check("the refusal is gone once the user is fixing it",
-          "! port must be a number" not in joined, joined)
-
-    d.send(BACKSPACE, 0.2)
-    d.send(BACKSPACE, 0.2)
-    d.send(BACKSPACE, 0.2)
-    d.send(BACKSPACE, 0.2)
-    d.send(b"2222", 0.3)
-    d.send(ENTER, 0.4)
-    d.dump("EI. a valid port settles and writes")
-    joined = "\n".join(d.screen.frame_rows())
-    check("the edit note names the Connection",
-          "│   ◇ edited [prod] web-01" in joined, joined)
-    h3 = sha()
-    check("the port edit really landed", h3 != h2, f"{h2} -> {h3}")
-    with open(cfg) as f:
-        saved = json.load(f)
-    check("only the port changed; alias and host are as they were",
-          saved["connections"][0]["port"] == 2222
-          and saved["connections"][0]["alias"] == "web-01"
-          and saved["connections"][0]["host"] == "10.0.0.4",
-          json.dumps(saved["connections"][0]))
-
-    # ── run 3: the selector cannot move the target onto a neighbour ─────
+    # ── run 4: movement never moves the target onto a neighbour ───────
+    #
+    # The cursor is walked the length of the map, wrapped round with Tab,
+    # and parked on the Port — with the cursor's position asserted at every
+    # step. Without those step checks a miscount would quietly write the
+    # Port's digits into whichever row the cursor had drifted onto, and the
+    # scenario would still "pass" while proving nothing about the target.
     seed()
     h4 = sha()
-    d = Demo(["manage"], bin=SSH_BIN, home=home)
-    d.pump(0.7)
-    d.send(CTRL_E, 0.4)
-    for _ in range(6):
-        d.send(RIGHT, 0.15)
-    d.dump("EJ. arrowed all the way round — the target is still web-01")
+    d = open_edit()
+    check("the edit opens with the cursor on Alias",
+          field_glyph(d, "Alias") == "◆", f"glyphs {glyphs(d)}")
+    for _ in range(7):
+        d.send(DOWN, 0.15)      # Down saturates at Submit; the 7th changes nothing
+    d.dump("EI. Down walked the map and saturated at the `▶` row")
+    check("Down saturated on the `▶` row, not past it",
+          "Enter save" in d.screen.text()[FRAME_ROW + height - 2],
+          repr(d.screen.text()[FRAME_ROW + height - 2]))
+    check("no field row carries the cursor once it is on `▶`",
+          "◆" not in "".join(glyphs(d)), f"glyphs {glyphs(d)}")
     check("the header still names the Connection captured at the chord",
           d.screen.text()[FRAME_ROW] == "◆ Edit [prod] web-01",
           repr(d.screen.text()[FRAME_ROW]))
-    # six RIGHTs wrap Alias→Host→Port→Key→Folder→Alias→Host, so the live
-    # field here is Host — the point is which Connection receives the write,
-    # not which field.
-    field = d.screen.text()[FRAME_ROW + 1]
-    check("the live field after wrapping is Host",
-          field.startswith("│   ◆ Host"), repr(field))
-    d.send(b"!", 0.3)
-    d.send(ENTER, 0.4)
-    with open(cfg) as f:
-        saved = json.load(f)
-    check("the write landed on the captured Connection, not the neighbour",
-          saved["connections"][0]["host"] == "10.0.0.4!"
-          and saved["connections"][0]["alias"] == "web-01"
-          and saved["connections"][1]["alias"] == "web-02"
-          and saved["connections"][1]["host"] == "10.0.0.5",
-          json.dumps([(c["alias"], c["host"]) for c in saved["connections"]]))
 
-    # ── run 4: abandoning an edit leaves the file byte-identical ────────
+    d.send(TAB, 0.2)            # Submit wraps to Alias
+    check("Tab wrapped the cursor from `▶` back to Alias",
+          field_glyph(d, "Alias") == "◆", f"glyphs {glyphs(d)}")
+    d.send(TAB, 0.2)            # -> Host
+    check("Tab landed on Host", field_glyph(d, "Host") == "◆",
+          f"glyphs {glyphs(d)}")
+    d.send(TAB, 0.2)            # -> User
+    check("Tab landed on User", field_glyph(d, "User") == "◆",
+          f"glyphs {glyphs(d)}")
+    d.send(TAB, 0.2)            # -> Port
+    d.dump("EJ. Tab walked down to the Port row — still editing web-01")
+    check("Tab landed on Port", field_glyph(d, "Port") == "◆",
+          repr(field_row(d, "Port")))
+    check("the header still names web-01 after the wrap",
+          d.screen.text()[FRAME_ROW] == "◆ Edit [prod] web-01",
+          repr(d.screen.text()[FRAME_ROW]))
+
+    for _ in range(2):
+        d.send(BACKSPACE, 0.12)  # clear the stored "22"
+    d.send(b"2200", 0.3)
+    check("the Port row took the new port",
+          field_value(d, "Port") == "2200" and caret(d, "Port"),
+          repr(field_row(d, "Port")))
+    d.send(ENTER, 0.25)         # Port -> Key
+    check("the cursor left the Port, which now reports `●`",
+          field_glyph(d, "Port") == "●" and field_glyph(d, "Key") == "◆",
+          f"glyphs {glyphs(d)}")
+    d.send(ENTER, 0.25)         # Key -> Folder
+    d.send(ENTER, 0.25)         # Folder -> Submit
+    check("the cursor is back on the `▶` row",
+          "Enter save" in d.screen.text()[FRAME_ROW + height - 2],
+          repr(d.screen.text()[FRAME_ROW + height - 2]))
+    d.send(ENTER, 0.6)
+    d.dump("EK. the write landed on the captured Connection, not a neighbour")
+    saved = on_disk()
+    check("the captured Connection took the change",
+          saved[0]["id"] == "id-web-01" and saved[0]["port"] == 2200,
+          json.dumps(saved[0]))
+    check("no stray value landed in another field of the target",
+          saved[0]["alias"] == "web-01" and saved[0]["host"] == "10.0.0.4"
+          and saved[0]["user"] == "deploy" and saved[0]["folder"] == "prod",
+          json.dumps(saved[0]))
+    check("the neighbour kept its own port",
+          saved[1]["alias"] == "web-02" and saved[1]["port"] == 22,
+          json.dumps(saved[1]))
+    check("and only the two Connections we started with exist",
+          len(saved) == 2, f"{len(saved)} connections")
+    d.send(ESC, 0.4)
+
+    # ── run 5: Esc off the top row after edits abandons ───────────────
     seed()
     h5 = sha()
-    d = Demo(["manage"], bin=SSH_BIN, home=home)
-    d.pump(0.7)
-    d.send(CTRL_E, 0.4)
-    d.send(b"-typo", 0.3)
-    d.send(ESC, 0.4)
-    d.dump("EK. Esc abandons the edit — nothing saved")
+    d = open_edit()
+    d.send(b"ZZZ", 0.2)
+    d.send(ENTER, 0.25)
+    d.send(b"notstored", 0.3)
+    d.dump("EL. two rows edited, cursor on Host")
+    check("both edited rows report `●`",
+          field_glyph(d, "Alias") == "●" and field_glyph(d, "Host") == "◆",
+          f"glyphs {glyphs(d)}")
+    check("edited-but-unsubmitted rows have written nothing", sha() == h5)
+    d.send(UP, 0.2)
+    check("Up walks back to the top row", field_glyph(d, "Alias") == "◆",
+          repr(field_row(d, "Alias")))
+    d.send(ESC, 0.5)
+    d.dump("EM. Esc off the top row — the edit is abandoned")
     joined = "\n".join(d.screen.frame_rows())
     check("back on the list",
           d.screen.text()[FRAME_ROW] == "◆ Manage Connections",
           repr(d.screen.text()[FRAME_ROW]))
-    check("the note answers whether the half-typed field was saved",
+    check("the note answers whether the half-typed fields were saved",
           "│   ◇ edit abandoned — nothing saved" in joined, joined)
     check("no ◇ edited note — the write never happened",
           "edited" not in joined, joined)
     check("abandoning left connections.json byte-identical", sha() == h5,
           f"{h5} -> {sha()}")
 
-    # ── run 5: Ctrl+C inside the editor cancels and writes nothing ──────
+    # ── run 6: Ctrl+C inside the map cancels and writes nothing ───────
     seed()
     h6 = sha()
-    d = Demo(["manage"], bin=SSH_BIN, home=home)
-    d.pump(0.7)
-    d.send(CTRL_E, 0.4)
+    d = open_edit()
     d.send(b"half-typed", 0.3)
+    d.send(ENTER, 0.25)
+    d.send(b"and-more", 0.3)
     d.send(CTRL_C, 0.5)
-    d.dump("EL. Ctrl+C inside the editor — the frame cancels clean")
+    d.dump("EN. Ctrl+C inside the edit map — the frame cancels clean")
     check("Ctrl+C leaves the cancel trace",
           d.screen.text()[FRAME_ROW] == "◆ cancelled",
           repr(d.screen.text()[FRAME_ROW]))
-    check("Ctrl+C inside the editor wrote nothing", sha() == h6)
+    check("Ctrl+C inside the edit map wrote nothing", sha() == h6)
     check("no alternate screen on any edit path", not d.screen.alt_screen)
 
 
