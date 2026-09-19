@@ -20,7 +20,10 @@ A ZLE widget (zsh) or readline function (bash) emitted by `sshm init zsh|bash`
 that opens the Inline Picker. Two entry points: a bound key (Ctrl+Alt+S) that
 seeds the picker from the buffer, and the `**` completion trigger that opens
 the picker unfiltered. The `**<TAB>` route is zsh-only; the widget falls
-through to normal `.expand-or-complete` when the trigger token is absent.
+through to the standard `expand-or-complete` widget (non-dot form, so the
+completion system runs) when the trigger token is absent. bash never rebinds
+TAB — `bind -x` cannot chain back, so the binding would cost all of bash's
+completion.
 _Avoid_: override, hook, completion menu
 
 **Form Map**:
