@@ -318,7 +318,8 @@ The project uses GitHub Actions for:
 
 ## Version History
 
-- **0.1.11** - Current version with the new inline Clack-style frame (add, edit, delete, pick), a design-token theme layer, cached update notes, and a rustls security bump
+- **0.1.12** - Current version with fixed shell init: normal TAB completion survives `sshm init zsh` (non-dot fallthrough), and bash never rebinds TAB
+- **0.1.11** - the new inline Clack-style frame (add, edit, delete, pick), a design-token theme layer, cached update notes, and a rustls security bump
 - **0.1.10** - `**<TAB>` completion trigger, bash support for `sshm init`, `--no-bind` flag, and serialized test fixes
 - **0.1.9** - Inline picker, shell init scripts (zsh + bash), and `**<TAB>` completion trigger
 - **0.1.5** - Update functionality

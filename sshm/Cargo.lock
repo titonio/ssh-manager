@@ -2326,7 +2326,7 @@ dependencies = [
 
 [[package]]
 name = "sshm"
-version = "0.1.11"
+version = "0.1.12"
 dependencies = [
  "clap",
  "clap_complete",
