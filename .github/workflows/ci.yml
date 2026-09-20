@@ -264,8 +264,13 @@ jobs:
 
     - name: Get version from Cargo.toml
       id: cargo_version
+      # Anchored, exactly like the sed the Linux and macOS jobs use. Unanchored,
+      # this matched every `version = "…"` line in the manifest and concatenated
+      # the whole dependency list into the asset name: v0.1.12 published
+      # `sshm-v0.1.12.1.0.1.0.0.39.0.12.4.5-x86_64-pc-windows-msvc.zip`, which
+      # nothing can find (#46).
       run: |
-        $version = (Get-Content sshm/Cargo.toml) | Select-String 'version = "([^"]+)"' | ForEach-Object { $_.Matches.Groups[1].Value }
+        $version = (Select-String -Path sshm/Cargo.toml -Pattern '^version = "([^"]+)"' -CaseSensitive | Select-Object -First 1).Matches.Groups[1].Value
         echo "version=$version" >> $env:GITHUB_OUTPUT
       shell: pwsh
 

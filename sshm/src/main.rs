@@ -12,7 +12,7 @@ use std::io::{self, Write};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use emit::{Action, Emit};
-use update::UpdateResult;
+use update::{ApplyResult, UpdateResult};
 
 #[derive(Parser)]
 #[command(name = "sshm")]
@@ -76,6 +76,9 @@ enum Commands {
     /// Check for updates
     CheckUpdate,
 
+    /// Replace the installed binary with the latest release
+    Update,
+
     /// Open an inline picker to select a Connection (insert, don't execute)
     Pick {
         /// Seed the picker with an initial fuzzy query (for shell widget integration)
@@ -93,21 +96,40 @@ enum ShellType {
     Bash,
 }
 
-fn main() -> io::Result<()> {
-    run_main(
+/// Runs the CLI. An error is one line on stderr and exit 1: the message is
+/// printed by its `Display`, not its `Debug`, because these messages are for
+/// a user at a terminal — `Error: Custom { kind: Uncategorized, error: "…" }`
+/// is how an `io::Result` from `main` reports them, and it hides the one fact
+/// the user needs (#46).
+fn main() -> std::process::ExitCode {
+    match run_main(
         run_frame_command,
         update::force_check_for_update,
         update::cached_update_version,
-    )
+        update::apply_update,
+    ) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_main(
     run_frame_fn: fn(Emit, &mut dyn connections::Store, String, Option<String>) -> io::Result<()>,
     check_update_fn: fn() -> UpdateResult,
     read_note_fn: fn() -> Option<String>,
+    apply_update_fn: fn() -> ApplyResult,
 ) -> io::Result<()> {
     let cli = Cli::parse();
-    dispatch(cli, run_frame_fn, check_update_fn, read_note_fn)
+    dispatch(
+        cli,
+        run_frame_fn,
+        check_update_fn,
+        read_note_fn,
+        apply_update_fn,
+    )
 }
 
 /// Dispatch on an already-parsed CLI. Separated from `run_main` so tests can
@@ -128,11 +150,16 @@ fn run_main(
 /// only on the `--check-update` path, never on a frame path; the two readers
 /// are separate injected functions precisely so a test can prove that
 /// separation (see `check_update_must_not_run`).
+///
+/// `apply_update_fn` is **Apply Update** (#46) — the only function reachable
+/// from here that rewrites a file on disk, which is why it is injected like
+/// the other three: no dispatch test can replace a real binary.
 fn dispatch(
     cli: Cli,
     run_frame_fn: fn(Emit, &mut dyn connections::Store, String, Option<String>) -> io::Result<()>,
     check_update_fn: fn() -> UpdateResult,
     read_note_fn: fn() -> Option<String>,
+    apply_update_fn: fn() -> ApplyResult,
 ) -> io::Result<()> {
     // Handle completions command
     if let Some(Commands::Completions { shell }) = cli.command {
@@ -158,6 +185,24 @@ fn dispatch(
         }
     }
 
+    // `sshm update` — Apply Update (#46). Handled with the other non-frame
+    // paths, and *before* the single cached note read, so it can never
+    // pollute a captured stdout and can never fall through into a frame.
+    // Every branch returns.
+    if let Some(Commands::Update) = cli.command {
+        return match apply_update_fn() {
+            ApplyResult::Applied { from, to } => {
+                println!("sshm {from} → {to}");
+                Ok(())
+            }
+            ApplyResult::UpToDate { version } => {
+                println!("sshm {version} is already the latest release.");
+                Ok(())
+            }
+            other => Err(io::Error::other(apply_failure_text(&other))),
+        };
+    }
+
     // `sshm pick` — the insert emit. Runs before the update checker so a
     // captured stdout is never polluted by it, and returns straight from
     // the frame. The note is read from cache here, once, before the frame
@@ -180,22 +225,27 @@ fn dispatch(
         return run_frame_fn(Emit::Edit, &mut config, String::new(), note);
     }
 
-    // Handle check-update flag or command
+    // `sshm check-update` / `-c` — purely a question (#46). It reports
+    // whether a newer release exists and names the command that installs it;
+    // it downloads nothing and writes no binary anywhere. Every branch
+    // returns: the error branch used to print and fall through into the `add`
+    // handling and then a frame, which is acceptable for nobody and absurd
+    // after a command that only asked a question.
     if cli.check_update || matches!(cli.command, Some(Commands::CheckUpdate)) {
-        match check_update_fn() {
+        return match check_update_fn() {
             UpdateResult::UpdateAvailable { version } => {
-                println!("Update available: v{}", version);
-                println!("Run again without flag to update automatically.");
-                return Ok(());
+                println!("Update available: v{version}");
+                println!("Install it with: sshm update");
+                Ok(())
             }
             UpdateResult::NoUpdate => {
                 println!("No update available.");
-                return Ok(());
+                Ok(())
             }
             UpdateResult::Error(e) => {
-                eprintln!("Error checking for updates: {}", e);
+                Err(io::Error::other(format!("Error checking for updates: {e}")))
             }
-        }
+        };
     }
 
     // Handle add command
@@ -217,6 +267,37 @@ fn dispatch(
     // once above, before the frame opens (#39).
     let mut config = config::Config::load();
     run_frame_fn(Emit::Execute, &mut config, String::new(), note)
+}
+
+/// The text `sshm update` prints when it did **not** replace the binary.
+///
+/// A function returning a String rather than a handful of `eprintln!`s so the
+/// contract is assertable: the `install.sh` escape hatch appears on exactly
+/// one failure — the one self-update can never work around. A network blip,
+/// a rate limit and a missing asset all want a retry, and printing the
+/// reinstall incantation beside them would train users to reach for the
+/// sledgehammer every time GitHub hiccups (#46).
+fn apply_failure_text(result: &ApplyResult) -> String {
+    match result {
+        ApplyResult::Unwritable { path } => format!(
+            "cannot update: {} is not writable by this user.\n\
+             Nothing was downloaded and nothing was changed. To update, install the \
+             latest release with:\n\
+             \x20 curl -sL https://raw.githubusercontent.com/titonio/ssh-manager/master/install.sh | bash",
+            path.display()
+        ),
+        ApplyResult::DevBuild { manifest_dir } => format!(
+            "refusing to update a Dev Build: CARGO_MANIFEST_DIR is set to {manifest_dir}, \
+             so this binary is running from a source checkout rather than an installed \
+             location.\n\
+             sshm never replaces a binary the developer owns."
+        ),
+        ApplyResult::Error(reason) => format!("update failed: {reason}"),
+        // Not failures. Dispatch prints these on stdout and exits 0, so it
+        // never asks for their failure text; an empty string is the honest
+        // answer to a question that cannot be asked here.
+        ApplyResult::Applied { .. } | ApplyResult::UpToDate { .. } => String::new(),
+    }
 }
 
 /// The first-run import offer's predicate (#38): what an import from
@@ -677,6 +758,44 @@ pub mod tests {
         panic!("the frame paths must never reach the update checker");
     }
 
+    /// The frame runner for the paths that must never paint one: reaching it
+    /// *is* the failure (#46).
+    fn frame_must_not_run(
+        _emit: Emit,
+        _store: &mut dyn connections::Store,
+        _query: String,
+        _note: Option<String>,
+    ) -> io::Result<()> {
+        panic!("neither update command may open a frame");
+    }
+
+    /// The applier for every path that must not act. Reaching it is the
+    /// failure: it is the one function reachable from dispatch that rewrites
+    /// a file on disk, so no frame path — and no check — is allowed anywhere
+    /// near it (#46).
+    fn apply_update_must_not_run() -> ApplyResult {
+        panic!("only `sshm update` may reach the applier");
+    }
+
+    thread_local! {
+        static APPLY_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// The applier most dispatch tests use: it records that it was reached
+    /// and reports success. No dispatch test ever reaches the real applier,
+    /// which is the only code that can replace a binary (#46).
+    fn record_apply() -> ApplyResult {
+        APPLY_CALLS.with(|c| c.set(c.get() + 1));
+        ApplyResult::Applied {
+            from: "0.1.12".to_string(),
+            to: "0.1.13".to_string(),
+        }
+    }
+
+    fn take_applies() -> usize {
+        APPLY_CALLS.with(|c| c.replace(0))
+    }
+
     /// The cache-only note reader most frame tests use: no cached version,
     /// so no note. Distinct from `check_update_must_not_run` — this one is
     /// *expected* to run on the frame path (it reads a file, not the
@@ -699,7 +818,14 @@ pub mod tests {
             command: None,
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
+        dispatch(
+            cli,
+            record_frame,
+            check_update_must_not_run,
+            no_cached_note,
+            apply_update_must_not_run,
+        )
+        .unwrap();
         assert_eq!(
             take_calls(),
             vec![FrameCall {
@@ -718,7 +844,14 @@ pub mod tests {
             }),
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
+        dispatch(
+            cli,
+            record_frame,
+            check_update_must_not_run,
+            no_cached_note,
+            apply_update_must_not_run,
+        )
+        .unwrap();
         assert_eq!(
             take_calls(),
             vec![FrameCall {
@@ -735,7 +868,14 @@ pub mod tests {
             command: Some(Commands::Manage),
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
+        dispatch(
+            cli,
+            record_frame,
+            check_update_must_not_run,
+            no_cached_note,
+            apply_update_must_not_run,
+        )
+        .unwrap();
         assert_eq!(
             take_calls(),
             vec![FrameCall {
@@ -752,7 +892,14 @@ pub mod tests {
             command: Some(Commands::Pick { query: None }),
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
+        dispatch(
+            cli,
+            record_frame,
+            check_update_must_not_run,
+            no_cached_note,
+            apply_update_must_not_run,
+        )
+        .unwrap();
         assert_eq!(
             take_calls(),
             vec![FrameCall {
@@ -782,6 +929,7 @@ pub mod tests {
             record_frame,
             check_update_must_not_run,
             cached_note_present,
+            apply_update_must_not_run,
         )
         .unwrap();
         assert_eq!(
@@ -809,6 +957,7 @@ pub mod tests {
             record_frame,
             check_update_must_not_run,
             cached_note_present,
+            apply_update_must_not_run,
         )
         .unwrap();
         assert_eq!(
@@ -833,6 +982,7 @@ pub mod tests {
             record_frame,
             check_update_must_not_run,
             cached_note_present,
+            apply_update_must_not_run,
         )
         .unwrap();
         assert_eq!(
@@ -853,7 +1003,14 @@ pub mod tests {
             }),
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
+        dispatch(
+            cli,
+            record_frame,
+            check_update_must_not_run,
+            no_cached_note,
+            apply_update_must_not_run,
+        )
+        .unwrap();
         assert!(take_calls().is_empty());
     }
 
@@ -867,7 +1024,14 @@ pub mod tests {
             }),
             check_update: false,
         };
-        dispatch(cli, record_frame, check_update_must_not_run, no_cached_note).unwrap();
+        dispatch(
+            cli,
+            record_frame,
+            check_update_must_not_run,
+            no_cached_note,
+            apply_update_must_not_run,
+        )
+        .unwrap();
         assert!(take_calls().is_empty());
     }
 
@@ -880,8 +1044,176 @@ pub mod tests {
             command: None,
             check_update: true,
         };
-        dispatch(cli, record_frame, no_update, no_cached_note).unwrap();
+        dispatch(
+            cli,
+            record_frame,
+            no_update,
+            no_cached_note,
+            apply_update_must_not_run,
+        )
+        .unwrap();
         assert!(take_calls().is_empty(), "-c checks, it does not frame");
+    }
+
+    // ── Apply Update: one command that acts, and never paints (#46) ──────
+
+    /// `sshm update` is the act, not the question: it reaches the injected
+    /// applier exactly once. The frame function here panics, so the test
+    /// passing at all is the proof that updating never opens a frame — and
+    /// the checker function panics too, because applying is not checking.
+    #[test]
+    fn update_reaches_the_applier_exactly_once_and_never_a_frame() {
+        let cli = Cli {
+            command: Some(Commands::Update),
+            check_update: false,
+        };
+        dispatch(
+            cli,
+            frame_must_not_run,
+            check_update_must_not_run,
+            no_cached_note,
+            record_apply,
+        )
+        .unwrap();
+        assert_eq!(take_applies(), 1);
+        assert!(take_calls().is_empty());
+    }
+
+    /// An up to date install is a success, not an error: exit 0, nothing to
+    /// report but that fact, and no frame (#46).
+    #[test]
+    fn an_up_to_date_update_is_a_success_that_never_frames() {
+        fn up_to_date() -> ApplyResult {
+            ApplyResult::UpToDate {
+                version: "0.1.12".to_string(),
+            }
+        }
+        let cli = Cli {
+            command: Some(Commands::Update),
+            check_update: false,
+        };
+        let before = take_calls();
+        dispatch(
+            cli,
+            frame_must_not_run,
+            check_update_must_not_run,
+            no_cached_note,
+            up_to_date,
+        )
+        .expect("nothing to do is not a failure");
+        assert!(before.is_empty() && take_calls().is_empty());
+    }
+
+    /// A failed apply is a non-zero exit and no frame — the error path that
+    /// used to fall through into opening one is closed (#46).
+    #[test]
+    fn a_failed_update_exits_non_zero_and_never_frames() {
+        fn failed() -> ApplyResult {
+            ApplyResult::Error("api request failed with status: 403".to_string())
+        }
+        let cli = Cli {
+            command: Some(Commands::Update),
+            check_update: false,
+        };
+        let err = dispatch(
+            cli,
+            frame_must_not_run,
+            check_update_must_not_run,
+            no_cached_note,
+            failed,
+        )
+        .expect_err("a failed update must not report success");
+        assert!(
+            format!("{err}").contains("403"),
+            "the underlying error is surfaced unedited, got: {err}"
+        );
+        assert!(take_calls().is_empty());
+    }
+
+    /// A failed check is the same: non-zero, and no frame. This is the
+    /// fall-through that made a network blurb print `Error: Os { code: 6 }`
+    /// from a frame nobody asked for (#46).
+    #[test]
+    fn a_failed_check_update_exits_non_zero_and_never_frames() {
+        fn failed() -> UpdateResult {
+            UpdateResult::Error("Failed to fetch releases".to_string())
+        }
+        for cli in [
+            Cli {
+                command: None,
+                check_update: true,
+            },
+            Cli {
+                command: Some(Commands::CheckUpdate),
+                check_update: false,
+            },
+        ] {
+            dispatch(
+                cli,
+                frame_must_not_run,
+                failed,
+                no_cached_note,
+                apply_update_must_not_run,
+            )
+            .expect_err("a failed check must not report success");
+            assert!(take_calls().is_empty());
+        }
+    }
+
+    // ── what each failure says, and where the escape hatch appears (#46) ──
+
+    /// Permission is the one failure self-update can never work around, so
+    /// it is the only one that prints `install.sh` — and it must name the
+    /// binary it could not write, or the user cannot act on it.
+    #[test]
+    fn an_unwritable_install_location_names_the_binary_and_offers_install_sh() {
+        let text = apply_failure_text(&ApplyResult::Unwritable {
+            path: "/usr/local/bin/sshm".into(),
+        });
+        assert!(
+            text.contains("/usr/local/bin/sshm"),
+            "the unwritable path must be named: {text}"
+        );
+        assert!(
+            text.contains("install.sh"),
+            "the escape hatch belongs here: {text}"
+        );
+    }
+
+    /// A Dev Build is refused on principle, not on permissions. The variable
+    /// is the whole explanation, so it must be named; `install.sh` is not the
+    /// answer to "you are running from a checkout" (#46).
+    #[test]
+    fn a_dev_build_refusal_names_the_variable_that_marks_it() {
+        let text = apply_failure_text(&ApplyResult::DevBuild {
+            manifest_dir: "/home/dev/ssh-manager/sshm".into(),
+        });
+        assert!(
+            text.contains("CARGO_MANIFEST_DIR"),
+            "a refusal must say what made it: {text}"
+        );
+        assert!(
+            !text.contains("install.sh"),
+            "a checkout is not a permissions problem: {text}"
+        );
+    }
+
+    /// A network blip, a rate limit and a missing asset all want a retry,
+    /// not a reinstallation. Printing `install.sh` here would train users to
+    /// reach for the sledgehammer every time GitHub hiccups (#46).
+    #[test]
+    fn a_retryable_failure_asks_for_a_retry_and_not_for_install_sh() {
+        for reason in [
+            "api request failed with status: 403",
+            "No asset found for target: `aarch64-apple-darwin`",
+        ] {
+            let text = apply_failure_text(&ApplyResult::Error(reason.to_string()));
+            assert!(text.contains(reason), "the reason is kept: {text}");
+            assert!(
+                !text.contains("install.sh"),
+                "no escape hatch for a retryable failure: {text}"
+            );
+        }
     }
 
     // ── first-run import offer predicate (#38) ──────────────────────────

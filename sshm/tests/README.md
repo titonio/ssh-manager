@@ -39,11 +39,20 @@ bytes the frame emits, which a glyph snapshot cannot.
 | `tests/inline_test.rs` | The live half: `diff_rows`, `settle_trace`, `plan_resize`, and the driver — including that it never enters the alternate screen |
 | `tests/main_tests.rs` | `ssh` argument building and execution plumbing |
 
-Typical shape of a green run: **347 passed / 0 failed / 2 ignored**. The two
-ignored tests are the update-cache time-boundary cases
-(`update::tests::test_cache_duration_threshold`,
-`update::tests::test_cache_just_under_threshold`), which are date-sensitive
-and left off by default.
+Typical shape of a green run: **576 passed / 0 failed / 4 ignored**, and it is
+green with the network unplugged. The four ignored tests are:
+
+| Ignored test | Why |
+|---|---|
+| `update::tests::test_cache_duration_threshold`, `test_cache_just_under_threshold` | Date-sensitive: they straddle the 24 h cache boundary |
+| `update::tests::test_force_check_for_update_basic`, `test_force_check_for_update_returns_result_variant` | They ask GitHub's `releases/latest` endpoint for real. Run them by hand with `cargo test -- --ignored` to prove the endpoint, the target triple and the asset naming still agree |
+
+No other test may reach the network, and no test may replace a binary. The two
+things that make that hold are the injected functions every `dispatch` test is
+wired with (`apply_update_must_not_run` panics if a check or a frame path ever
+reaches the applier) and `NotACheckout` in `update.rs`, which restores
+`CARGO_MANIFEST_DIR` after a test borrowed the absence of it to pose as an
+installed binary.
 
 ## Running
 
@@ -102,11 +111,16 @@ about bytes no contrast table can measure. This is the step that satisfies
   asserts the input is non-empty first, so a moved emitter fails loudly
   instead of passing vacuously.
 
-## Known flake
+## The flake that was
 
-`update::tests::test_should_check_update_no_cache` can fail intermittently,
-unrelated to any change under review. `should_check_update()` short-circuits
+`update::tests::test_should_check_update_no_cache` used to fail intermittently,
+unrelated to any change under review: `should_check_update()` short-circuits
 when `CARGO_MANIFEST_DIR` is set, and sibling tests in the same module
-`remove_var` that variable to pose as an installed binary. Those siblings are
-`#[serial]`, but this one is not, so it can be scheduled inside their window.
-Re-running passes; the fix is to put the same `#[serial]` on it.
+`remove_var`-ed that variable to pose as an installed binary and left it
+removed for whoever ran next.
+
+It is closed from both ends: that test carries `#[serial]`, and every test that
+clears the variable now does it through `NotACheckout`, which puts it back on
+the way out. Leaving it cleared was not merely a flake after #46 — with no
+`CARGO_MANIFEST_DIR`, a sibling check test could make a real request from what
+is meant to be an offline suite.

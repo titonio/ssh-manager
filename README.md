@@ -15,7 +15,7 @@ shell — no alternate screen, no takeover — built with Rust and Ratatui.
 - **Non-Standard Ports**: Configure custom SSH ports (default: 22)
 - **Inline Picker**: Filter-as-you-type selector triggered from the shell (Ctrl+Alt+S, or `**<TAB>` in zsh)
 - **Shell Integration**: `sshm init zsh|bash` emits ZLE/widget scripts with trigger bindings
-- **Automatic Updates**: Built-in update checker with GitHub release integration
+- **Updates You Can Apply**: `sshm check-update` asks whether a newer release exists; `sshm update` downloads it and replaces the installed binary in place
 - **Transparent Frame**: A Clack-grammar frame (`◆` step, `│` rail, `❯` cursor) that borrows your terminal's own background — no alternate screen, no painted panel
 
 ## Installation
@@ -67,7 +67,8 @@ Three commands open the same inline frame and differ only in what Enter means
 | `sshm add` | Add a new SSH connection without the frame |
 | `sshm init zsh\|bash` | Emit the shell integration script |
 | `sshm completions <shell>` | Generate shell completion scripts |
-| `sshm check-update` | Check for updates |
+| `sshm check-update` | Ask whether a newer release exists, and name `sshm update` as the way to install it. Downloads nothing, writes nothing |
+| `sshm update` | Replace the installed binary with the latest release: prints `sshm 0.1.12 → 0.1.13`, never prompts, never opens a frame. Refuses a Dev Build, and reports the `install.sh` route when the install directory is not writable |
 
 `Esc` / `Ctrl-C` cancels any frame, leaves the shell buffer untouched, and
 exits 130.
@@ -318,7 +319,8 @@ The project uses GitHub Actions for:
 
 ## Version History
 
-- **0.1.12** - Current version with fixed shell init: normal TAB completion survives `sshm init zsh` (non-dot fallthrough), and bash never rebinds TAB
+- **0.1.13** - `sshm update`: a real Apply Update. It replaces the installed binary in place and prints `sshm 0.1.12 → 0.1.13`; `sshm check-update` is now purely a question and downloads nothing; the update surfaces say only what is true. **A binary at 0.1.12 or older has no working update path — run `install.sh` once to get this one; no in-app update can reach it**
+- **0.1.12** - fixed shell init: normal TAB completion survives `sshm init zsh` (non-dot fallthrough), and bash never rebinds TAB
 - **0.1.11** - the new inline Clack-style frame (add, edit, delete, pick), a design-token theme layer, cached update notes, and a rustls security bump
 - **0.1.10** - `**<TAB>` completion trigger, bash support for `sshm init`, `--no-bind` flag, and serialized test fixes
 - **0.1.9** - Inline picker, shell init scripts (zsh + bash), and `**<TAB>` completion trigger

@@ -2103,6 +2103,8 @@ version = "0.39.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e84b03873bd4930d0207b9bf12be4ca4d29f7627913f244eb8e1722d5994e85a"
 dependencies = [
+ "either",
+ "flate2",
  "http 0.2.12",
  "indicatif",
  "log 0.4.33",
@@ -2332,16 +2334,13 @@ dependencies = [
  "clap_complete",
  "crossterm 0.28.1",
  "dirs",
- "flate2",
  "fuzzy-matcher",
  "insta",
  "ratatui",
- "reqwest",
  "self-github-update-enhanced",
  "serde",
  "serde_json",
  "serial_test",
- "tar",
  "tempfile",
  "unicode-width",
  "uuid",
