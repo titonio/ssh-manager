@@ -6,6 +6,12 @@ on:
     tags: [ 'v*' ]
   pull_request:
     branches: [ master ]
+  # The release build jobs are gated on a tag, which means a cross-compile
+  # recipe can otherwise only be proven by pushing a tag — that is, by
+  # shipping. This trigger runs the same build jobs off-tag so the artifact
+  # can be inspected first. The `release` job deliberately keeps its tag-only
+  # condition: a dispatch builds, it never publishes.
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -187,7 +193,7 @@ jobs:
   # each target is built, stripped, and run, instead of the same
   # `if target == aarch64` question asked three times.
   build-linux:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     needs: [test, coverage, security]
     runs-on: ubuntu-latest
     strategy:
@@ -197,10 +203,25 @@ jobs:
             build: cargo build
             strip: strip
             run: ""
+            # Ubuntu's GCC defaults to PIE, so plain `cargo build` against
+            # musl-tools already yields a static-pie ELF. Nothing added here;
+            # the flags are spelled out only so both legs state their intent
+            # rather than one inheriting a default nobody chose.
+            rustflags: "-D warnings"
           - target: aarch64-unknown-linux-musl
             build: cargo zigbuild
             strip: aarch64-linux-gnu-strip
             run: qemu-aarch64-static
+            # Zig links aarch64 musl as a non-PIE static ELF by default, and
+            # Android's kernel refuses to exec a non-PIE binary. Without
+            # these flags the installer downloads the asset, verifies its
+            # checksum, extracts it, and then dies at `--version` on Termux
+            # with nothing to show but a swallowed exec error (#50).
+            # `+crt-static` keeps it static; `pic` + `-pie` make it
+            # position independent, matching what the x86_64 leg gets for
+            # free. A step-level RUSTFLAGS replaces the workflow-level one,
+            # so `-D warnings` is repeated rather than inherited.
+            rustflags: "-D warnings -C target-feature=+crt-static -C relocation-model=pic -C link-arg=-pie"
     steps:
     - uses: actions/checkout@v4
 
@@ -243,10 +264,28 @@ jobs:
         workspaces: sshm
 
     - name: Build release
+      env:
+        RUSTFLAGS: ${{ matrix.rustflags }}
       run: ${{ matrix.build }} --release --target ${{ matrix.target }} --manifest-path sshm/Cargo.toml
 
     - name: Strip binary
       run: ${{ matrix.strip }} sshm/target/${{ matrix.target }}/release/sshm
+
+    # The run-check below cannot catch this. qemu emulates the CPU and the
+    # Linux syscalls and happily executes a non-PIE aarch64 binary, so a
+    # static-but-non-PIE link passes `--version` under emulation and then
+    # fails on Termux, where the kernel rejects non-PIE outright. The ELF
+    # header is the only cheap place that can tell the two apart, so it is
+    # asserted here rather than discovered by a user's installer (#50).
+    - name: Assert the binary is position-independent
+      run: |
+        bin=sshm/target/${{ matrix.target }}/release/sshm
+        elf_type=$(readelf -h "$bin" | awk '/Type:/{print $2}')
+        echo "$bin -> ELF type: $elf_type"
+        if [ "$elf_type" != "DYN" ]; then
+          echo "::error::${{ matrix.target }} linked as '$elf_type', not PIE (expected DYN). Android 5.0+ refuses to exec non-PIE, so every Termux install would fail after a verified download."
+          exit 1
+        fi
 
     - name: Get version from Cargo.toml
       id: cargo_version
