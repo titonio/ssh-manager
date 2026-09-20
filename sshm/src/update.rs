@@ -1,8 +1,6 @@
-use flate2::read::GzDecoder;
-use self_github_update_enhanced::backends::github::{ReleaseList, Update};
+use self_github_update_enhanced::backends::github::Update;
 use self_github_update_enhanced::Status;
 use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,6 +11,210 @@ pub enum UpdateResult {
     NoUpdate,
     UpdateAvailable { version: String },
     Error(String),
+}
+
+/// The outcome of **Apply Update** — the act that replaces the installed
+/// binary.
+///
+/// A different type from [`UpdateResult`] on purpose: "a newer release
+/// exists" and "the installed binary was replaced" are two facts, and one
+/// enum case each. `UpdateAvailable` never means *installed*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyResult {
+    /// The installed binary was replaced. The next `sshm` to start is `to`.
+    Applied { from: String, to: String },
+    /// The running binary is already the newest release. Nothing was
+    /// downloaded and nothing was written, and this is a success.
+    UpToDate { version: String },
+    /// Apply Update cannot structurally succeed here: the directory the swap
+    /// would target cannot be written by this user. The way out is
+    /// `install.sh`, which escalates correctly.
+    Unwritable { path: std::path::PathBuf },
+    /// This binary is a **Dev Build** — it is running from a source checkout
+    /// and is therefore not sshm's to replace.
+    DevBuild { manifest_dir: String },
+    /// The check or the swap failed. Nothing was replaced.
+    Error(String),
+}
+
+/// The one update configuration sshm builds: the repository, the binary,
+/// this platform's asset target, and the version running right now.
+///
+/// Three settings here carry weight:
+///
+/// * `bin_install_path` is left **unset**, so the library's own `current_exe`
+///   resolution is the single answer to *which* binary gets replaced. A path
+///   computed here could disagree with the one the swap performs.
+/// * `no_confirm(true)` is load-bearing, not incidental: without it the
+///   library blocks on an interactive `[Y/n]` inside a command that must
+///   never block, TTY or not.
+/// * `show_output(false)` and `show_download_progress(true)` are independent
+///   switches. The first silences the library's narration — its progress
+///   lines, its release-status block, and its `New release is *NOT*
+///   compatible` line, which is wrong-scary for a 0.x project, where that
+///   comparison reports incompatibility on every minor bump. The second keeps
+///   the one piece of its output worth having: several megabytes downloading
+///   with no feedback reads as a hang.
+///
+/// `bin_path_in_archive("sshm")` is the Unix binary. The Windows asset carries
+/// `sshm.exe`, so `sshm update` on Windows would download and then fail to
+/// extract — which is the accepted state of affairs: ADR-0002 declines Windows
+/// Windows outright, and `install.sh` refuses Windows before anyone gets a
+/// binary to update. Fixing the name here would imply the swap works, which is
+/// the claim nobody has tested.
+fn update_config(
+    current_version: &str,
+) -> Result<Box<dyn self_github_update_enhanced::update::ReleaseUpdate>, String> {
+    let asset_name = get_platform_asset_name()?;
+
+    Update::configure()
+        .repo_owner("titonio")
+        .repo_name("ssh-manager")
+        .bin_name("sshm")
+        .bin_path_in_archive("sshm")
+        .target(&asset_name)
+        .current_version(current_version)
+        .no_confirm(true)
+        .show_output(false)
+        .show_download_progress(true)
+        .build()
+        .map_err(|e| format!("Failed to build update configuration: {e}"))
+}
+
+/// The one level of symlink resolution `self_replace` performs before it
+/// stages the new binary: a symlinked install points at the file at risk, and
+/// that is the name a diagnostic has to give.
+///
+/// Deliberately one level, and deliberately the same one: resolve more, or
+/// not at all, and sshm probes a directory the swap never writes to.
+///
+/// The result is always anchored. A stored target of `../lib/sshm` is relative
+/// to the link, not to the process, so taking it literally would have the probe
+/// test the user's current directory — pass, download, and name a path with
+/// nothing to do with the binary at risk.
+fn resolved_target(exe: &std::path::Path) -> PathBuf {
+    if !fs::symlink_metadata(exe).is_ok_and(|m| m.file_type().is_symlink()) {
+        return exe.to_path_buf();
+    }
+
+    let stored = match fs::read_link(exe) {
+        Ok(target) => target,
+        Err(_) => return exe.to_path_buf(),
+    };
+
+    let anchored = if stored.is_absolute() {
+        stored
+    } else {
+        match exe.parent() {
+            Some(dir) => dir.join(stored),
+            None => return exe.to_path_buf(),
+        }
+    };
+    collapse(&anchored)
+}
+
+/// Collapse `.` and `..` by name, so a diagnostic prints one path instead of a
+/// walk through it.
+///
+/// `Path::canonicalize` is the other tool here and it is the wrong one: it
+/// resolves *every* symlink and insists the file exists, which is precisely the
+/// extra resolution this command is not allowed to assume.
+fn collapse(path: &std::path::Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    // A `..` with nothing to pop: keep it and let the probe's
+                    // own failure be the answer.
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Can this user create a file in the directory the swap stages into?
+///
+/// `self_replace` writes the new binary to a temp file **beside** the target
+/// and `rename`s over it, so that question *is* "can this binary be replaced
+/// in place" — no `ETXTBSY`, no second filesystem, no privilege dance. Asking
+/// it before the download is what keeps several megabytes from arriving just
+/// to be thrown away, and it is the only way to promise a diagnostic that
+/// names the path.
+///
+/// The probe is advisory. If it passes and the swap still fails, the swap's
+/// own error is what gets reported, unedited.
+fn install_dir_writable(target: &std::path::Path) -> bool {
+    let Some(dir) = target.parent() else {
+        return false;
+    };
+    let probe = dir.join(format!(".sshm-write-probe-{}", std::process::id()));
+
+    // `create_new` rather than `create`: the probe must not open or truncate
+    // something that is already there, whatever it is.
+    match fs::File::create_new(&probe) {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// The binary `sshm update` will replace: the running executable, resolved the
+/// way the swap resolves it.
+fn replace_target() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("Failed to resolve the running binary: {e}"))?;
+    Ok(resolved_target(&exe))
+}
+
+/// **Apply Update**: replace the installed binary with the latest release.
+///
+/// Release selection is not ours. The library asks GitHub's
+/// `releases/latest` endpoint — highest semver, drafts and prereleases
+/// excluded — and refuses anything that is not strictly greater, which is
+/// what makes a downgrade impossible from here.
+pub fn apply_update() -> ApplyResult {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+
+    // First, and before anything else touches the network: a checkout's
+    // binary is not ours to rewrite.
+    if let Some(manifest_dir) = dev_build() {
+        return ApplyResult::DevBuild { manifest_dir };
+    }
+
+    // Then: can the install location be written at all? Asking before the
+    // download is what makes "nothing was downloaded" true, and it is the
+    // only way the diagnostic can name the path. No second install location
+    // is offered as a workaround — a shadowed binary reproducing "`which
+    // sshm` and `sshm --version` disagree" is the confusion this command
+    // exists to end.
+    let target = match replace_target() {
+        Ok(target) => target,
+        Err(e) => return ApplyResult::Error(e),
+    };
+    if !install_dir_writable(&target) {
+        return ApplyResult::Unwritable { path: target };
+    }
+
+    let update = match update_config(&current_version) {
+        Ok(update) => update,
+        Err(e) => return ApplyResult::Error(e),
+    };
+
+    match update.update() {
+        Ok(Status::UpToDate(version)) => ApplyResult::UpToDate { version },
+        Ok(Status::Updated(version)) => ApplyResult::Applied {
+            from: current_version,
+            to: version,
+        },
+        Err(e) => ApplyResult::Error(e.to_string()),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -119,9 +321,22 @@ fn read_cache_from_path(cache_path: &PathBuf) -> Result<Option<CacheData>, Strin
     Ok(Some(cache))
 }
 
+/// Is this a **Dev Build** — a binary running from a source checkout rather
+/// than an installed location?
+///
+/// `CARGO_MANIFEST_DIR` is what Cargo sets for `cargo run` and `cargo test`,
+/// and it gates two behaviours that must agree: no Update Note, and a refused
+/// `sshm update`. A binary the developer owns is one sshm never rewrites —
+/// under `cargo run -- update` the resolved executable is a build artefact,
+/// and replacing it would overwrite the developer's own work with a release
+/// build.
+fn dev_build() -> Option<String> {
+    std::env::var("CARGO_MANIFEST_DIR").ok()
+}
+
 fn should_check_update() -> Result<bool, String> {
     // If running via cargo, skip update check
-    if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
+    if dev_build().is_some() {
         return Ok(false);
     }
 
@@ -155,10 +370,54 @@ fn get_platform_asset_name() -> Result<String, String> {
     Ok(asset_name.to_string())
 }
 
-pub fn check_for_update() -> UpdateResult {
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
+/// Ask whether a newer release exists, and cache the answer for the note.
+///
+/// The question and nothing else: no archive is downloaded and no binary is
+/// written. **Check for Updates** answers; **Apply Update** acts, and the two
+/// are different commands (#46).
+///
+/// Release selection is not ours. `get_latest_release` asks GitHub's
+/// `releases/latest` endpoint, which returns the highest published semver with
+/// drafts and prereleases excluded — so the ordering defect in #46, which came
+/// from indexing a release list by position and bailing only on an exact
+/// equality, has no code here to live in.
+///
+/// Whether that release is newer is `is_newer` again, the same quiet rule that
+/// guards the cached note: something unparseable is not newer, and a silent
+/// answer beats one that invents a release.
+fn check_latest_version(current_version: &str) -> UpdateResult {
+    let update = match update_config(current_version) {
+        Ok(update) => update,
+        Err(e) => {
+            let _ = write_cache(None);
+            return UpdateResult::Error(e);
+        }
+    };
 
-    // Check if we should check for updates
+    match update.get_latest_release() {
+        Ok(release) => {
+            if is_newer(&release.version, current_version) {
+                let _ = write_cache(Some(release.version.clone()));
+                return UpdateResult::UpdateAvailable {
+                    version: release.version,
+                };
+            }
+            let _ = write_cache(None);
+            UpdateResult::NoUpdate
+        }
+        Err(e) => {
+            let _ = write_cache(None);
+            // The reason, unadorned: the surface that prints this supplies its
+            // own framing, and "Error checking for updates: Failed to check
+            // for updates: …" is what doubling it reads like.
+            UpdateResult::Error(e.to_string())
+        }
+    }
+}
+
+/// Check for Updates, honouring the cache: at most one request per
+/// [`CACHE_DURATION_SECS`], and none at all from a source checkout.
+pub fn check_for_update() -> UpdateResult {
     match should_check_update() {
         Ok(false) => {
             // Read cached result
@@ -180,85 +439,36 @@ pub fn check_for_update() -> UpdateResult {
         Ok(true) => {}
     }
 
-    // Check for updates
-    let asset_name = match get_platform_asset_name() {
-        Ok(name) => name,
-        Err(e) => {
-            let _ = write_cache(None);
-            return UpdateResult::Error(e);
-        }
-    };
-
-    let update_config = match Update::configure()
-        .repo_owner("titonio")
-        .repo_name("ssh-manager")
-        .bin_name("sshm")
-        .bin_path_in_archive("sshm")
-        .target(&asset_name)
-        .current_version(&current_version)
-        .no_confirm(true)
-        .build()
-    {
-        Ok(config) => config,
-        Err(e) => {
-            let _ = write_cache(None);
-            return UpdateResult::Error(format!("Failed to build update configuration: {}", e));
-        }
-    };
-
-    let update_status = match update_config.update() {
-        Ok(status) => status,
-        Err(e) => {
-            let _ = write_cache(None);
-            return UpdateResult::Error(format!("Failed to check for updates: {}", e));
-        }
-    };
-
-    match update_status {
-        Status::UpToDate(_) => {
-            let _ = write_cache(None);
-            UpdateResult::NoUpdate
-        }
-        Status::Updated(new_version) => {
-            let _ = write_cache(Some(new_version.clone()));
-            UpdateResult::UpdateAvailable {
-                version: new_version,
-            }
-        }
-    }
+    force_check_for_update()
 }
 
+/// Check for Updates with the cache ignored: the question `sshm check-update`
+/// and the global `-c` ask. It downloads nothing and writes no binary
+/// anywhere (#46).
 pub fn force_check_for_update() -> UpdateResult {
-    check_for_update_inner()
+    check_latest_version(env!("CARGO_PKG_VERSION"))
 }
 
-/// The update note a frame shows above itself.
-///
-/// `Ok(Some(info))` names both versions of a newer release, `Ok(None)` means
-/// there is nothing to show, and `Err` carries the reason the check failed —
-/// which each surface words in its own way.
-///
-/// Inside a source checkout this returns `Ok(None)` without going near the
 /// The version a previous run cached, with **no network**.
 ///
-/// This is the reader the inline frame's paint path uses (#39). It opens
-/// the cache file and reports the `new_version` a *previous* run left
-/// there — or `None` when there is no cache, the cache holds no update,
-/// the cached version is not newer than the running binary, or the file
-/// cannot be read. It never calls the update checker, never opens a
-/// socket, and never blocks first paint: the whole point of the note is
-/// that it is already known before the frame draws.
+/// This is the reader the inline frame's paint path uses (#39). It opens the
+/// cache file and reports the `new_version` a *previous* run left there — or
+/// `None` when there is no cache, the cache holds no update, the cached
+/// version is not newer than the running binary, or the file cannot be read.
+/// It never calls the update checker, never opens a socket, and never blocks
+/// first paint: the whole point of the note is that it is already known
+/// before the frame draws.
 ///
-/// A source checkout returns `None` without reading: running the tool
-/// from a checkout should not surface a note, and the cache a checkout's
-/// own test runs leave behind is not the user's update state.
+/// A source checkout returns `None` without reading: running the tool from a
+/// checkout should not surface a note, and the cache a checkout's own test
+/// runs leave behind is not the user's update state.
 ///
-/// The cached version is compared against `env!("CARGO_PKG_VERSION")`
-/// before it is returned. After `sshm update` the running binary is the
-/// new version, so the cached note would be a lie; returning `None` here
-/// keeps the note honest without a network round-trip.
+/// The cached version is compared against `env!("CARGO_PKG_VERSION")` before
+/// it is returned. After `sshm update` the running binary *is* the new
+/// version, so the cached note would be a lie; returning `None` here keeps the
+/// note honest without a network round-trip (#46).
 pub fn cached_update_version() -> Option<String> {
-    if std::env::var("CARGO_MANIFEST_DIR").is_ok() {
+    if dev_build().is_some() {
         return None;
     }
 
@@ -282,168 +492,34 @@ pub fn note_from(result: UpdateResult) -> Result<Option<UpdateInfo>, String> {
     }
 }
 
-fn check_for_update_inner() -> UpdateResult {
-    let current_version = env!("CARGO_PKG_VERSION").to_string();
-
-    let asset_name = match get_platform_asset_name() {
-        Ok(name) => name,
-        Err(e) => {
-            let _ = write_cache(None);
-            return UpdateResult::Error(e);
-        }
-    };
-
-    let asset_name_full = format!(
-        "sshm-v{}-{}.tar.gz",
-        current_version.replace("0.1.6", "0.1.7"),
-        asset_name
-    );
-
-    match ReleaseList::configure()
-        .repo_owner("titonio")
-        .repo_name("ssh-manager")
-        .with_target(&asset_name)
-        .build()
-    {
-        Ok(release_list) => match release_list.fetch() {
-            Ok(releases) => {
-                if releases.is_empty() {
-                    let _ = write_cache(None);
-                    return UpdateResult::NoUpdate;
-                }
-
-                let latest = &releases[0];
-                if latest.version == current_version {
-                    let _ = write_cache(None);
-                    return UpdateResult::NoUpdate;
-                }
-
-                let asset = latest.assets.iter().find(|a| a.name.contains(&asset_name));
-
-                let asset = match asset {
-                    Some(a) => a,
-                    None => {
-                        let _ = write_cache(None);
-                        return UpdateResult::Error(format!(
-                            "Asset not found: {}",
-                            asset_name_full
-                        ));
-                    }
-                };
-
-                eprintln!(
-                    "New version available: {} -> {}",
-                    current_version, latest.version
-                );
-                eprintln!("Downloading: {}", asset.name);
-
-                match download_and_extract(&current_version, &latest.version, &asset_name) {
-                    Ok(downloaded_path) => {
-                        eprintln!(
-                            "Binary ready for installation at: {}",
-                            downloaded_path.display()
-                        );
-                        eprintln!("Please restart sshm to use the new version.");
-                        let _ = write_cache(Some(latest.version.clone()));
-                        UpdateResult::UpdateAvailable {
-                            version: latest.version.clone(),
-                        }
-                    }
-                    Err(e) => {
-                        let _ = write_cache(None);
-                        UpdateResult::Error(format!("Failed to download/update: {}", e))
-                    }
-                }
-            }
-            Err(e) => {
-                let _ = write_cache(None);
-                UpdateResult::Error(format!("Failed to fetch releases: {}", e))
-            }
-        },
-        Err(e) => {
-            let _ = write_cache(None);
-            UpdateResult::Error(format!("Failed to build release list: {}", e))
-        }
-    }
-}
-
-fn download_and_extract(
-    _current_version: &str,
-    new_version: &str,
-    asset_name: &str,
-) -> Result<PathBuf, String> {
-    let browser_url = format!(
-        "https://github.com/titonio/ssh-manager/releases/download/v{}/sshm-v{}-{}.tar.gz",
-        new_version, new_version, asset_name
-    );
-
-    eprintln!("Downloading from: {}", browser_url);
-
-    let response = reqwest::blocking::Client::new()
-        .get(&browser_url)
-        .send()
-        .map_err(|e| format!("Failed to download: {}", e))?;
-
-    if !response.status().is_success() {
-        return Err(format!(
-            "Download failed with status: {}",
-            response.status()
-        ));
-    }
-
-    let bytes = response
-        .bytes()
-        .map_err(|e| format!("Failed to read response: {}", e))?;
-
-    let temp_dir = std::env::temp_dir().join("sshm-update");
-    fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
-
-    let archive_path = temp_dir.join(format!("sshm-{}.tar.gz", new_version));
-    let mut file = fs::File::create(&archive_path)
-        .map_err(|e| format!("Failed to create archive file: {}", e))?;
-    file.write_all(&bytes)
-        .map_err(|e| format!("Failed to write archive: {}", e))?;
-
-    eprintln!("Extracting archive...");
-
-    let file =
-        fs::File::open(&archive_path).map_err(|e| format!("Failed to open archive: {}", e))?;
-    let decoder = GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
-
-    let output_path = temp_dir.join("sshm_new");
-
-    // Extract all files from the archive
-    archive
-        .unpack(&temp_dir)
-        .map_err(|e| format!("Failed to extract archive: {}", e))?;
-
-    // Check if sshm was extracted
-    let extracted_path = temp_dir.join("sshm");
-    if !extracted_path.exists() {
-        return Err("Could not find sshm binary in archive".to_string());
-    }
-
-    // Check if sshm was extracted before moving
-    if !extracted_path.exists() {
-        return Err("Could not find sshm binary in archive".to_string());
-    }
-
-    // Move to output path
-    fs::rename(&extracted_path, &output_path)
-        .map_err(|e| format!("Failed to rename extracted binary: {}", e))?;
-
-    eprintln!(
-        "Update downloaded successfully to: {}",
-        output_path.display()
-    );
-    Ok(output_path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    /// Some tests pose as an installed binary by clearing `CARGO_MANIFEST_DIR`.
+    /// This puts it back on the way out, so "no test can reach the network by
+    /// accident" is a property of the harness rather than of test ordering —
+    /// a leaked removal was the documented flake in `tests/README.md`, and
+    /// after #46 it would also be a way for a test to make a real request.
+    struct NotACheckout(Option<std::ffi::OsString>);
+
+    impl NotACheckout {
+        fn take() -> Self {
+            let previous = std::env::var_os("CARGO_MANIFEST_DIR");
+            std::env::remove_var("CARGO_MANIFEST_DIR");
+            Self(previous)
+        }
+    }
+
+    impl Drop for NotACheckout {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("CARGO_MANIFEST_DIR", value),
+                None => std::env::remove_var("CARGO_MANIFEST_DIR"),
+            }
+        }
+    }
 
     #[test]
     #[serial]
@@ -929,18 +1005,33 @@ mod tests {
         assert_eq!(cache_path.extension().unwrap(), "json");
     }
 
+    /// The cache gate, offline: a check less than `CACHE_DURATION_SECS` old
+    /// answers from the file and never opens a socket (#39, #46).
     #[test]
     #[serial]
-    fn test_check_for_update_basic() {
-        let result = check_for_update();
+    fn check_for_update_answers_from_a_fresh_cache_without_a_request() {
+        // Pose as an installed binary: otherwise the dev-build short-circuit
+        // answers first and the freshness gate this test is about never runs.
+        let _not_a_checkout = NotACheckout::take();
+
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        write_cache(Some("0.9.9".to_string())).unwrap();
+
         assert!(matches!(
-            result,
-            UpdateResult::NoUpdate | UpdateResult::UpdateAvailable { .. } | UpdateResult::Error(_)
+            check_for_update(),
+            UpdateResult::UpdateAvailable { version } if version == "0.9.9"
         ));
+
+        fs::remove_file(&cache_path).ok();
     }
 
+    /// Needs network: this asks GitHub's releases API for real. Run it by hand
+    /// with `cargo test -- --ignored` when checking that the endpoint, the
+    /// target triple and the asset naming still agree.
     #[test]
     #[serial]
+    #[ignore]
     fn test_force_check_for_update_basic() {
         let result = force_check_for_update();
         assert!(matches!(
@@ -1175,7 +1266,7 @@ mod tests {
     fn test_should_check_update_with_no_cache() {
         let cache_path = get_cache_file_path().unwrap();
         fs::remove_file(&cache_path).ok();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         let result = should_check_update();
         assert!(result.is_ok());
@@ -1201,7 +1292,7 @@ mod tests {
         fs::remove_file(&cache_path).ok();
         let content = serde_json::to_string(&cache).unwrap();
         fs::write(&cache_path, content).unwrap();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         let result = should_check_update();
         assert!(result.is_ok());
@@ -1222,7 +1313,7 @@ mod tests {
         fs::remove_file(&cache_path).ok();
         let content = serde_json::to_string(&old_cache).unwrap();
         fs::write(&cache_path, content).unwrap();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         let result = should_check_update();
         assert!(result.is_ok());
@@ -1379,6 +1470,11 @@ mod tests {
     #[serial]
     #[ignore]
     fn test_cache_duration_threshold() {
+        // Without this the gate short-circuits on `CARGO_MANIFEST_DIR` and the
+        // assertion below can only ever fail: the sibling test beneath this
+        // one poses as an installed binary and this one never did.
+        let _not_a_checkout = NotACheckout::take();
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1419,7 +1515,7 @@ mod tests {
         fs::remove_file(&cache_path).ok();
         let content = serde_json::to_string(&just_under_24h).unwrap();
         fs::write(&cache_path, content).unwrap();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         let result = should_check_update();
         assert!(result.is_ok());
@@ -1538,23 +1634,12 @@ mod tests {
         fs::remove_file(&test_cache_path).ok();
     }
 
+    /// Needs network: the live question `sshm check-update` asks. Kept
+    /// alongside `test_force_check_for_update_basic` as the manual probe of
+    /// GitHub's `releases/latest` endpoint for this target.
     #[test]
     #[serial]
-    fn test_check_for_update_returns_result_variant() {
-        let result = check_for_update();
-        match result {
-            UpdateResult::NoUpdate => (),
-            UpdateResult::UpdateAvailable { version } => {
-                assert!(!version.is_empty());
-            }
-            UpdateResult::Error(msg) => {
-                assert!(!msg.is_empty());
-            }
-        }
-    }
-
-    #[test]
-    #[serial]
+    #[ignore]
     fn test_force_check_for_update_returns_result_variant() {
         let result = force_check_for_update();
         match result {
@@ -1877,7 +1962,7 @@ mod tests {
             new_version: Some("0.2.0".to_string()),
         };
         fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         assert_eq!(cached_update_version().as_deref(), Some("0.2.0"));
 
@@ -1894,7 +1979,7 @@ mod tests {
             new_version: None,
         };
         fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         assert_eq!(cached_update_version(), None);
 
@@ -1907,7 +1992,7 @@ mod tests {
         let cache_path = get_cache_file_path().unwrap();
         fs::remove_file(&cache_path).ok();
         fs::write(&cache_path, "not json at all").unwrap();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         // A corrupt cache is a silent no-note, never a panic and never a
         // network call: the paint path must survive it.
@@ -1921,7 +2006,7 @@ mod tests {
     fn cached_update_version_is_none_when_there_is_no_cache_at_all() {
         let cache_path = get_cache_file_path().unwrap();
         fs::remove_file(&cache_path).ok();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         assert_eq!(cached_update_version(), None);
     }
@@ -1939,7 +2024,7 @@ mod tests {
             new_version: Some(current),
         };
         fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         assert_eq!(cached_update_version(), None);
 
@@ -1956,7 +2041,7 @@ mod tests {
             new_version: Some("0.0.1".to_string()),
         };
         fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         assert_eq!(cached_update_version(), None);
 
@@ -1973,7 +2058,7 @@ mod tests {
             new_version: Some("not-a-version".to_string()),
         };
         fs::write(&cache_path, serde_json::to_string(&cache).unwrap()).unwrap();
-        std::env::remove_var("CARGO_MANIFEST_DIR");
+        let _not_a_checkout = NotACheckout::take();
 
         // Unparseable = not newer = quiet. A lie is worse than silence.
         assert_eq!(cached_update_version(), None);
@@ -1994,6 +2079,240 @@ mod tests {
         match previous {
             Some(value) => std::env::set_var("CARGO_MANIFEST_DIR", value),
             None => std::env::remove_var("CARGO_MANIFEST_DIR"),
+        }
+    }
+
+    // ── Apply Update: whose binary is it? (#46) ───────────────────────────
+
+    /// A binary running from a source checkout belongs to the developer, and
+    /// sshm never rewrites one. This is the same intent that has always kept
+    /// the Update Note away from a checkout, and the two must agree.
+    ///
+    /// The refusal happens before the update configuration is built, so no
+    /// request goes out: under a test run the network is reachable and this
+    /// still reports the refusal rather than a fetch or a swap.
+    #[test]
+    #[serial]
+    fn a_dev_build_is_refused_and_nothing_is_fetched() {
+        let previous = std::env::var_os("CARGO_MANIFEST_DIR");
+        std::env::set_var("CARGO_MANIFEST_DIR", "/checkout/ssh-manager/sshm");
+
+        assert_eq!(
+            apply_update(),
+            ApplyResult::DevBuild {
+                manifest_dir: "/checkout/ssh-manager/sshm".to_string()
+            }
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("CARGO_MANIFEST_DIR", value),
+            None => std::env::remove_var("CARGO_MANIFEST_DIR"),
+        }
+    }
+
+    // ── Apply Update: can this location be written at all? (#46) ──────────
+    //
+    // The probe is what makes "downloads nothing" true: the swap stages its
+    // temp file in the target's own directory and `rename`s over it, so
+    // whether this user can write the binary is exactly whether they can
+    // create a file there.
+
+    #[test]
+    fn a_writable_install_directory_passes_the_probe_and_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("sshm");
+        fs::write(&target, b"binary").unwrap();
+
+        assert!(install_dir_writable(&target));
+        assert_eq!(
+            fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "the probe must delete the file it made — no litter beside the target"
+        );
+    }
+
+    /// A directory that cannot be written at all: no user, no root, no way
+    /// for an in-app update to work. This is the case the `install.sh`
+    /// escape hatch exists for.
+    #[test]
+    fn a_target_with_no_directory_of_its_own_fails_the_probe() {
+        let missing = std::env::temp_dir()
+            .join("sshm-no-such-install-dir")
+            .join("sshm");
+
+        assert!(!install_dir_writable(&missing));
+    }
+
+    /// `self_replace` follows one level of symlink before it stages the new
+    /// binary, so that is the file at risk — and the name the diagnostic has
+    /// to give. A probe that tested the link's own directory instead would
+    /// pass, and the failure it reported would name a symlink nobody wrote to.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_binary_resolves_to_the_file_the_swap_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("sshm-real");
+        fs::write(&real, b"binary").unwrap();
+        let link = dir.path().join("sshm");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert_eq!(
+            resolved_target(&link),
+            real,
+            "the probe must aim at the file behind the link"
+        );
+        assert_eq!(
+            resolved_target(&real),
+            real,
+            "an ordinary binary is its own target"
+        );
+    }
+
+    /// The whole reason the probe mirrors the symlink: the real binary sits
+    /// in a directory this user cannot write, behind a link in one they can.
+    #[cfg(unix)]
+    #[test]
+    fn a_writable_directory_holding_a_symlink_to_a_locked_one_stays_unwritable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let locked = root.path().join("locked");
+        let open = root.path().join("open");
+        fs::create_dir(&locked).unwrap();
+        fs::create_dir(&open).unwrap();
+
+        let real = locked.join("sshm");
+        fs::write(&real, b"binary").unwrap();
+        let link = open.join("sshm");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Without the symlink resolution this would probe `open`, pass, and
+        // then let a download happen before the swap failed.
+        let target = resolved_target(&link);
+        assert!(!install_dir_writable(&target));
+
+        // Restore so tempdir cleanup can recurse.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A link target is stored relative to the **link**. Read literally,
+    /// `../lib/sshm` resolves against whatever directory the user was standing
+    /// in, so the probe would test a directory nobody installs into — pass,
+    /// download several megabytes, and then name a path with nothing to do with
+    /// the binary at risk.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_symlink_resolves_against_the_link_not_the_working_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        let lib = root.path().join("lib");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(&lib).unwrap();
+        let real = lib.join("sshm");
+        fs::write(&real, b"binary").unwrap();
+
+        let link = bin.join("sshm");
+        std::os::unix::fs::symlink("../lib/sshm", &link).unwrap();
+
+        assert_eq!(
+            resolved_target(&link),
+            root.path().join("lib/sshm"),
+            "the stored target is anchored on the link's own directory, and \
+             the result names one path rather than a walk"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_symlink_target_is_left_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("sshm-real");
+        fs::write(&real, b"binary").unwrap();
+        let link = dir.path().join("sshm");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let resolved = resolved_target(&link);
+        assert!(resolved.is_absolute(), "got {resolved:?}");
+        assert_eq!(resolved, real);
+    }
+
+    // ── Check for Updates asks; Apply Update acts (#46) ───────────────────
+    //
+    // "It downloads nothing" is a claim about a code path that a test cannot
+    // observe without a network, so it is gated the way this repo gates the
+    // other claims about which code paths exist: by reading the source and
+    // asserting what is not in it. Same idiom as the settle-verb gate and the
+    // colour-literal grep in `design_system_test.rs`.
+
+    #[test]
+    fn the_question_never_contains_the_swap() {
+        let source = include_str!("update.rs");
+        assert!(!source.is_empty(), "the gate reads its own input");
+
+        // Only the code, never the test module below it: that is full of
+        // version literals, and of this gate's own strings. Split on `mod
+        // tests`, not on `#[cfg(test)]` — an earlier `#[cfg(test)]` helper
+        // sits mid-file, and splitting there would silently narrow this gate
+        // to the first few hundred lines.
+        let code = source
+            .split("#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("the test module is delimited");
+        assert!(
+            code.contains("fn cached_update_version"),
+            "the gate read the code half of this file, not the tests"
+        );
+
+        // `.update()` is the library call that downloads, extracts and
+        // replaces the binary. Exactly one place in this module may reach it,
+        // and that place is Apply Update.
+        assert_eq!(
+            code.matches(".update()").count(),
+            1,
+            "`sshm check-update` must not be able to replace a binary"
+        );
+        let at = code.find(".update()").unwrap();
+        let enclosing = code[..at].rsplit("fn ").next().unwrap();
+        assert!(
+            enclosing.starts_with("apply_update"),
+            "the swap belongs in apply_update, not in {enclosing}"
+        );
+
+        // And the hand-rolled transport is gone, not merely unused: the
+        // ordering defect in #46 lived in the release listing, so deleting it
+        // is what fixes it.
+        for forbidden in ["reqwest", "flate2", "tar::", "ReleaseList"] {
+            assert!(
+                !code.contains(forbidden),
+                "the update module must not hand-roll {forbidden}: release \
+                 selection belongs to the dependency"
+            );
+        }
+    }
+
+    /// No version string is substituted into another version string anywhere:
+    /// the old "Asset not found" message rewrote `0.1.6` into `0.1.7` and so
+    /// could lie about a second thing at once.
+    #[test]
+    fn no_version_is_substituted_into_another_version() {
+        let source = include_str!("update.rs");
+        let code = source.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        assert!(
+            code.contains("fn cached_update_version"),
+            "the gate read the code half of this file, not the tests"
+        );
+        for stale in ["0.1.6", "0.1.7"] {
+            let offenders = code
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .filter(|l| l.contains(stale))
+                .collect::<Vec<_>>();
+            assert!(
+                offenders.is_empty(),
+                "version literal {stale} in code: {offenders:?}"
+            );
         }
     }
 }

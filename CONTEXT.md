@@ -50,3 +50,22 @@ value that must be settled first. Normalisation (trim, the port's
 empty-to-`22`) is deferred to the Submit Row, so the map never displays a
 value the user did not type.
 _Avoid_: pending input, staged field, settled line
+
+**Update Note**:
+The `◆ update available: v… — run sshm update` line a frame draws above
+itself. Read once from the cache before the frame opens, never from the
+network.
+_Avoid_: banner, notification, popup, reminder
+
+**Check for Updates** / **Apply Update**:
+The two acts the bare word "update" has been covering. Checking answers
+_is there a newer release?_ and changes nothing. Applying replaces the
+installed binary, and is the only act `sshm update` performs. Never write
+"update" unqualified.
+_Avoid_: auto-update, self-update, upgrade
+
+**Dev Build**:
+A binary running from a source checkout rather than an installed location.
+It is out of sshm's custody: it is never replaced, and it is never offered an
+Update Note.
+_Avoid_: debug build, local build, cargo build

@@ -15,7 +15,7 @@ shell — no alternate screen, no takeover — built with Rust and Ratatui.
 - **Non-Standard Ports**: Configure custom SSH ports (default: 22)
 - **Inline Picker**: Filter-as-you-type selector triggered from the shell (Ctrl+Alt+S, or `**<TAB>` in zsh)
 - **Shell Integration**: `sshm init zsh|bash` emits ZLE/widget scripts with trigger bindings
-- **Automatic Updates**: Built-in update checker with GitHub release integration
+- **Updates You Can Apply**: `sshm check-update` asks whether a newer release exists; `sshm update` downloads it and replaces the installed binary in place
 - **Transparent Frame**: A Clack-grammar frame (`◆` step, `│` rail, `❯` cursor) that borrows your terminal's own background — no alternate screen, no painted panel
 
 ## Installation
@@ -25,6 +25,26 @@ shell — no alternate screen, no takeover — built with Rust and Ratatui.
 ```bash
 curl -sL https://raw.githubusercontent.com/titonio/ssh-manager/master/install.sh | bash
 ```
+
+Run the same command again later to update. The installer replaces the `sshm`
+you are *already running* — the one your `PATH` resolves, following one level
+of symlink exactly the way `sshm update` does — instead of dropping a second
+copy in a directory you were never running it from, which is how "I updated
+and nothing changed" happens. It prints the transition as
+`sshm 0.1.12 → 0.1.13`, checks the download against the sha256 GitHub
+publishes with the release, and swaps the binary with an atomic rename staged
+beside the target.
+
+If you are already on the latest release it says so and downloads nothing.
+To reinstall anyway:
+
+```bash
+curl -sL https://raw.githubusercontent.com/titonio/ssh-manager/master/install.sh | bash -s -- --force
+```
+
+It never edits a shell rc file. If the install directory is not on your
+`PATH`, or a second `sshm` is shadowing the one it replaced, the script names
+both paths and tells you what to do about each.
 
 ### Manual Installation
 
@@ -67,7 +87,8 @@ Three commands open the same inline frame and differ only in what Enter means
 | `sshm add` | Add a new SSH connection without the frame |
 | `sshm init zsh\|bash` | Emit the shell integration script |
 | `sshm completions <shell>` | Generate shell completion scripts |
-| `sshm check-update` | Check for updates |
+| `sshm check-update` | Ask whether a newer release exists, and name `sshm update` as the way to install it. Downloads nothing, writes nothing |
+| `sshm update` | Replace the installed binary with the latest release: prints `sshm 0.1.12 → 0.1.13`, never prompts, never opens a frame. Refuses a Dev Build, and reports the `install.sh` route when the install directory is not writable |
 
 `Esc` / `Ctrl-C` cancels any frame, leaves the shell buffer untouched, and
 exits 130.
@@ -314,11 +335,40 @@ The project uses GitHub Actions for:
 - Unit testing
 - Coverage reporting (80% threshold)
 - Security auditing
+- Installer linting (`shellcheck`) and a fixture-driven smoke test of the update path
 - Automatic releases on version tags
+
+### Before releasing a version that touches `sshm update`
+
+No CI job exercises the **in-app** replace path — a runner that swapped the
+binary of its own checkout would prove nothing about an installed one — so
+`sshm update` is verified by hand, per `docs/adr/0002`. The `install.sh`
+route is the opposite case: it runs against a stubbed release API in
+`tests/install/smoke.sh`, so its shadowed, symlinked, unwritable and
+already-latest branches are covered in CI and need no hand run here.
+Run each row, then `sshm --version`, and
+paste the results into the release notes:
+
+| Install | Run |
+|---|---|
+| macOS, Apple Silicon | `which sshm` → `sshm update` → `sshm --version` |
+| macOS, Intel | same |
+| Linux, from `/usr/local/bin` | same |
+| Linux, from `~/.local/bin` | same |
+
+In every row `which sshm` must be unchanged, `sshm --version` must report the new
+version, the binary's permission bits must be the ones it started with, and no
+`.sshm.__temp__*` file may be left beside it. macOS is the row to watch: the swap
+copies bytes, so a byte-identical binary keeps the signature it already carries
+and nothing re-signs it.
+
+A binary at 0.1.12 or older has no working update path and cannot acquire one
+in-app, so the release note must say plainly: run `install.sh` once.
 
 ## Version History
 
-- **0.1.12** - Current version with fixed shell init: normal TAB completion survives `sshm init zsh` (non-dot fallthrough), and bash never rebinds TAB
+- **0.1.13** - `sshm update`: a real Apply Update. It replaces the installed binary in place; `sshm check-update` is now purely a question and downloads nothing; the update surfaces say only what is true. **A binary at 0.1.12 or older has no working update path — run `install.sh` once to get this one; no in-app update can reach it**
+- **0.1.12** - fixed shell init: normal TAB completion survives `sshm init zsh` (non-dot fallthrough), and bash never rebinds TAB
 - **0.1.11** - the new inline Clack-style frame (add, edit, delete, pick), a design-token theme layer, cached update notes, and a rustls security bump
 - **0.1.10** - `**<TAB>` completion trigger, bash support for `sshm init`, `--no-bind` flag, and serialized test fixes
 - **0.1.9** - Inline picker, shell init scripts (zsh + bash), and `**<TAB>` completion trigger
