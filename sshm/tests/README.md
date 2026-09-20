@@ -39,7 +39,7 @@ bytes the frame emits, which a glyph snapshot cannot.
 | `tests/inline_test.rs` | The live half: `diff_rows`, `settle_trace`, `plan_resize`, and the driver — including that it never enters the alternate screen |
 | `tests/main_tests.rs` | `ssh` argument building and execution plumbing |
 
-Typical shape of a green run: **576 passed / 0 failed / 4 ignored**, and it is
+Typical shape of a green run: **578 passed / 0 failed / 4 ignored**, and it is
 green with the network unplugged. The four ignored tests are:
 
 | Ignored test | Why |

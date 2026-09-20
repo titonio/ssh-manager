@@ -317,9 +317,32 @@ The project uses GitHub Actions for:
 - Security auditing
 - Automatic releases on version tags
 
+### Before releasing a version that touches `sshm update`
+
+No CI job exercises the replace path — a runner that swapped the binary of its
+own checkout would prove nothing about an installed one — so the swap is
+verified by hand, per `docs/adr/0002`. Run each row, then `sshm --version`, and
+paste the results into the release notes:
+
+| Install | Run |
+|---|---|
+| macOS, Apple Silicon | `which sshm` → `sshm update` → `sshm --version` |
+| macOS, Intel | same |
+| Linux, from `/usr/local/bin` | same |
+| Linux, from `~/.local/bin` | same |
+
+In every row `which sshm` must be unchanged, `sshm --version` must report the new
+version, the binary's permission bits must be the ones it started with, and no
+`.sshm.__temp__*` file may be left beside it. macOS is the row to watch: the swap
+copies bytes, so a byte-identical binary keeps the signature it already carries
+and nothing re-signs it.
+
+A binary at 0.1.12 or older has no working update path and cannot acquire one
+in-app, so the release note must say plainly: run `install.sh` once.
+
 ## Version History
 
-- **0.1.13** - `sshm update`: a real Apply Update. It replaces the installed binary in place and prints `sshm 0.1.12 → 0.1.13`; `sshm check-update` is now purely a question and downloads nothing; the update surfaces say only what is true. **A binary at 0.1.12 or older has no working update path — run `install.sh` once to get this one; no in-app update can reach it**
+- **0.1.13** - `sshm update`: a real Apply Update. It replaces the installed binary in place; `sshm check-update` is now purely a question and downloads nothing; the update surfaces say only what is true. **A binary at 0.1.12 or older has no working update path — run `install.sh` once to get this one; no in-app update can reach it**
 - **0.1.12** - fixed shell init: normal TAB completion survives `sshm init zsh` (non-dot fallthrough), and bash never rebinds TAB
 - **0.1.11** - the new inline Clack-style frame (add, edit, delete, pick), a design-token theme layer, cached update notes, and a rustls security bump
 - **0.1.10** - `**<TAB>` completion trigger, bash support for `sshm init`, `--no-bind` flag, and serialized test fixes

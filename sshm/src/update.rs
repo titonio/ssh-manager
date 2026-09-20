@@ -55,6 +55,13 @@ pub enum ApplyResult {
 ///   comparison reports incompatibility on every minor bump. The second keeps
 ///   the one piece of its output worth having: several megabytes downloading
 ///   with no feedback reads as a hang.
+///
+/// `bin_path_in_archive("sshm")` is the Unix binary. The Windows asset carries
+/// `sshm.exe`, so `sshm update` on Windows would download and then fail to
+/// extract — which is the accepted state of affairs: ADR-0002 declines Windows
+/// self-update outright, and `install.sh` refuses Windows before anyone gets a
+/// binary to update. Fixing the name here would imply the swap works, which is
+/// the claim nobody has tested.
 fn update_config(
     current_version: &str,
 ) -> Result<Box<dyn self_github_update_enhanced::update::ReleaseUpdate>, String> {
@@ -80,12 +87,54 @@ fn update_config(
 ///
 /// Deliberately one level, and deliberately the same one: resolve more, or
 /// not at all, and sshm probes a directory the swap never writes to.
+///
+/// The result is always anchored. A stored target of `../lib/sshm` is relative
+/// to the link, not to the process, so taking it literally would have the probe
+/// test the user's current directory — pass, download, and name a path with
+/// nothing to do with the binary at risk.
 fn resolved_target(exe: &std::path::Path) -> PathBuf {
-    if fs::symlink_metadata(exe).is_ok_and(|m| m.file_type().is_symlink()) {
-        fs::read_link(exe).unwrap_or_else(|_| exe.to_path_buf())
-    } else {
-        exe.to_path_buf()
+    if !fs::symlink_metadata(exe).is_ok_and(|m| m.file_type().is_symlink()) {
+        return exe.to_path_buf();
     }
+
+    let stored = match fs::read_link(exe) {
+        Ok(target) => target,
+        Err(_) => return exe.to_path_buf(),
+    };
+
+    let anchored = if stored.is_absolute() {
+        stored
+    } else {
+        match exe.parent() {
+            Some(dir) => dir.join(stored),
+            None => return exe.to_path_buf(),
+        }
+    };
+    collapse(&anchored)
+}
+
+/// Collapse `.` and `..` by name, so a diagnostic prints one path instead of a
+/// walk through it.
+///
+/// `Path::canonicalize` is the other tool here and it is the wrong one: it
+/// resolves *every* symlink and insists the file exists, which is precisely the
+/// extra resolution this command is not allowed to assume.
+fn collapse(path: &std::path::Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    // A `..` with nothing to pop: keep it and let the probe's
+                    // own failure be the answer.
+                    out.push(component);
+                }
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Can this user create a file in the directory the swap stages into?
@@ -160,15 +209,10 @@ pub fn apply_update() -> ApplyResult {
 
     match update.update() {
         Ok(Status::UpToDate(version)) => ApplyResult::UpToDate { version },
-        Ok(Status::Updated(version)) => {
-            // The note this version cached is no longer true: the binary
-            // about to start *is* that version.
-            let _ = write_cache(None);
-            ApplyResult::Applied {
-                from: current_version,
-                to: version,
-            }
-        }
+        Ok(Status::Updated(version)) => ApplyResult::Applied {
+            from: current_version,
+            to: version,
+        },
         Err(e) => ApplyResult::Error(e.to_string()),
     }
 }
@@ -1422,6 +1466,11 @@ mod tests {
     #[serial]
     #[ignore]
     fn test_cache_duration_threshold() {
+        // Without this the gate short-circuits on `CARGO_MANIFEST_DIR` and the
+        // assertion below can only ever fail: the sibling test beneath this
+        // one poses as an installed binary and this one never did.
+        let _not_a_checkout = NotACheckout::take();
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -2142,6 +2191,47 @@ mod tests {
 
         // Restore so tempdir cleanup can recurse.
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A link target is stored relative to the **link**. Read literally,
+    /// `../lib/sshm` resolves against whatever directory the user was standing
+    /// in, so the probe would test a directory nobody installs into — pass,
+    /// download several megabytes, and then name a path with nothing to do with
+    /// the binary at risk.
+    #[cfg(unix)]
+    #[test]
+    fn a_relative_symlink_resolves_against_the_link_not_the_working_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("bin");
+        let lib = root.path().join("lib");
+        fs::create_dir(&bin).unwrap();
+        fs::create_dir(&lib).unwrap();
+        let real = lib.join("sshm");
+        fs::write(&real, b"binary").unwrap();
+
+        let link = bin.join("sshm");
+        std::os::unix::fs::symlink("../lib/sshm", &link).unwrap();
+
+        assert_eq!(
+            resolved_target(&link),
+            root.path().join("lib/sshm"),
+            "the stored target is anchored on the link's own directory, and \
+             the result names one path rather than a walk"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_absolute_symlink_target_is_left_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("sshm-real");
+        fs::write(&real, b"binary").unwrap();
+        let link = dir.path().join("sshm");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let resolved = resolved_target(&link);
+        assert!(resolved.is_absolute(), "got {resolved:?}");
+        assert_eq!(resolved, real);
     }
 
     // ── Check for Updates asks; Apply Update acts (#46) ───────────────────
