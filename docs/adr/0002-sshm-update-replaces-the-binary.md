@@ -105,6 +105,23 @@ this ADR.
   update dependency's transitive tree, documented there as unavoidable because it
   is the only published self-update crate for these targets. Choosing A keeps
   that debt for another cycle.
+- **`install.sh` obeys the same rule.** It locates the install the user
+  actually runs — the probe list first, `command -v` behind it, one symlink
+  level resolved and anchored exactly as `resolved_target()` does — and
+  replaces *that* path. It does not pick a directory of its own and leave a
+  second copy in front of the first. The two commands that perform this act
+  resolve the target the same way, because two answers to "which binary gets
+  replaced" is the confusion this ADR exists to end. Where the two still
+  differ is ordering, and deliberately so: `sshm update` refuses anything not
+  strictly newer, while `install.sh` installs the latest release even over a
+  newer binary and prints the downgrade, because piping a script into a shell
+  *is* the explicit instruction.
+- **The `install.sh` path is now covered by CI** — `shellcheck` plus a
+  fixture-driven smoke test in `tests/install/smoke.sh` that stubs the
+  release API and drives the shadowed, symlinked, unwritable and
+  already-latest cases offline. This is not the hand-verified replace path
+  the manual table in the README still describes for `sshm update`; that gap
+  remains, and this one does not.
 - **A frame must never open as a side effect of either command.** The update
   error paths historically fell through into opening the frame, which is
   acceptable for nobody and absurd after a failed `sshm update`. Both commands

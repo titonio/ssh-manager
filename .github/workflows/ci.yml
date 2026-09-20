@@ -36,6 +36,30 @@ jobs:
     - name: Run clippy
       run: cargo clippy --manifest-path sshm/Cargo.toml --all-targets --all-features
 
+  # install.sh is served straight from `master`, so a bad merge is live for
+  # every user before anyone can release their way out of it — and until
+  # `sshm update` ships in a release, it is the only update path that exists
+  # at all. The interesting behaviour is also the behaviour that cannot be
+  # tested against a real release: what happens when an older binary is
+  # already present, shadowing, symlinked, or sitting in a directory the user
+  # cannot write. So the smoke test fakes the GitHub API and the tarball and
+  # drives every branch offline.
+  #
+  # This job is worth marking as a required status check on master.
+  installer:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install shellcheck
+      run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+    - name: Lint install.sh
+      run: shellcheck install.sh tests/install/smoke.sh
+
+    - name: Smoke test the update path
+      run: ./tests/install/smoke.sh
+
   test:
     needs: check
     runs-on: ubuntu-latest

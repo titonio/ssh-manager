@@ -26,6 +26,26 @@ shell — no alternate screen, no takeover — built with Rust and Ratatui.
 curl -sL https://raw.githubusercontent.com/titonio/ssh-manager/master/install.sh | bash
 ```
 
+Run the same command again later to update. The installer replaces the `sshm`
+you are *already running* — the one your `PATH` resolves, following one level
+of symlink exactly the way `sshm update` does — instead of dropping a second
+copy in a directory you were never running it from, which is how "I updated
+and nothing changed" happens. It prints the transition as
+`sshm 0.1.12 → 0.1.13`, checks the download against the sha256 GitHub
+publishes with the release, and swaps the binary with an atomic rename staged
+beside the target.
+
+If you are already on the latest release it says so and downloads nothing.
+To reinstall anyway:
+
+```bash
+curl -sL https://raw.githubusercontent.com/titonio/ssh-manager/master/install.sh | bash -s -- --force
+```
+
+It never edits a shell rc file. If the install directory is not on your
+`PATH`, or a second `sshm` is shadowing the one it replaced, the script names
+both paths and tells you what to do about each.
+
 ### Manual Installation
 
 #### From Source (Requires Rust)
@@ -315,13 +335,18 @@ The project uses GitHub Actions for:
 - Unit testing
 - Coverage reporting (80% threshold)
 - Security auditing
+- Installer linting (`shellcheck`) and a fixture-driven smoke test of the update path
 - Automatic releases on version tags
 
 ### Before releasing a version that touches `sshm update`
 
-No CI job exercises the replace path — a runner that swapped the binary of its
-own checkout would prove nothing about an installed one — so the swap is
-verified by hand, per `docs/adr/0002`. Run each row, then `sshm --version`, and
+No CI job exercises the **in-app** replace path — a runner that swapped the
+binary of its own checkout would prove nothing about an installed one — so
+`sshm update` is verified by hand, per `docs/adr/0002`. The `install.sh`
+route is the opposite case: it runs against a stubbed release API in
+`tests/install/smoke.sh`, so its shadowed, symlinked, unwritable and
+already-latest branches are covered in CI and need no hand run here.
+Run each row, then `sshm --version`, and
 paste the results into the release notes:
 
 | Install | Run |
