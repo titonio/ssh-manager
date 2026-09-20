@@ -178,10 +178,29 @@ jobs:
           --ignore RUSTSEC-2026-0194 \
           --ignore RUSTSEC-2025-0119
 
+  # Both musl targets, because Termux reports `Linux`/`aarch64` and an
+  # installer that answers every Linux with the x86_64 triple ships an
+  # unrunnable binary there (#48). x86_64 keeps its native musl-tools
+  # toolchain; aarch64 cross-compiles with zig, because `ring`'s C/asm
+  # needs a cross C compiler and `cargo zigbuild` wraps exactly that.
+  # The per-target commands live in the matrix itself — one place says how
+  # each target is built, stripped, and run, instead of the same
+  # `if target == aarch64` question asked three times.
   build-linux:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, coverage, security]
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            build: cargo build
+            strip: strip
+            run: ""
+          - target: aarch64-unknown-linux-musl
+            build: cargo zigbuild
+            strip: aarch64-linux-gnu-strip
+            run: qemu-aarch64-static
     steps:
     - uses: actions/checkout@v4
 
@@ -190,11 +209,33 @@ jobs:
       with:
         profile: minimal
         toolchain: stable
-        target: x86_64-unknown-linux-musl
+        target: ${{ matrix.target }}
         override: true
 
     - name: Install musl tools
+      if: matrix.target == 'x86_64-unknown-linux-musl'
       run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+    - name: Install cross tools
+      if: matrix.target == 'aarch64-unknown-linux-musl'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y qemu-user-static binutils-aarch64-linux-gnu
+        # Zig is pinned, not tracked: the snap ships only a drifting beta
+        # channel, and a release-critical cross C compiler must not move
+        # underneath the recipe verified against it. 0.16.0 is what the
+        # #48 build was checked with; the checksum is the one
+        # ziglang.org publishes for this exact tarball.
+        curl -sL --retry 3 -o /tmp/zig.tar.xz \
+          https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+        echo "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00  /tmp/zig.tar.xz" | sha256sum -c -
+        sudo tar -xJf /tmp/zig.tar.xz -C /opt
+        echo "/opt/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+      shell: bash
+
+    - name: Install cargo-zigbuild
+      if: matrix.target == 'aarch64-unknown-linux-musl'
+      uses: taiki-e/install-action@cargo-zigbuild
 
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
@@ -202,25 +243,40 @@ jobs:
         workspaces: sshm
 
     - name: Build release
-      run: cargo build --release --target x86_64-unknown-linux-musl --manifest-path sshm/Cargo.toml
+      run: ${{ matrix.build }} --release --target ${{ matrix.target }} --manifest-path sshm/Cargo.toml
 
     - name: Strip binary
-      run: strip sshm/target/x86_64-unknown-linux-musl/release/sshm
+      run: ${{ matrix.strip }} sshm/target/${{ matrix.target }}/release/sshm
 
     - name: Get version from Cargo.toml
       id: cargo_version
       run: echo "version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' sshm/Cargo.toml)" >> $GITHUB_OUTPUT
 
+    # The cross-compiled artifact is not trusted because it compiled; it is
+    # trusted because it ran — under aarch64 emulation, printing the
+    # version the manifest says. The x86_64 leg gets the same check
+    # natively, so a silent misbuild fails here rather than on a user's
+    # machine (#48's acceptance gate).
+    - name: Verify the binary runs
+      run: |
+        bin=sshm/target/${{ matrix.target }}/release/sshm
+        out=$(${{ matrix.run }} "$bin" --version)
+        if [ "$out" != "sshm ${{ steps.cargo_version.outputs.version }}" ]; then
+          echo "expected 'sshm ${{ steps.cargo_version.outputs.version }}', got '$out'"
+          exit 1
+        fi
+        file "$bin"
+
     - name: Create tarball
       run: |
-        cd sshm/target/x86_64-unknown-linux-musl/release
-        tar czvf ../../../../sshm-v${{ steps.cargo_version.outputs.version }}-x86_64-unknown-linux-musl.tar.gz sshm
+        cd sshm/target/${{ matrix.target }}/release
+        tar czvf ../../../../sshm-v${{ steps.cargo_version.outputs.version }}-${{ matrix.target }}.tar.gz sshm
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: sshm-linux
-        path: sshm-v${{ steps.cargo_version.outputs.version }}-x86_64-unknown-linux-musl.tar.gz
+        name: sshm-linux-${{ matrix.target }}
+        path: sshm-v${{ steps.cargo_version.outputs.version }}-${{ matrix.target }}.tar.gz
 
   build-macos:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -331,7 +387,7 @@ jobs:
       uses: softprops/action-gh-release@v1
       with:
         files: |
-          artifacts/sshm-linux/*.tar.gz
+          artifacts/sshm-linux-*/*.tar.gz
           artifacts/sshm-macos-*/*.tar.gz
           artifacts/sshm-windows/*.zip
         generate_release_notes: true

@@ -88,13 +88,26 @@ done
 
 detect_platform() {
     case "$(uname -s)" in
-        Linux) printf 'x86_64-unknown-linux-musl\n' ;;
+        Linux)
+            # The kernel name alone does not say which binary runs — the
+            # Darwin branch beside this one has always known that. Termux
+            # reports `Linux` with `uname -m` = `aarch64`, and answering
+            # it with the x86_64 triple shipped an unrunnable binary whose
+            # only symptom was a swallowed `Exec format error` (#48).
+            # Every Linux ships as static musl; only the arch varies.
+            case "$(uname -m)" in
+                x86_64) printf 'x86_64-unknown-linux-musl\n' ;;
+                aarch64) printf 'aarch64-unknown-linux-musl\n' ;;
+                *)
+                    die "Unsupported architecture: $(uname -m). sshm ships x86_64 and aarch64 Linux binaries."
+                    ;;
+            esac
+            ;;
         Darwin)
-            if [ "$(uname -m)" = "arm64" ]; then
-                printf 'aarch64-apple-darwin\n'
-            else
-                printf 'x86_64-apple-darwin\n'
-            fi
+            case "$(uname -m)" in
+                arm64) printf 'aarch64-apple-darwin\n' ;;
+                *) printf 'x86_64-apple-darwin\n' ;;
+            esac
             ;;
         MINGW* | MSYS* | CYGWIN* | Windows*)
             die "Windows is not supported by this installer yet. See https://github.com/$REPO_OWNER/$REPO_NAME/releases."
@@ -158,9 +171,17 @@ choose_privilege() {
 # replacing it is a read that may hang or fail, so it is bounded and its
 # failure is ordinary: an unknown installed version changes the wording of
 # the message, never whether the install proceeds.
+#
+# $2 (optional): where the binary's stderr goes — /dev/null unless the
+# caller wants it. Probes of *old* binaries want none; their failure is
+# ordinary and the text is noise. The pre-swap check of the *fresh* binary
+# asks for it: there the stderr is the reason. On Termux/ARM64 the
+# wrong-arch download answers the version probe with nothing on stdout and
+# `Exec format error` on stderr, and discarding that left users with a
+# bare "did not report a version" and no way to know why (#48).
 read_installed_version() {
-    local bin="$1" out
-    out=$(run_with_timeout 10 "$bin" --version 2>/dev/null || true)
+    local bin="$1" err_file="${2:-/dev/null}" out
+    out=$(run_with_timeout 10 "$bin" --version 2>"$err_file" || true)
     printf '%s\n' "$out" | awk '{
         for (i = 1; i <= NF; i++) {
             if ($i ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/) { sub(/^v/, "", $i); print $i; exit }
@@ -506,8 +527,20 @@ fi
 
 # Pre-swap verification: the artifact is checked while it is still harmless,
 # so a wrong-asset or corrupt-archive case never reaches the target at all.
-EXTRACTED_VERSION=$(read_installed_version "$EXTRACTED" || true)
+#
+# This is the one call site that keeps the binary's stderr: a fresh
+# download that cannot answer `--version` is not an ordinary failure like
+# an unreadable old install — it is the wrong binary for this machine, and
+# the binary itself says so. Carrying that text into the error message is
+# what makes the #48 class of report self-diagnosing.
+EXTRACTED_ERR="$TMP_DIR/extracted.stderr"
+EXTRACTED_VERSION=$(read_installed_version "$EXTRACTED" "$EXTRACTED_ERR" || true)
 if [ -z "$EXTRACTED_VERSION" ]; then
+    BINARY_REASON=$(head -n 3 "$EXTRACTED_ERR" 2>/dev/null | tr '\n' ' ' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' || true)
+    if [ -n "$BINARY_REASON" ]; then
+        BINARY_REASON="${BINARY_REASON%.}"
+        die "The downloaded binary did not report a version. It said: $BINARY_REASON. Nothing was installed."
+    fi
     die "The downloaded binary did not report a version. Nothing was installed."
 fi
 if [ "$EXTRACTED_VERSION" != "$VERSION" ]; then
