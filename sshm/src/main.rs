@@ -199,7 +199,11 @@ fn dispatch(
                 println!("sshm {version} is already the latest release.");
                 Ok(())
             }
-            other => Err(io::Error::other(apply_failure_text(&other))),
+            ApplyResult::Unwritable { path } => Err(io::Error::other(unwritable_text(&path))),
+            ApplyResult::DevBuild { manifest_dir } => {
+                Err(io::Error::other(dev_build_text(&manifest_dir)))
+            }
+            ApplyResult::Error(reason) => Err(io::Error::other(retryable_text(&reason))),
         };
     }
 
@@ -232,20 +236,7 @@ fn dispatch(
     // handling and then a frame, which is acceptable for nobody and absurd
     // after a command that only asked a question.
     if cli.check_update || matches!(cli.command, Some(Commands::CheckUpdate)) {
-        return match check_update_fn() {
-            UpdateResult::UpdateAvailable { version } => {
-                println!("Update available: v{version}");
-                println!("Install it with: sshm update");
-                Ok(())
-            }
-            UpdateResult::NoUpdate => {
-                println!("No update available.");
-                Ok(())
-            }
-            UpdateResult::Error(e) => {
-                Err(io::Error::other(format!("Error checking for updates: {e}")))
-            }
-        };
+        return write_check_answer(&mut io::stdout(), &check_update_fn()).map_err(io::Error::other);
     }
 
     // Handle add command
@@ -269,35 +260,61 @@ fn dispatch(
     run_frame_fn(Emit::Execute, &mut config, String::new(), note)
 }
 
-/// The text `sshm update` prints when it did **not** replace the binary.
+// The three ways Apply Update can fail to replace the binary, and the text
+// each one prints.
+//
+// Named for the failure rather than switched on the result a second time, and
+// returning a String rather than calling `eprintln!`, so the contract is
+// assertable: the `install.sh` escape hatch appears on exactly one of them —
+// the failure Apply Update can never work around. A network blip, a rate limit
+// and a missing asset all want a retry, and printing the reinstall incantation
+// beside them would train users to reach for the sledgehammer every time
+// GitHub hiccups (#46).
+
+/// The install location cannot be written: name it, and name the way out.
+fn unwritable_text(path: &std::path::Path) -> String {
+    format!(
+        "cannot update: {} is not writable by this user.\n\
+         Nothing was downloaded and nothing was changed. To update, install the latest release with:\n\
+         \x20 curl -sL https://raw.githubusercontent.com/titonio/ssh-manager/master/install.sh | bash",
+        path.display()
+    )
+}
+
+/// A Dev Build is refused on principle: the variable is the whole explanation,
+/// and `install.sh` is not the answer to "you are running from a checkout".
+fn dev_build_text(manifest_dir: &str) -> String {
+    format!(
+        "refusing to update a Dev Build: CARGO_MANIFEST_DIR is set to {} — this binary \
+         is running from a source checkout rather than an installed location.\n\
+         sshm never replaces a binary the developer owns.",
+        manifest_dir
+    )
+}
+
+/// Write the answer Check for Updates gives, and return the reason when there
+/// is no answer.
 ///
-/// A function returning a String rather than a handful of `eprintln!`s so the
-/// contract is assertable: the `install.sh` escape hatch appears on exactly
-/// one failure — the one self-update can never work around. A network blip,
-/// a rate limit and a missing asset all want a retry, and printing the
-/// reinstall incantation beside them would train users to reach for the
-/// sledgehammer every time GitHub hiccups (#46).
-fn apply_failure_text(result: &ApplyResult) -> String {
+/// The sink is a parameter so a test can read the answer without a child
+/// process — which is what makes "the answer names `sshm update`" an assertion
+/// rather than a hope. The Update Note above the frame says `run sshm update`;
+/// the terminal that answers the question has to agree with it (#46).
+fn write_check_answer(out: &mut dyn Write, result: &UpdateResult) -> Result<(), String> {
     match result {
-        ApplyResult::Unwritable { path } => format!(
-            "cannot update: {} is not writable by this user.\n\
-             Nothing was downloaded and nothing was changed. To update, install the \
-             latest release with:\n\
-             \x20 curl -sL https://raw.githubusercontent.com/titonio/ssh-manager/master/install.sh | bash",
-            path.display()
-        ),
-        ApplyResult::DevBuild { manifest_dir } => format!(
-            "refusing to update a Dev Build: CARGO_MANIFEST_DIR is set to {manifest_dir}, \
-             so this binary is running from a source checkout rather than an installed \
-             location.\n\
-             sshm never replaces a binary the developer owns."
-        ),
-        ApplyResult::Error(reason) => format!("update failed: {reason}"),
-        // Not failures. Dispatch prints these on stdout and exits 0, so it
-        // never asks for their failure text; an empty string is the honest
-        // answer to a question that cannot be asked here.
-        ApplyResult::Applied { .. } | ApplyResult::UpToDate { .. } => String::new(),
+        UpdateResult::UpdateAvailable { version } => writeln!(out, "Update available: v{version}")
+            .and_then(|()| writeln!(out, "Install it with: sshm update"))
+            .map_err(|e| e.to_string()),
+        UpdateResult::NoUpdate => writeln!(out, "No update available.").map_err(|e| e.to_string()),
+        // Framed here, printed by `main`: the reason travels, and the wording
+        // is not doubled on the way.
+        UpdateResult::Error(reason) => Err(format!("Error checking for updates: {reason}")),
     }
+}
+
+/// Everything else — network, rate limit, missing asset: keep the reason, ask
+/// for a retry, offer nothing else.
+fn retryable_text(reason: &str) -> String {
+    format!("update failed: {reason}")
 }
 
 /// The first-run import offer's predicate (#38): what an import from
@@ -1062,7 +1079,7 @@ pub mod tests {
     /// passing at all is the proof that updating never opens a frame — and
     /// the checker function panics too, because applying is not checking.
     #[test]
-    fn update_reaches_the_applier_exactly_once_and_never_a_frame() {
+    fn apply_update_reaches_the_applier_exactly_once_and_never_a_frame() {
         let cli = Cli {
             command: Some(Commands::Update),
             check_update: false,
@@ -1082,7 +1099,7 @@ pub mod tests {
     /// An up to date install is a success, not an error: exit 0, nothing to
     /// report but that fact, and no frame (#46).
     #[test]
-    fn an_up_to_date_update_is_a_success_that_never_frames() {
+    fn an_up_to_date_apply_is_a_success_that_never_frames() {
         fn up_to_date() -> ApplyResult {
             ApplyResult::UpToDate {
                 version: "0.1.12".to_string(),
@@ -1107,7 +1124,7 @@ pub mod tests {
     /// A failed apply is a non-zero exit and no frame — the error path that
     /// used to fall through into opening one is closed (#46).
     #[test]
-    fn a_failed_update_exits_non_zero_and_never_frames() {
+    fn a_failed_apply_exits_non_zero_and_never_frames() {
         fn failed() -> ApplyResult {
             ApplyResult::Error("api request failed with status: 403".to_string())
         }
@@ -1162,14 +1179,12 @@ pub mod tests {
 
     // ── what each failure says, and where the escape hatch appears (#46) ──
 
-    /// Permission is the one failure self-update can never work around, so
+    /// Permission is the one failure Apply Update can never work around, so
     /// it is the only one that prints `install.sh` — and it must name the
     /// binary it could not write, or the user cannot act on it.
     #[test]
     fn an_unwritable_install_location_names_the_binary_and_offers_install_sh() {
-        let text = apply_failure_text(&ApplyResult::Unwritable {
-            path: "/usr/local/bin/sshm".into(),
-        });
+        let text = unwritable_text(std::path::Path::new("/usr/local/bin/sshm"));
         assert!(
             text.contains("/usr/local/bin/sshm"),
             "the unwritable path must be named: {text}"
@@ -1185,9 +1200,7 @@ pub mod tests {
     /// answer to "you are running from a checkout" (#46).
     #[test]
     fn a_dev_build_refusal_names_the_variable_that_marks_it() {
-        let text = apply_failure_text(&ApplyResult::DevBuild {
-            manifest_dir: "/home/dev/ssh-manager/sshm".into(),
-        });
+        let text = dev_build_text("/home/dev/ssh-manager/sshm");
         assert!(
             text.contains("CARGO_MANIFEST_DIR"),
             "a refusal must say what made it: {text}"
@@ -1207,13 +1220,58 @@ pub mod tests {
             "api request failed with status: 403",
             "No asset found for target: `aarch64-apple-darwin`",
         ] {
-            let text = apply_failure_text(&ApplyResult::Error(reason.to_string()));
+            let text = retryable_text(reason);
             assert!(text.contains(reason), "the reason is kept: {text}");
             assert!(
                 !text.contains("install.sh"),
                 "no escape hatch for a retryable failure: {text}"
             );
         }
+    }
+
+    /// The answer to Check for Updates names the act that follows it. The
+    /// Update Note above the frame already says `run sshm update`; a terminal
+    /// that answered "Update available" and stopped there was the half-sentence
+    /// this ticket is about (#46).
+    #[test]
+    fn the_check_answer_names_sshm_update_as_the_way_to_install() {
+        let mut out = Vec::new();
+        write_check_answer(
+            &mut out,
+            &UpdateResult::UpdateAvailable {
+                version: "0.9.9".to_string(),
+            },
+        )
+        .expect("an available update is not a failure");
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("0.9.9"), "the version is reported: {text}");
+        assert!(
+            text.contains("sshm update"),
+            "the answer must point at the act: {text}"
+        );
+    }
+
+    /// Nothing to install is the one answer that must not offer to install.
+    #[test]
+    fn the_no_update_answer_offers_nothing_to_install() {
+        let mut out = Vec::new();
+        write_check_answer(&mut out, &UpdateResult::NoUpdate).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            !text.contains("sshm update"),
+            "up to date, yet told to update: {text}"
+        );
+    }
+
+    /// A failed check yields no answer and carries its reason instead — the
+    /// caller turns that into a non-zero exit rather than a frame (#46).
+    #[test]
+    fn a_failed_check_produces_no_answer_and_carries_its_reason() {
+        let mut out = Vec::new();
+        let err = write_check_answer(&mut out, &UpdateResult::Error("rate limited".to_string()))
+            .expect_err("a failed check is not an answer");
+        assert!(out.is_empty(), "a failure prints nothing on stdout");
+        assert!(err.contains("rate limited"), "{err}");
     }
 
     // ── first-run import offer predicate (#38) ──────────────────────────

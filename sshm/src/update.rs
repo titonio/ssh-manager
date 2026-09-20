@@ -26,7 +26,7 @@ pub enum ApplyResult {
     /// The running binary is already the newest release. Nothing was
     /// downloaded and nothing was written, and this is a success.
     UpToDate { version: String },
-    /// Self-update structurally cannot succeed here: the directory the swap
+    /// Apply Update cannot structurally succeed here: the directory the swap
     /// would target cannot be written by this user. The way out is
     /// `install.sh`, which escalates correctly.
     Unwritable { path: std::path::PathBuf },
@@ -59,7 +59,7 @@ pub enum ApplyResult {
 /// `bin_path_in_archive("sshm")` is the Unix binary. The Windows asset carries
 /// `sshm.exe`, so `sshm update` on Windows would download and then fail to
 /// extract — which is the accepted state of affairs: ADR-0002 declines Windows
-/// self-update outright, and `install.sh` refuses Windows before anyone gets a
+/// Windows outright, and `install.sh` refuses Windows before anyone gets a
 /// binary to update. Fixing the name here would imply the swap works, which is
 /// the claim nobody has tested.
 fn update_config(
@@ -1010,6 +1010,10 @@ mod tests {
     #[test]
     #[serial]
     fn check_for_update_answers_from_a_fresh_cache_without_a_request() {
+        // Pose as an installed binary: otherwise the dev-build short-circuit
+        // answers first and the freshness gate this test is about never runs.
+        let _not_a_checkout = NotACheckout::take();
+
         let cache_path = get_cache_file_path().unwrap();
         fs::remove_file(&cache_path).ok();
         write_cache(Some("0.9.9".to_string())).unwrap();
@@ -2243,16 +2247,23 @@ mod tests {
     // colour-literal grep in `design_system_test.rs`.
 
     #[test]
-    fn asking_if_an_update_exists_never_contains_the_swap() {
+    fn the_question_never_contains_the_swap() {
         let source = include_str!("update.rs");
         assert!(!source.is_empty(), "the gate reads its own input");
 
         // Only the code, never the test module below it: that is full of
-        // version literals, and of this gate's own strings.
+        // version literals, and of this gate's own strings. Split on `mod
+        // tests`, not on `#[cfg(test)]` — an earlier `#[cfg(test)]` helper
+        // sits mid-file, and splitting there would silently narrow this gate
+        // to the first few hundred lines.
         let code = source
-            .split("#[cfg(test)]")
+            .split("#[cfg(test)]\nmod tests {")
             .next()
             .expect("the test module is delimited");
+        assert!(
+            code.contains("fn cached_update_version"),
+            "the gate read the code half of this file, not the tests"
+        );
 
         // `.update()` is the library call that downloads, extracts and
         // replaces the binary. Exactly one place in this module may reach it,
@@ -2287,7 +2298,11 @@ mod tests {
     #[test]
     fn no_version_is_substituted_into_another_version() {
         let source = include_str!("update.rs");
-        let code = source.split("#[cfg(test)]").next().unwrap();
+        let code = source.split("#[cfg(test)]\nmod tests {").next().unwrap();
+        assert!(
+            code.contains("fn cached_update_version"),
+            "the gate read the code half of this file, not the tests"
+        );
         for stale in ["0.1.6", "0.1.7"] {
             let offenders = code
                 .lines()
