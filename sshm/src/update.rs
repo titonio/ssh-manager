@@ -355,19 +355,28 @@ fn should_check_update() -> Result<bool, String> {
     }
 }
 
+/// The release asset's target triple for a given (os, arch) pair.
+///
+/// A pure function of the two halves rather than a read of
+/// `std::env::consts`, so the whole table is testable offline — the table
+/// is where the bug lives, not in the constants. `("linux", "aarch64")`
+/// was missing from it (#48): Termux reports `linux`/`aarch64`, got
+/// "Unsupported platform", and an installer beside it answered every Linux
+/// with the x86_64 triple. Both axes are answered here now: every Linux
+/// ships as static musl, x86_64 and aarch64 alike.
+fn asset_name_for(os: &str, arch: &str) -> Result<&'static str, String> {
+    match (os, arch) {
+        ("linux", "x86_64") => Ok("x86_64-unknown-linux-musl"),
+        ("linux", "aarch64") => Ok("aarch64-unknown-linux-musl"),
+        ("macos", "x86_64") => Ok("x86_64-apple-darwin"),
+        ("macos", "aarch64") => Ok("aarch64-apple-darwin"),
+        ("windows", "x86_64") => Ok("x86_64-pc-windows-msvc"),
+        _ => Err(format!("Unsupported platform: {os} {arch}")),
+    }
+}
+
 fn get_platform_asset_name() -> Result<String, String> {
-    let target = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-
-    let asset_name = match (target, arch) {
-        ("linux", "x86_64") => "x86_64-unknown-linux-musl",
-        ("macos", "x86_64") => "x86_64-apple-darwin",
-        ("macos", "aarch64") => "aarch64-apple-darwin",
-        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
-        _ => return Err(format!("Unsupported platform: {} {}", target, arch)),
-    };
-
-    Ok(asset_name.to_string())
+    asset_name_for(std::env::consts::OS, std::env::consts::ARCH).map(str::to_owned)
 }
 
 /// Ask whether a newer release exists, and cache the answer for the note.
@@ -668,6 +677,46 @@ mod tests {
         } else if target == "windows" {
             assert!(asset.contains("windows"));
         }
+    }
+
+    /// The whole mapping table, offline. `get_platform_asset_name` reads
+    /// compile-time constants, so the table itself is only testable through
+    /// a pure function of (os, arch) — which is also the exact seam the
+    /// Termux/ARM64 bug (#48) lived on: `("linux", "aarch64")` had no arm
+    /// and every Linux was answered with the x86_64 triple.
+    #[test]
+    fn asset_name_for_maps_every_supported_platform() {
+        assert_eq!(
+            asset_name_for("linux", "x86_64").unwrap(),
+            "x86_64-unknown-linux-musl"
+        );
+        assert_eq!(
+            asset_name_for("linux", "aarch64").unwrap(),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            asset_name_for("macos", "x86_64").unwrap(),
+            "x86_64-apple-darwin"
+        );
+        assert_eq!(
+            asset_name_for("macos", "aarch64").unwrap(),
+            "aarch64-apple-darwin"
+        );
+        assert_eq!(
+            asset_name_for("windows", "x86_64").unwrap(),
+            "x86_64-pc-windows-msvc"
+        );
+    }
+
+    /// An unsupported pair must name both halves of itself: "Unsupported
+    /// platform: linux aarch64" on a Termux box was true and useless — it
+    /// told the user their machine was the problem, not that the mapping
+    /// was missing an arm.
+    #[test]
+    fn asset_name_for_unsupported_names_the_os_and_arch() {
+        let err = asset_name_for("linux", "armv7").unwrap_err();
+        assert!(err.contains("linux"), "error should name the os: {err}");
+        assert!(err.contains("armv7"), "error should name the arch: {err}");
     }
 
     #[test]

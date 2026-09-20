@@ -22,6 +22,12 @@ INSTALL_SH="$ROOT/install.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# The PATH as this process started it, captured before any helper modifies
+# PATH inside a subshell. Probes that must see the host's real PATH take it
+# from here rather than from a PATH whose value a subshell's export may or
+# may not have reached.
+HOST_PATH="$PATH"
+
 PASS=0
 FAIL=0
 FAILED_NAMES=()
@@ -71,13 +77,21 @@ assert_file_version() {
 # ---------------------------------------------------------------------------
 
 case "$(uname -s)" in
-    Linux) PLATFORM="x86_64-unknown-linux-musl" ;;
+    Linux)
+        case "$(uname -m)" in
+            x86_64) PLATFORM="x86_64-unknown-linux-musl" ;;
+            aarch64) PLATFORM="aarch64-unknown-linux-musl" ;;
+            *)
+                printf 'unsupported architecture for smoke test: %s\n' "$(uname -m)" >&2
+                exit 1
+                ;;
+        esac
+        ;;
     Darwin)
-        if [ "$(uname -m)" = "arm64" ]; then
-            PLATFORM="aarch64-apple-darwin"
-        else
-            PLATFORM="x86_64-apple-darwin"
-        fi
+        case "$(uname -m)" in
+            arm64) PLATFORM="aarch64-apple-darwin" ;;
+            *) PLATFORM="x86_64-apple-darwin" ;;
+        esac
         ;;
     *) printf 'unsupported platform for smoke test: %s\n' "$(uname -s)" >&2; exit 1 ;;
 esac
@@ -96,34 +110,14 @@ sha256_of() {
 # Fixtures
 # ---------------------------------------------------------------------------
 
-# make_release <version> [sha_override]
+# release_json <version> <sha>
 #
-# Builds a tarball holding a stand-in `sshm` that answers --version, and a
-# GitHub-shaped /releases/latest JSON pointing at it. The JSON is
-# pretty-printed with a space after each colon and emits `digest` before
+# The GitHub-shaped /releases/latest response both release fixtures share.
+# Pretty-printed with a space after each colon and emitting `digest` before
 # `browser_download_url` inside the asset object, because that is the shape
 # install.sh's parsers are written against.
-make_release() {
-    local ver="$1" sha="${2:-}"
-    local stage="$WORK/stage-$ver"
-    rm -rf "$stage"
-    mkdir -p "$stage"
-
-    cat >"$stage/sshm" <<FAKE
-#!/usr/bin/env bash
-case "\${1:-}" in
-    --version) echo "sshm $ver" ;;
-    completions) echo "# fake sshm $ver completions for \$2" ;;
-    *) echo "fake sshm $ver" ;;
-esac
-FAKE
-    chmod +x "$stage/sshm"
-    tar -czf "$WORK/sshm-$ver.tar.gz" -C "$stage" sshm
-
-    if [ -z "$sha" ]; then
-        sha=$(sha256_of "$WORK/sshm-$ver.tar.gz")
-    fi
-
+release_json() {
+    local ver="$1" sha="$2"
     cat >"$WORK/release.json" <<JSON
 {
   "url": "https://api.github.com/repos/titonio/ssh-manager/releases/1",
@@ -146,6 +140,60 @@ FAKE
 JSON
     export FIXTURE_JSON="$WORK/release.json"
     export FIXTURE_TARBALL="$WORK/sshm-$ver.tar.gz"
+}
+
+# make_release <version> [sha_override]
+#
+# Builds a tarball holding a stand-in `sshm` that answers --version, and
+# the release JSON pointing at it.
+make_release() {
+    local ver="$1" sha="${2:-}"
+    local stage="$WORK/stage-$ver"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+
+    cat >"$stage/sshm" <<FAKE
+#!/usr/bin/env bash
+case "\${1:-}" in
+    --version) echo "sshm $ver" ;;
+    completions) echo "# fake sshm $ver completions for \$2" ;;
+    *) echo "fake sshm $ver" ;;
+esac
+FAKE
+    chmod +x "$stage/sshm"
+    tar -czf "$WORK/sshm-$ver.tar.gz" -C "$stage" sshm
+
+    if [ -z "$sha" ]; then
+        sha=$(sha256_of "$WORK/sshm-$ver.tar.gz")
+    fi
+
+    release_json "$ver" "$sha"
+}
+
+# make_release_unrunnable <version> <stderr text>
+#
+# The #48 case: the asset exists, downloads, and passes its checksum —
+# but the binary inside cannot run on this machine. Nothing on stdout,
+# the kernel's complaint on stderr, exit 126, exactly what an x86_64
+# download does on aarch64 Termux. The pre-swap check must carry that
+# complaint into its error instead of hiding it.
+make_release_unrunnable() {
+    local ver="$1" stderr_text="$2"
+    local stage="$WORK/stage-broken-$ver"
+    rm -rf "$stage"
+    mkdir -p "$stage"
+
+    cat >"$stage/sshm" <<FAKE
+#!/usr/bin/env bash
+printf '%s\n' "$stderr_text" >&2
+exit 126
+FAKE
+    chmod +x "$stage/sshm"
+    tar -czf "$WORK/sshm-$ver.tar.gz" -C "$stage" sshm
+
+    local sha
+    sha=$(sha256_of "$WORK/sshm-$ver.tar.gz")
+    release_json "$ver" "$sha"
 }
 
 # A fake curl: serves the fixtures, and records every URL it was asked for
@@ -250,6 +298,43 @@ section() { printf '\n  %s\n' "$1"; }
 # ===========================================================================
 printf '%s\n' "install.sh smoke test  ($PLATFORM)"
 # ===========================================================================
+
+# ---------------------------------------------------------------------------
+section "detect_platform: the Linux branch reads uname -m, not just uname -s"
+# ---------------------------------------------------------------------------
+# The mapping is exercised against a faked `uname` rather than the host's,
+# so an x86_64 CI runner pins what install.sh answers for aarch64 — the
+# Termux triple (#48) — without an aarch64 machine. Only the function is
+# taken from install.sh, never the script: install.sh runs on being sourced.
+probe_platform() {
+    local s="$1" m="$2"
+    local fake="$WORK/fake-uname-$s-$m"
+    mkdir -p "$fake"
+    cat >"$fake/uname" <<EOF
+#!/bin/sh
+case "\$1" in
+    -s) printf '%s\n' '$s' ;;
+    -m) printf '%s\n' '$m' ;;
+esac
+EOF
+    chmod +x "$fake/uname"
+    sed -n '/^detect_platform()/,/^}/p' "$INSTALL_SH" >"$WORK/detect_platform.fn.sh"
+    # The single-quoted script below is expanded by the INNER bash, not
+    # this one — its `$1` is the function file, not this script's.
+    # shellcheck disable=SC2016
+    env PATH="$fake:$HOST_PATH" bash -c '
+        log() { printf "%s\n" "$*"; }
+        warn() { printf "warning: %s\n" "$*" >&2; }
+        die() { printf "error: %s\n" "$*" >&2; exit 1; }
+        REPO_OWNER=t REPO_NAME=r
+        source "$1"
+        detect_platform
+    ' _ "$WORK/detect_platform.fn.sh" 2>&1
+}
+
+assert_eq "x86_64-unknown-linux-musl" "$(probe_platform Linux x86_64)" "Linux/x86_64 maps to x86_64 musl"
+assert_eq "aarch64-unknown-linux-musl" "$(probe_platform Linux aarch64)" "Linux/aarch64 maps to aarch64 musl (the Termux triple)"
+assert_contains "Unsupported architecture: riscv64" "$(probe_platform Linux riscv64)" "any other arch dies naming the arch"
 
 # ---------------------------------------------------------------------------
 section "fresh install, nothing present"
@@ -436,6 +521,31 @@ run_install
 AFTER=$(sha256_of "$USER_BIN/sshm")
 assert_eq "1" "$RC" "exits non-zero"
 assert_contains "Checksum mismatch" "$ALL" "says why"
+assert_eq "$BEFORE" "$AFTER" "the existing binary is byte-identical"
+
+# ---------------------------------------------------------------------------
+section "wrong-arch download: the pre-swap check surfaces the binary's stderr"
+# ---------------------------------------------------------------------------
+# The #48 report: on Termux/ARM64 the x86_64 asset downloads cleanly,
+# passes its checksum, and then answers the version probe with nothing on
+# stdout and `Exec format error` on stderr. The old message hid the reason
+# inside a swallowed redirect; the new one carries the binary's own words,
+# so the failure diagnoses itself.
+make_release_unrunnable "0.2.0" "cannot execute binary file: Exec format error"
+D="$WORK/c-wrongarch"
+rm -rf "$D"
+new_env "$D"
+mkdir -p "$USER_BIN"
+printf '#!/bin/sh\necho "sshm 0.1.9"\n' >"$USER_BIN/sshm"
+chmod +x "$USER_BIN/sshm"
+BEFORE=$(sha256_of "$USER_BIN/sshm")
+ARGS=()
+run_install
+AFTER=$(sha256_of "$USER_BIN/sshm")
+assert_eq "1" "$RC" "exits non-zero"
+assert_contains "Exec format error" "$ALL" "the binary's own stderr reaches the user"
+assert_contains "did not report a version" "$ALL" "still says what was checked"
+assert_contains "Nothing was installed" "$ALL" "and the promise still holds"
 assert_eq "$BEFORE" "$AFTER" "the existing binary is byte-identical"
 
 # ---------------------------------------------------------------------------

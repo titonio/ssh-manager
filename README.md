@@ -59,6 +59,10 @@ cargo install --path .
 
 Download the pre-built binary for your platform from the [GitHub Releases](https://github.com/titonio/ssh-manager/releases) page.
 
+Linux ships as a static musl binary for `x86_64` and `aarch64` — the
+aarch64 build is the one Termux on Android installs. macOS ships `x86_64`
+and `aarch64` (Apple Silicon), Windows `x86_64`.
+
 ## Usage
 
 ### Running the Application
