@@ -371,7 +371,7 @@ in-app, so the release note must say plainly: run `install.sh` once.
 
 ## Version History
 
-- **0.1.13** - `sshm update`: a real Apply Update. It replaces the installed binary in place; `sshm check-update` is now purely a question and downloads nothing; the update surfaces say only what is true. **A binary at 0.1.12 or older has no working update path — run `install.sh` once to get this one; no in-app update can reach it**
+- **0.1.13** - aarch64 Linux binaries: `install.sh` and `sshm update` now resolve `aarch64-unknown-linux-musl`, so ARM Linux gets a runnable asset instead of "No release asset matches this platform". Also `sshm update`: a real Apply Update. It replaces the installed binary in place; `sshm check-update` is now purely a question and downloads nothing; the update surfaces say only what is true. **A binary at 0.1.12 or older has no working update path — run `install.sh` once to get this one; no in-app update can reach it**
 - **0.1.12** - fixed shell init: normal TAB completion survives `sshm init zsh` (non-dot fallthrough), and bash never rebinds TAB
 - **0.1.11** - the new inline Clack-style frame (add, edit, delete, pick), a design-token theme layer, cached update notes, and a rustls security bump
 - **0.1.10** - `**<TAB>` completion trigger, bash support for `sshm init`, `--no-bind` flag, and serialized test fixes
