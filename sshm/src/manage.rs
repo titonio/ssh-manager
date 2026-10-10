@@ -36,7 +36,7 @@ use crate::connections::ConnectionDraft;
 use crate::inline::InlineOutcome;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-/// The step the manage frame is on.
+/// What the manage frame is showing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
     /// The list: the filter is live and the cursor picks a target.
@@ -98,11 +98,10 @@ pub enum Phase {
 ///   let ssh use the local login name", so leaving it blank is a real
 ///   answer, not a missing one.
 /// * **Port** — optional with the SSH default. Empty settles as `22`,
-///   which is what [`ConnectionDraft::clear`] seeds and what
-///   `connections::connection_from` falls back to. Anything that is not
-///   a number in `1..=65535` is rejected, because a `port` that silently
-///   becomes `22` after the user typed `99999` is a Connection that
-///   connects to the wrong machine.
+///   which is what `connections::connection_from` falls back to. Anything
+///   that is not a number in `1..=65535` is rejected, because a `port`
+///   that silently becomes `22` after the user typed `99999` is a
+///   Connection that connects to the wrong machine.
 /// * **Key, Folder** — optional, and *absent* when left empty.
 ///   `Connection::key_path` and `::folder` are `Option<String>`, and a
 ///   settled empty string would reach `ssh` as `-i ""`.
@@ -134,8 +133,8 @@ impl FormField {
         FormField::Folder,
     ];
 
-    /// The step's label — the word that wears the `◆` in the header and
-    /// the `◇` once it has settled.
+    /// The field's label — the word that wears the `◆` when its row is
+    /// focused and the `◇` once it has settled.
     pub fn label(self) -> &'static str {
         match self {
             FormField::Alias => "Alias",
@@ -152,12 +151,12 @@ impl FormField {
         matches!(self, FormField::Alias | FormField::Host)
     }
 
-    /// Validate and normalise one step's answer.
+    /// Validate and normalise one row's answer.
     ///
     /// `Ok(value)` is what settles into the draft — trimmed, and for the
-    /// port step the empty answer already replaced with the SSH default.
+    /// port row the empty answer already replaced with the SSH default.
     /// `Err(message)` is the sentence the frame shows while the user stays
-    /// on this step with what they typed still there.
+    /// on this row with what they typed still there.
     ///
     /// The empty-answer rule is asked of [`FormField::required`], not
     /// re-decided here: a required field never settles empty, and an
@@ -435,7 +434,7 @@ fn refusal_line(problems: &[(&'static str, String)], nothing_changed: bool) -> S
 ///
 /// **One surface with two starting drafts.** `Ctrl+A` opens it blank,
 /// `Ctrl+E` opens it seeded from a Connection that already exists. There is
-/// no second editor: the differences are that the rows arrive filled, the
+/// no second map: the differences are that the rows arrive filled, the
 /// ▶ row says *Save* and names the Connection, and a save that changes
 /// nothing is refused. Two flows that look alike and behave differently are
 /// the thing users get wrong; one flow with a different starting draft is
@@ -443,7 +442,7 @@ fn refusal_line(problems: &[(&'static str, String)], nothing_changed: bool) -> S
 ///
 /// The draft is **live** — every keystroke writes straight into the field
 /// the cursor is on. That is what lets the map show all six fields at once
-/// from one source of truth instead of one step at a time, and it is why
+/// from one source of truth instead of one field at a time, and it is why
 /// there is no separate `input` line that has to be settled before the row
 /// stops lying: the row *is* the draft.
 ///
@@ -649,6 +648,7 @@ impl FormMap {
     }
 }
 
+/// What the last management action did.
 ///
 /// Rendered by the frame as the settled `■` line plus the dim `◇` note
 /// (#36). It is kept on the state rather than being a one-frame flash so the
@@ -676,11 +676,11 @@ pub enum Trace {
     /// Connection**.
     ///
     /// Earned through [`settle_add`], never by the keystroke that
-    /// finished the sequence — the same discipline [`Trace::Deleted`]
+    /// left the map — the same discipline [`Trace::Deleted`]
     /// is held to. `◇ added [prod] web-01` is a claim about
     /// `connections.json`, and only the store gets to make it.
     Added { connection: Connection },
-    /// The sequence was walked back off its first step. Nothing was
+    /// The map was backed out of without submitting. Nothing was
     /// written, and the note says so rather than leaving the user to
     /// wonder whether a half-filled Connection got saved.
     AddAbandoned,
@@ -695,7 +695,7 @@ pub enum Trace {
     /// field is what the user just typed and already knows; the thing they
     /// want confirmed is *which Connection* the file changed.
     Edited { connection: Connection },
-    /// The editor was abandoned. Nothing was written.
+    /// The edit map was abandoned. Nothing was written.
     ///
     /// The edit half of [`Trace::AddAbandoned`]: backing out of a
     /// half-typed field leaves the Connection exactly as it was, and the
@@ -768,7 +768,7 @@ pub struct ManageState {
     /// The frame clamps it to the rows that exist and the driver writes the
     /// clamped value back, exactly as the pick loop does.
     pub selection: usize,
-    /// Which step the frame is on.
+    /// What the frame is showing.
     pub phase: Phase,
     /// What the last management action did, shown above the rows.
     pub trace: Option<Trace>,
@@ -781,7 +781,7 @@ impl Default for ManageState {
 }
 
 impl ManageState {
-    /// An empty list step.
+    /// The frame as a bare list.
     pub fn new() -> Self {
         Self {
             query: String::new(),
@@ -791,7 +791,7 @@ impl ManageState {
         }
     }
 
-    /// A list step seeded with a filter.
+    /// A list seeded with a filter.
     pub fn with_query(query: impl Into<String>) -> Self {
         Self {
             query: query.into(),
@@ -809,7 +809,7 @@ impl ManageState {
 pub enum Effect {
     /// Persist the removal of the Connection the confirm named.
     ///
-    /// Emitted only from the confirm step, and only for the captured target.
+    /// Emitted only from the confirm, and only for the captured target.
     /// The whole Connection travels with the request rather than just its
     /// id, because the answer the frame owes the user afterwards is about
     /// *this* Connection — and if the store reports it never had one, the
@@ -834,7 +834,7 @@ pub enum Effect {
     ///   driver nothing to name;
     /// * the store's `update` takes a draft and keeps the id, so sending
     ///   the unchanged fields as they were read means the write cannot
-    ///   clobber a field the editor never touched.
+    ///   clobber a field the map never touched.
     Update {
         /// The Connection the chord was pressed over.
         target: Connection,
@@ -935,14 +935,14 @@ pub fn settle_delete(
 /// rebuilt from.
 ///
 /// The add half of the honesty rule, mirroring [`settle_delete`]: the
-/// sequence finishing is what the user *did*, and `◇ added` is a claim
+/// map submitting is what the user *did*, and `◇ added` is a claim
 /// about the file. A draft that came back `Err` never earns the word —
 /// the Connection is not in `connections.json`, and a frame that said it
 /// was would be describing a write that did not happen.
 ///
 /// * `Ok(conn)` — the note earns `added`, and names the Connection the
 ///   store actually built (its id, its folder, its port — not what the
-///   user typed at step one).
+///   user typed into the Alias row).
 /// * `Err(message)` — the store refused. The caller collapses the frame
 ///   to `◆ error …`, the same way a refused delete does: a live list the
 ///   store cannot vouch for is worse than no list.
@@ -1027,7 +1027,7 @@ impl EditOutcome {
 /// [`settle_delete`]:
 ///
 /// * `Updated(conn)` — the note earns `edited`, and names the Connection
-///   the store actually wrote, not the one the editor started from. If
+///   the store actually wrote, not the one the map started from. If
 ///   the store changed something on the way in, the frame reports what
 ///   came back.
 /// * `Absent` — the user said yes to editing a Connection the store does
@@ -1184,7 +1184,7 @@ pub fn step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) -
     }
 }
 
-/// The list step: filter, movement, and the chords that start an action.
+/// The list: filter, movement, and the chords that start an action.
 ///
 /// This is the whole of the manage frame's key behaviour while it is just a
 /// list, so that the driver has one place to ask rather than a `match` that
@@ -1268,7 +1268,7 @@ fn list_step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) 
     Step::state_only(next)
 }
 
-/// The confirm step: `y` deletes, everything else declines.
+/// The confirm: `y` deletes, everything else declines.
 ///
 /// The answer set is deliberately tiny and the default is No:
 ///

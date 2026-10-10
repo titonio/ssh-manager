@@ -660,7 +660,7 @@ const FIELD_LABEL_WIDTH: usize = 6;
 /// through a function that has no business knowing one.
 const RULE_WIDTH: usize = 34;
 
-/// The step's rejection, shown under the header.
+/// The map's rejection, shown under the header.
 ///
 /// `!` plus the sentence, in the `warning` role. The role existed so a
 /// warning never invents a hue; this is the first thing to draw it. The
@@ -725,7 +725,7 @@ fn update_note_line(version: &str, t: &Theme, width: usize) -> Line<'static> {
     }
 }
 
-/// The note an abandoned add sequence leaves.
+/// The note an abandoned add leaves.
 ///
 /// Worded to answer the one question the user has after backing out of a
 /// half-filled form: *did the half of it get saved?* It did not, and the
@@ -1316,7 +1316,7 @@ const CORNER: &str = "└";
 /// What the empty frame tells the user to do next.
 ///
 /// Both arms name something that works today. The manage arm names the
-/// chord: as of #37 `Ctrl+A` walks the add sequence and writes the
+/// chord: as of #37 `Ctrl+A` opens the form map and writes the
 /// Connection, so an empty manage frame — the exact place a new user
 /// starts — can point straight at the action instead of at a command
 /// outside the frame.
@@ -1359,7 +1359,7 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// not the one that happens.
 ///
 /// While the delete confirm is open the rail changes to the answers that
-/// step actually reads, in the same order: the way out first. The import
+/// confirm actually reads, in the same order: the way out first. The import
 /// offer wears the same rail — same answers, same order, because it is
 /// the same kind of ask with the same conservative answer set.
 ///
@@ -1436,7 +1436,7 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
 /// The `◆ <question>` line that opens every frame.
 ///
 /// While the delete confirm is open the question *is* the header — that is
-/// the Clack grammar for a step: one line, one ask. The folder prefix and
+/// the Clack grammar for a confirm: one line, one ask. The folder prefix and
 /// the `(y/N)` answer hint are dim and the alias is bold, exactly as they
 /// are in the row the confirm is about, so the two read as the same
 /// Connection.
@@ -1562,7 +1562,7 @@ pub fn display_import_path(path: &str, home: Option<&str>) -> String {
     }
 }
 
-/// The caret the add step draws for itself.
+/// The caret the add map draws for itself.
 ///
 /// The frame hides the hardware cursor for its whole life — it has to,
 /// or a redraw would leave a blinking cell in the middle of a frame that

@@ -31,16 +31,6 @@ pub struct ConnectionDraft {
 }
 
 impl ConnectionDraft {
-    /// Reset to a blank draft, with the SSH default port already filled in.
-    pub fn clear(&mut self) {
-        self.alias.clear();
-        self.host.clear();
-        self.user.clear();
-        self.port = "22".to_string();
-        self.key_path.clear();
-        self.folder.clear();
-    }
-
     /// Seed a draft from an existing Connection, so an edit starts where that
     /// Connection left off.
     pub fn from_connection(conn: &Connection) -> Self {
