@@ -114,7 +114,7 @@ pub enum Phase {
 /// repair afterwards. That was a spec gap, not a design: `sshm add --user`
 /// has always accepted one. See `docs/adr/0001-form-map-replaces-the-stepped-add.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AddField {
+pub enum FormField {
     Alias,
     Host,
     User,
@@ -123,40 +123,33 @@ pub enum AddField {
     Folder,
 }
 
-impl AddField {
+impl FormField {
     /// The order the map walks, top to bottom.
-    pub const ORDER: [AddField; 6] = [
-        AddField::Alias,
-        AddField::Host,
-        AddField::User,
-        AddField::Port,
-        AddField::Key,
-        AddField::Folder,
+    pub const ORDER: [FormField; 6] = [
+        FormField::Alias,
+        FormField::Host,
+        FormField::User,
+        FormField::Port,
+        FormField::Key,
+        FormField::Folder,
     ];
 
     /// The step's label — the word that wears the `◆` in the header and
     /// the `◇` once it has settled.
     pub fn label(self) -> &'static str {
         match self {
-            AddField::Alias => "Alias",
-            AddField::Host => "Host",
-            AddField::User => "User",
-            AddField::Port => "Port",
-            AddField::Key => "Key",
-            AddField::Folder => "Folder",
+            FormField::Alias => "Alias",
+            FormField::Host => "Host",
+            FormField::User => "User",
+            FormField::Port => "Port",
+            FormField::Key => "Key",
+            FormField::Folder => "Folder",
         }
-    }
-
-    /// The next step, or `None` after the last one — which is the answer
-    /// that turns "settle this field" into "add the Connection".
-    pub fn next(self) -> Option<AddField> {
-        let i = Self::ORDER.iter().position(|f| *f == self)?;
-        Self::ORDER.get(i + 1).copied()
     }
 
     /// Whether this field must be answered with something.
     fn required(self) -> bool {
-        matches!(self, AddField::Alias | AddField::Host)
+        matches!(self, FormField::Alias | FormField::Host)
     }
 
     /// Validate and normalise one step's answer.
@@ -166,7 +159,7 @@ impl AddField {
     /// `Err(message)` is the sentence the frame shows while the user stays
     /// on this step with what they typed still there.
     ///
-    /// The empty-answer rule is asked of [`AddField::required`], not
+    /// The empty-answer rule is asked of [`FormField::required`], not
     /// re-decided here: a required field never settles empty, and an
     /// optional one falls through to its own default — the port to the
     /// SSH default, everything else to absent. One field list stating
@@ -180,13 +173,13 @@ impl AddField {
                 return Err(format!("{} is required", self.label().to_lowercase()));
             }
             return match self {
-                AddField::Port => Ok(DEFAULT_PORT.to_string()),
+                FormField::Port => Ok(DEFAULT_PORT.to_string()),
                 _ => Ok(String::new()),
             };
         }
 
         match self {
-            AddField::Port => match value.parse::<u16>() {
+            FormField::Port => match value.parse::<u16>() {
                 // Short on purpose. The full sentence ("must be a number
                 // from 1 to 65535") plus the example plus two other
                 // problems on the line overruns 80 columns; this leaves
@@ -200,30 +193,18 @@ impl AddField {
 
     /// The value this field holds in a draft, as a borrow.
     ///
-    /// The one place that names which draft member a field *is*. Both
-    /// [`Self::settled_value`] and the edit path's pre-fill read through
-    /// it, so the two can never disagree about what `Port` means.
+    /// The one place that names which draft member a field *is*. The glyphs,
+    /// the diff and the settled draft all read through it, so they can never
+    /// disagree about what `Port` means.
     fn field_of(self, draft: &ConnectionDraft) -> &str {
         match self {
-            AddField::Alias => &draft.alias,
-            AddField::Host => &draft.host,
-            AddField::User => &draft.user,
-            AddField::Port => &draft.port,
-            AddField::Key => &draft.key_path,
-            AddField::Folder => &draft.folder,
+            FormField::Alias => &draft.alias,
+            FormField::Host => &draft.host,
+            FormField::User => &draft.user,
+            FormField::Port => &draft.port,
+            FormField::Key => &draft.key_path,
+            FormField::Folder => &draft.folder,
         }
-    }
-
-    /// The value this field holds in a live Connection, as text.
-    ///
-    /// What the in-place editor pre-fills the line with. Routed through
-    /// [`ConnectionDraft::from_connection`] rather than reading
-    /// `Connection` directly so the editor shows the same spelling the
-    /// store would write — the port as digits, an absent optional as
-    /// empty — and not a second formatting of its own.
-    pub fn current(self, conn: &Connection) -> String {
-        self.field_of(&ConnectionDraft::from_connection(conn))
-            .to_string()
     }
 
     /// Why this field is wrong, if it is. `None` means it is fine.
@@ -245,12 +226,12 @@ impl AddField {
     /// Write a settled value into the draft.
     fn commit(self, draft: &mut ConnectionDraft, value: String) {
         match self {
-            AddField::Alias => draft.alias = value,
-            AddField::Host => draft.host = value,
-            AddField::User => draft.user = value,
-            AddField::Port => draft.port = value,
-            AddField::Key => draft.key_path = value,
-            AddField::Folder => draft.folder = value,
+            FormField::Alias => draft.alias = value,
+            FormField::Host => draft.host = value,
+            FormField::User => draft.user = value,
+            FormField::Port => draft.port = value,
+            FormField::Key => draft.key_path = value,
+            FormField::Folder => draft.folder = value,
         }
     }
 }
@@ -267,27 +248,27 @@ const DEFAULT_PORT: u16 = 22;
 /// the same arrows the fields are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormCursor {
-    Field(AddField),
+    Field(FormField),
     Submit,
 }
 
 impl FormCursor {
     /// Fields plus the submit row.
-    pub const ROWS: usize = AddField::ORDER.len() + 1;
+    pub const ROWS: usize = FormField::ORDER.len() + 1;
 
     /// The row's position, top to bottom.
     pub fn index(self) -> usize {
         match self {
-            FormCursor::Field(f) => AddField::ORDER.iter().position(|x| *x == f).unwrap_or(0),
-            FormCursor::Submit => AddField::ORDER.len(),
+            FormCursor::Field(f) => FormField::ORDER.iter().position(|x| *x == f).unwrap_or(0),
+            FormCursor::Submit => FormField::ORDER.len(),
         }
     }
 
     fn from_index(i: usize) -> Self {
-        if i >= AddField::ORDER.len() {
+        if i >= FormField::ORDER.len() {
             FormCursor::Submit
         } else {
-            FormCursor::Field(AddField::ORDER[i])
+            FormCursor::Field(FormField::ORDER[i])
         }
     }
 
@@ -359,7 +340,7 @@ impl RowGlyph {
 /// One row of the form map, ready for the frame to draw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapRow {
-    pub field: AddField,
+    pub field: FormField,
     pub label: &'static str,
     /// Whether this field must be filled.
     ///
@@ -379,8 +360,8 @@ pub struct MapRow {
 ///
 /// The error line is built from this, so "which fields are wrong" is
 /// answered by the same call that paints the glyphs.
-pub fn field_problems(draft: &ConnectionDraft) -> Vec<(&'static str, String)> {
-    AddField::ORDER
+fn field_problems(draft: &ConnectionDraft) -> Vec<(&'static str, String)> {
+    FormField::ORDER
         .iter()
         .filter_map(|f| f.problem(draft).map(|m| (f.label(), m)))
         .collect()
@@ -391,9 +372,9 @@ pub fn field_problems(draft: &ConnectionDraft) -> Vec<(&'static str, String)> {
 /// `None` if any field will not settle, which makes this the form's
 /// validity check as well as its normaliser: trim, and the port's
 /// empty-to-`22`, applied at the one moment the value becomes a write.
-pub fn settled_draft(draft: &ConnectionDraft) -> Option<ConnectionDraft> {
+fn settled_draft(draft: &ConnectionDraft) -> Option<ConnectionDraft> {
     let mut out = draft.clone();
-    for f in AddField::ORDER {
+    for f in FormField::ORDER {
         match f.settle(f.field_of(draft)) {
             Ok(value) => f.commit(&mut out, value),
             Err(_) => return None,
@@ -406,12 +387,12 @@ pub fn settled_draft(draft: &ConnectionDraft) -> Option<ConnectionDraft> {
 ///
 /// `baseline` is what the stored Connection holds. `None` on a new
 /// Connection, where nothing can be *changed* — only filled.
-pub fn map_rows(
+fn map_rows(
     draft: &ConnectionDraft,
     focus: FormCursor,
     baseline: Option<&ConnectionDraft>,
 ) -> Vec<MapRow> {
-    AddField::ORDER
+    FormField::ORDER
         .iter()
         .map(|f| {
             let raw = f.field_of(draft);
@@ -442,7 +423,7 @@ pub fn map_rows(
 }
 
 /// The refusal line: every problem with the form, joined for one row.
-pub fn refusal_line(problems: &[(&'static str, String)], nothing_changed: bool) -> String {
+fn refusal_line(problems: &[(&'static str, String)], nothing_changed: bool) -> String {
     let mut parts: Vec<String> = problems.iter().map(|(_, msg)| msg.clone()).collect();
     if nothing_changed {
         parts.push("nothing to save".to_string());
@@ -468,7 +449,7 @@ pub fn refusal_line(problems: &[(&'static str, String)], nothing_changed: bool) 
 ///
 /// Normalisation is deliberately **not** applied while typing. Showing `22`
 /// in a field the user left empty would be putting words in their mouth;
-/// the map shows what was typed, and [`settled_draft`] applies the defaults
+/// the map shows what was typed, and `settled_draft` applies the defaults
 /// at the moment the value becomes a write.
 ///
 /// **An edit departs from #31 story 26**, which asked that an edit "change
@@ -521,7 +502,7 @@ impl FormMap {
     /// Open a blank map, cursor on the first field (`Ctrl+A`).
     pub fn start() -> Self {
         Self {
-            cursor: FormCursor::Field(AddField::Alias),
+            cursor: FormCursor::Field(FormField::Alias),
             draft: ConnectionDraft::default(),
             error: None,
             stored: None,
@@ -537,7 +518,7 @@ impl FormMap {
     pub fn from_connection(target: &Connection) -> Self {
         let draft = ConnectionDraft::from_connection(target);
         Self {
-            cursor: FormCursor::Field(AddField::Alias),
+            cursor: FormCursor::Field(FormField::Alias),
             draft: draft.clone(),
             error: None,
             stored: Some(StoredDraft {
@@ -570,11 +551,11 @@ impl FormMap {
     /// Compared trimmed: typing three spaces into an empty optional is not
     /// a change to the file, and calling it one would let the ▶ row light
     /// up for a save that changes nothing.
-    pub fn changed(&self) -> Vec<AddField> {
+    pub fn changed(&self) -> Vec<FormField> {
         let Some(stored) = &self.stored else {
             return Vec::new();
         };
-        AddField::ORDER
+        FormField::ORDER
             .iter()
             .filter(|f| f.field_of(&self.draft).trim() != f.field_of(&stored.baseline).trim())
             .copied()
