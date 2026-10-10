@@ -338,23 +338,16 @@ pub struct FormFlow {
     /// Drives the dim-until-ready treatment. A button that looks live and
     /// then refuses is worse than one that says it is not ready.
     pub submit_ready: bool,
-    /// The `\u25b6` row's words: `Add connection`, or `Save changes to web-1`.
+    /// The `\u25b6` row's words, from the open map.
     ///
-    /// The edit form carries its target here rather than on a title row,
-    /// because the rule row is the row the error takes over \u2014 and losing
-    /// "which Connection am I editing?" at the exact moment something
-    /// went wrong is the worst possible time to lose it.
+    /// The map carries its target here rather than on a title row, because
+    /// the rule row is the row the error takes over \u2014 and losing "which
+    /// Connection am I editing?" at the exact moment something went wrong
+    /// is the worst possible time to lose it.
     pub submit_label: String,
-    /// What an empty field shows in place of a value.
-    ///
-    /// Add says `<optional>`: an invitation. Edit says `<not set>`: a
-    /// fact about the stored Connection. Same tier, different sentence,
-    /// because the two modes are answering different questions.
+    /// What an empty field shows in place of a value, from the open map.
     pub placeholder: &'static str,
-    /// The header's words: `New connection`, or `[prod] web-1`.
-    ///
-    /// Built where the target is in hand rather than in the renderer, so
-    /// the folder prefix and the alias come from one place.
+    /// The header's words, from the open map.
     pub header: String,
     /// The refusal, drawn in the rule row in place of the separator.
     pub error: Option<String>,
@@ -365,32 +358,16 @@ impl From<&crate::manage::ManageState> for FrameFlow {
         let (confirming, form, import_offer) = match &state.phase {
             crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None, None),
             crate::manage::Phase::List => (None, None, None),
-            crate::manage::Phase::Add(sequence) => (
+            crate::manage::Phase::Form(map) => (
                 None,
                 Some(FormFlow {
-                    rows: sequence.rows(),
-                    submit_focused: sequence.cursor.is_submit(),
-                    submit_ready: sequence.ready(),
-                    submit_label: "Add connection".to_string(),
-                    placeholder: "<optional>",
-                    header: "New connection".to_string(),
-                    error: sequence.error.clone(),
-                }),
-                None,
-            ),
-            crate::manage::Phase::Edit(editor) => (
-                None,
-                Some(FormFlow {
-                    rows: editor.rows(),
-                    submit_focused: editor.cursor.is_submit(),
-                    submit_ready: editor.ready(),
-                    submit_label: format!("Save changes to {}", editor.target.alias),
-                    placeholder: "<not set>",
-                    header: match editor.target.folder.as_deref().filter(|f| !f.is_empty()) {
-                        Some(folder) => format!("Edit [{folder}] {}", editor.target.alias),
-                        None => format!("Edit {}", editor.target.alias),
-                    },
-                    error: editor.error.clone(),
+                    rows: map.rows(),
+                    submit_focused: map.cursor.is_submit(),
+                    submit_ready: map.ready(),
+                    submit_label: map.submit_label(),
+                    placeholder: map.placeholder(),
+                    header: map.header(),
+                    error: map.error.clone(),
                 }),
                 None,
             ),
