@@ -2349,4 +2349,130 @@ pub mod tests {
 
         std::env::remove_var("SSHM_BIND_KEY");
     }
+
+    // ── the step the frame opens on (#38) ───────────────────────────────
+    //
+    // `importable_ssh_config` is the one place that resolves the real
+    // `~/.ssh/config`, so these are the tests that have to point `HOME` at a
+    // directory of their own — the same throwaway home `config.rs` uses.
+
+    /// A throwaway `HOME` with an ssh config in it, so the offer is asked
+    /// about a file the test wrote rather than anyone's real one. Restored on
+    /// the way out: a leaked `HOME` is a different test's flake.
+    struct TempHome {
+        dir: tempfile::TempDir,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl TempHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("a throwaway home");
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", dir.path());
+            Self { dir, previous }
+        }
+
+        fn write_ssh_config(&self, content: &str) {
+            let ssh_dir = self.dir.path().join(".ssh");
+            std::fs::create_dir_all(&ssh_dir).expect("the ssh dir");
+            std::fs::write(ssh_dir.join("config"), content).expect("the ssh config");
+        }
+
+        fn ssh_config(&self) -> String {
+            self.dir
+                .path()
+                .join(".ssh")
+                .join("config")
+                .to_string_lossy()
+                .into_owned()
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    const TWO_STANZAS: &str = "Host web-01\n    HostName web.example.com\n\nHost db-01\n    HostName db.example.com\n";
+
+    /// The file a first run could import from, with how many stanzas it holds.
+    /// Both halves are the offer: the count is what the frame says and the
+    /// path is what it points at. An answer of "0 connections from ``" is
+    /// worse than saying nothing at all, because it is a question with no
+    /// possible yes.
+    #[test]
+    #[serial_test::serial]
+    fn the_importable_file_is_named_with_the_count_it_holds() {
+        let home = TempHome::new();
+        home.write_ssh_config(TWO_STANZAS);
+        let store = config::Config::new();
+
+        let (count, path) = importable_ssh_config(&store).expect("two stanzas in an empty set is an offer");
+
+        assert_eq!(count, 2, "the offer counts the stanzas, not the hosts");
+        assert_eq!(
+            path,
+            home.ssh_config(),
+            "the offer names the file it is offering to read"
+        );
+    }
+
+    /// A home with no ssh config has nothing to offer, and the frame opens on
+    /// its list. Inventing an offer here sends a returning user to a
+    /// confirmation for a file that does not exist.
+    #[test]
+    #[serial_test::serial]
+    fn a_home_with_no_ssh_config_offers_nothing() {
+        let home = TempHome::new();
+        let store = config::Config::new();
+
+        assert!(
+            importable_ssh_config(&store).is_none(),
+            "no file, no offer: the frame opens on the list"
+        );
+    }
+
+    /// Manage opens on the offer: an empty set with importable stanzas behind
+    /// it, seeded as a step of the frame rather than a flag the driver
+    /// re-derives, and carrying the count and the file the reader is being
+    /// asked to approve.
+    #[test]
+    #[serial_test::serial]
+    fn manage_opens_on_the_offer_when_there_is_something_to_import() {
+        let home = TempHome::new();
+        home.write_ssh_config(TWO_STANZAS);
+        let store = config::Config::new();
+
+        let offer = opening_offer(&store, FrameMode::Manage)
+            .expect("an empty set with stanzas behind it opens on the offer");
+        let Phase::ConfirmImport { count, path } = offer.phase else {
+            panic!("manage opens on the offer, not on the list: {:?}", offer.phase);
+        };
+        assert_eq!(count, 2, "the offer says how many stanzas are waiting");
+        assert_eq!(
+            path,
+            home.ssh_config(),
+            "and which file they are waiting in"
+        );
+    }
+
+    /// The offer belongs to manage alone. The pick frame asks no questions and
+    /// an import is a write, so a picker that opened on the offer would be
+    /// asking the reader to change the file as a side effect of tab-completion.
+    #[test]
+    #[serial_test::serial]
+    fn the_pick_frame_never_opens_on_the_offer() {
+        let home = TempHome::new();
+        home.write_ssh_config(TWO_STANZAS);
+        let store = config::Config::new();
+
+        assert!(
+            opening_offer(&store, FrameMode::Pick).is_none(),
+            "picking never offers an import, however importable the file"
+        );
+    }
 }

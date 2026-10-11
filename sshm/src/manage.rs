@@ -276,8 +276,13 @@ impl FormCursor {
     /// `↓` saturates because it is the *reading* key: a user walking the
     /// map with it expects to stop at the end, not to be teleported to the
     /// top and have to read the whole thing again to find where they were.
+    ///
+    /// Saturating needs no clamp: [`Self::from_index`] already calls every
+    /// index past the last field the submit row, and one past the submit row
+    /// is still past it. A `.min` here would be arithmetic that looks like it
+    /// protects the bottom row and in fact cannot be reached.
     pub fn down(self) -> Self {
-        Self::from_index((self.index() + 1).min(Self::ROWS - 1))
+        Self::from_index(self.index() + 1)
     }
 
     /// One row up, stopping at the top.

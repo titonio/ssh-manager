@@ -597,26 +597,28 @@ fn an_edit_answers_with_the_id_the_caller_asked_for() {
 fn the_store_update_answers_with_the_connection_it_wrote() {
     let home = TempHome::new();
     let mut config = Config::new();
-    let edited =
+    let target =
         connections::add(&mut config, &draft("web-01", "10.0.0.4", "deploy", "22")).unwrap();
     let neighbour =
         connections::add(&mut config, &draft("db-01", "10.0.0.9", "dba", "5432")).unwrap();
 
     let store: &mut dyn Store = &mut config;
     let written = store
-        .update(
-            &edited.id,
-            &draft("web-01", "10.0.0.99", "deploy", "2222"),
-        )
+        .update(&target.id, &draft("web-01", "10.0.0.99", "deploy", "2222"))
         .expect("editing a known Connection should succeed")
         .expect("the store found that Connection and edited it, so it must say so");
 
-    assert_eq!(written.id, edited.id, "the answer is about that Connection");
+    assert_eq!(written.id, target.id, "the answer is about that Connection");
     assert_eq!(written.host, "10.0.0.99", "the answer is the new value");
     assert_eq!(written.port, 2222);
-    assert_eq!(store.all().len(), 2, "the set the frame lists has one more edit, not one more row");
     assert_eq!(
-        store.all()[1].id, neighbour.id,
+        store.all().len(),
+        2,
+        "the set the frame lists has one more edit, not one more row"
+    );
+    assert_eq!(
+        store.all()[1].id,
+        neighbour.id,
         "the Connection that was not targeted is untouched"
     );
 
@@ -637,10 +639,7 @@ fn an_ephemeral_edit_keeps_the_id_the_caller_asked_for() {
     let mut store = Ephemeral::new(vec![connection("id-web-01", "web-01")]);
 
     let written = store
-        .update(
-            "id-web-01",
-            &draft("web-01", "10.0.0.99", "deploy", "2222"),
-        )
+        .update("id-web-01", &draft("web-01", "10.0.0.99", "deploy", "2222"))
         .expect("editing a known Connection should succeed")
         .expect("the Connection was there to be edited");
 
@@ -650,11 +649,13 @@ fn an_ephemeral_edit_keeps_the_id_the_caller_asked_for() {
     );
     assert_eq!(store.all().len(), 1, "an edit replaces a Connection");
     assert_eq!(
-        store.all()[0].id, "id-web-01",
+        store.all()[0].id,
+        "id-web-01",
         "the row the frame lists keeps the id the next edit will ask for"
     );
     assert_eq!(
-        store.all()[0].host, "10.0.0.99",
+        store.all()[0].host,
+        "10.0.0.99",
         "the change landed on that row"
     );
 }
@@ -671,24 +672,30 @@ fn ephemeral_update_edits_the_connection_with_that_id_and_no_other() {
     ]);
 
     let written = store
-        .update(
-            "id-web-02",
-            &draft("web-02", "10.0.0.99", "deploy", "2222"),
-        )
+        .update("id-web-02", &draft("web-02", "10.0.0.99", "deploy", "2222"))
         .expect("editing a known Connection should succeed")
         .expect("the Connection was there to be edited");
 
-    assert_eq!(written.id, "id-web-02", "the edit answers about the row it was asked for");
+    assert_eq!(
+        written.id, "id-web-02",
+        "the edit answers about the row it was asked for"
+    );
     assert_eq!(store.all().len(), 2, "an edit replaces a Connection");
     assert_eq!(
-        store.all()[0].alias, "web-01",
+        store.all()[0].alias,
+        "web-01",
         "the Connection that was not targeted keeps its alias"
     );
     assert_eq!(
-        store.all()[0].host, "10.0.0.4",
+        store.all()[0].host,
+        "10.0.0.4",
         "the Connection that was not targeted keeps its host"
     );
-    assert_eq!(store.all()[1].host, "10.0.0.99", "the targeted row is the one that changed");
+    assert_eq!(
+        store.all()[1].host,
+        "10.0.0.99",
+        "the targeted row is the one that changed"
+    );
     assert_eq!(
         store.all().iter().filter(|c| c.id == "id-web-02").count(),
         1,
@@ -709,10 +716,7 @@ fn ephemeral_update_answers_with_the_connection_it_wrote() {
     ]);
 
     let written = store
-        .update(
-            "id-web-01",
-            &draft("web-01", "10.0.0.99", "deploy", "2222"),
-        )
+        .update("id-web-01", &draft("web-01", "10.0.0.99", "deploy", "2222"))
         .expect("editing a known Connection should succeed")
         .expect("the harness store found that Connection and edited it, so it must say so");
 
@@ -722,7 +726,11 @@ fn ephemeral_update_answers_with_the_connection_it_wrote() {
     assert_eq!(written.port, 2222);
     assert_eq!(store.all().len(), 2, "the set keeps its two rows");
     assert_eq!(store.all()[0].host, "10.0.0.99", "the set really changed");
-    assert_eq!(store.all()[1].alias, "web-02", "the other row is left alone");
+    assert_eq!(
+        store.all()[1].alias,
+        "web-02",
+        "the other row is left alone"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -743,9 +751,13 @@ fn the_import_writes_nothing_when_no_connection_arrived() {
     let stored = home.path().join(".ssh").join("connections.json");
     assert!(!stored.exists(), "nothing written before the import");
 
-    let report = connections::import(&mut config).expect("an import with nothing to add is not a failure");
+    let report =
+        connections::import(&mut config).expect("an import with nothing to add is not a failure");
 
-    assert_eq!(report.imported, 0, "both stanzas are patterns, so nothing arrived");
+    assert_eq!(
+        report.imported, 0,
+        "both stanzas are patterns, so nothing arrived"
+    );
     assert!(
         !stored.exists(),
         "zero Connections arrived, so the set must not be written at all"
@@ -794,7 +806,10 @@ fn the_import_writes_the_set_when_every_stanza_arrived() {
     let on_disk = std::fs::read_to_string(home.path().join(".ssh").join("connections.json"))
         .expect("three imported Connections are written");
     for alias in ["web-01", "web-02", "db-01"] {
-        assert!(on_disk.contains(alias), "{alias} must be in the persisted set: {on_disk}");
+        assert!(
+            on_disk.contains(alias),
+            "{alias} must be in the persisted set: {on_disk}"
+        );
     }
 }
 
@@ -832,8 +847,63 @@ fn loading_reads_the_connections_the_user_saved() {
     assert_eq!(web.host, "10.0.0.4");
     assert_eq!(web.user, "deploy");
     assert_eq!(web.port, 2222);
-    assert_eq!(web.key_path, Some("/home/deploy/.ssh/id_ed25519".to_string()));
+    assert_eq!(
+        web.key_path,
+        Some("/home/deploy/.ssh/id_ed25519".to_string())
+    );
     assert_eq!(web.folder, Some("production".to_string()));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// What is not a config line — the reader's own floor
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A commented-out stanza stays commented out: `# Host old-box` is a note the
+/// user left themselves, not a Connection waiting to be imported, and a blank
+/// line is a blank line. The reader's contract is that a directive is neither a
+/// blank line nor a comment, so a user who commented a box out before importing
+/// must not get it back as a Connection they never asked for.
+///
+/// Sweep note, so nobody hunts for the missing kill: the `||` → `&&` mutant on
+/// that guard is *equivalent*, and this test does not kill it — it passes under
+/// the mutant. With `&&` the guard can never fire (a trimmed line is never both
+/// empty and starting with `#`), so a comment line does become a directive —
+/// but its keyword starts with `#`, which is not `host` and matches no slot of
+/// `Stanza::set`, so nothing is folded and no stanza is flushed; a blank line
+/// still answers `None` at the keyword's `?`. `parse_ssh_config` is the only
+/// caller and it returns the same entries either way: verified by hand and by
+/// diffing the parse of every single-line file and every ordered pair drawn from
+/// a 38-line pool of blanks, whitespace, comments, wildcards and stanzas, plus
+/// 20 000 random six-line files — byte for byte identical, 21 482 cases.
+#[test]
+#[serial_test::serial]
+fn a_comment_or_a_blank_line_never_becomes_a_connection() {
+    let home = TempHome::new();
+    home.write_ssh_config(
+        "# Host commented-out\n\
+         \n\
+         # a note with several words\n\
+         \t\n\
+         Host real-one\n  HostName 10.0.0.1\n  User alice\n\
+         #user bob\n#hostname 10.0.0.2\n#port 9999\n#\n",
+    );
+    let mut config = Config::new();
+
+    let report = connections::import(&mut config).expect("a commented stanza is not a failure");
+
+    let aliases: Vec<String> = config.connections.iter().map(|c| c.alias.clone()).collect();
+    assert_eq!(
+        report.imported, 1,
+        "only the uncommented Host arrived: {aliases:?}"
+    );
+    assert_eq!(
+        report.failed(),
+        0,
+        "a comment is not a stanza that failed to import"
+    );
+    assert_eq!(aliases, vec!["real-one".to_string()]);
+    assert_eq!(config.connections[0].host, "10.0.0.1");
+    assert_eq!(config.connections[0].user, "alice");
 }
 
 fn connection(id: &str, alias: &str) -> sshm::config::Connection {
@@ -846,109 +916,4 @@ fn connection(id: &str, alias: &str) -> sshm::config::Connection {
         key_path: None,
         folder: Some("prod".to_string()),
     }
-}
-
-#[test]
-#[serial_test::serial]
-fn scratch_directive_corpus() {
-    let home = TempHome::new();
-    let corpus = "\
-# sshm corpus
-
-# Host fake-one
-#\tindented comment with several words
-Host real-one
-\tHostName 10.0.0.1
-\t# a comment between keywords
-\tUser alice
-\tPort 2201
-
-\t
- \t 
-Host real-two # trailing words after the value
-    HostName 10.0.0.2
-    User bob
-    IdentityFile ~/.ssh/id_real
-#user carol
-#port 9999
-#hostname 10.0.0.99
-#identityfile ~/.ssh/id_fake
-#
-#
-Host real-three
-    User carol
-";
-    let ssh_dir = home.path().join(".ssh");
-    std::fs::create_dir_all(&ssh_dir).unwrap();
-    std::fs::write(ssh_dir.join("config"), corpus).unwrap();
-    let p = ssh_dir.join("config");
-    let p = p.to_str().unwrap();
-    let entries = sshm::config::parse_ssh_config(p);
-    println!("CORPUS-BEGIN");
-    for e in &entries {
-        println!("{:?}|{:?}|{:?}|{:?}|{:?}", e.host, e.hostname, e.user, e.port, e.key_file);
-    }
-    println!("CORPUS-END");
-    let mut cfg = Config::new();
-    let report = sshm::config::import_from_ssh_config_with_path(&mut cfg, p);
-    println!("IMPORT {} {:?}", report.imported, report.failures);
-    for c in &cfg.connections {
-        println!("CONN {:?}|{:?}|{:?}|{:?}", c.alias, c.host, c.user, c.port);
-    }
-    println!("COUNT {}", sshm::config::count_importable(&cfg.connections, p));
-}
-
-#[test]
-#[serial_test::serial]
-fn scratch_directive_differential() {
-    let pool: Vec<&str> = vec![
-        "", " ", "\t", "   \t  ",
-        "#", "# ", "#no-space", "# two words", "#Host fake", "# Host fake",
-        "#hostname h", "#user u", "#port 1", "#identityfile k", "#*  *", "#é ü",
-        "Host a", "Host b", "HostName h", "Hostname H", "HOST C", "Host",
-        "User u", "user v", "Port 22", "Port xx", "Port", "IdentityFile k",
-        "identityfile k2", "Hostname", "Unknown kw", "Host x # c", "  Host d  ",
-        "Host *", "Host *.example.com", "Host q?", "\tHost e", "HostName",
-    ];
-    let ssh_dir = TempHome::new().path().join(".ssh");
-    std::fs::create_dir_all(&ssh_dir).unwrap();
-    let file = ssh_dir.join("config");
-    let p = file.to_str().unwrap();
-    let mut dump = String::new();
-    let mut dump_one = |dump: &mut String, body: String| {
-        std::fs::write(&file, &body).unwrap();
-        let entries = sshm::config::parse_ssh_config(p);
-        dump.push_str(&body.replace('\n', "\\n").replace('\t', "\\t"));
-        dump.push_str(" => ");
-        for e in &entries {
-            dump.push_str(&format!(
-                "[{:?}|{:?}|{:?}|{:?}|{:?}]",
-                e.host, e.hostname, e.user, e.port, e.key_file
-            ));
-        }
-        dump.push('\n');
-    };
-    for a in &pool {
-        dump_one(&mut dump, format!("{a}\n"));
-        for b in &pool {
-            dump_one(&mut dump, format!("{a}\n{b}\n"));
-        }
-    }
-    let mut state: u64 = 0x2545F4914F6CDD1D;
-    for _ in 0..20000 {
-        let mut body = String::new();
-        for _ in 0..6 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let i = ((state >> 33) as usize) % pool.len();
-            body.push_str(pool[i]);
-            body.push('\n');
-        }
-        dump_one(&mut dump, body);
-    }
-    println!("DIFFERENTIAL-BEGIN");
-    print!("{dump}");
-    println!("DIFFERENTIAL-END");
-    let mut hasher = 0u64;
-    for b in dump.bytes() { hasher = hasher.wrapping_mul(31).wrapping_add(b as u64); }
-    println!("DUMP-BYTES {} HASH {hasher}", dump.len());
 }
