@@ -21,8 +21,10 @@
 //! * [`fixture`] — the world around it. A temp `HOME`, a seeded store, the
 //!   `ssh` stub, the environment a child is born into.
 
+pub mod colour;
 pub mod fixture;
 pub mod pty;
 
+pub use colour::token;
 pub use fixture::Fixture;
 pub use pty::{Pty, DEFAULT_TIMEOUT};

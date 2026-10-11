@@ -161,6 +161,13 @@ impl PtyBuilder {
     }
 }
 
+/// The two attributes a cell can carry that sshm's design uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CellStyle {
+    pub fg: vt100::Color,
+    pub bold: bool,
+}
+
 /// Blocks forever on `reader`, forwarding every chunk and stopping when the
 /// far end is gone.
 ///
@@ -209,6 +216,18 @@ impl Pty {
         builder.env = fixture.env();
         builder.cwd = Some(fixture.home_dir().to_path_buf());
         builder.spawn()
+    }
+
+    /// Wait until the frame has finished drawing.
+    ///
+    /// A frame is emitted as one burst, top row first and the closing corner of
+    /// the rail last, so the corner is the only marker that means "everything
+    /// above it is here too". A test that waits for a row it recognises in the
+    /// middle of the frame can read the grid while the hint rail is still in
+    /// flight — which under a loaded runner is a failure that comes and goes,
+    /// and a suite with one of those has no right to forbid retries.
+    pub fn wait_for_frame(&mut self) -> io::Result<()> {
+        self.wait_for_text("\u{2514}")
     }
 
     /// Wait until a file the child is expected to write has appeared.
@@ -353,6 +372,20 @@ impl Pty {
             .collect()
     }
 
+    /// The grid as a document: every row down to the last one carrying
+    /// anything, right-trimmed.
+    ///
+    /// This is the shape a golden holds. A golden of a 24-row terminal would
+    /// spend nineteen lines saying "nothing", and the thing a reviewer needs to
+    /// see is the frame's own extent — how tall it is, and where it stops.
+    pub fn screen_document(&mut self) -> String {
+        let rows = self.visible_rows();
+        match rows.iter().rposition(|row| !row.trim().is_empty()) {
+            Some(last) => rows[..=last].join("\n"),
+            None => String::new(),
+        }
+    }
+
     /// The text of one grid row, right-trimmed.
     pub fn row(&mut self, row: u16) -> String {
         self.visible_rows()
@@ -372,6 +405,19 @@ impl Pty {
     pub fn cell_bold(&mut self, row: u16, col: u16) -> Option<bool> {
         self.drain_now();
         self.parser.screen().cell(row, col).map(|c| c.bold())
+    }
+
+    /// Everything a cell's styling carries: colour and weight.
+    ///
+    /// Both, because the selection is carried by a glyph plus a **bold** alias
+    /// rather than by a filled row — a colour-only check would miss half of how
+    /// a user sees which row is theirs.
+    pub fn cell_style(&mut self, row: u16, col: u16) -> Option<CellStyle> {
+        self.drain_now();
+        self.parser.screen().cell(row, col).map(|c| CellStyle {
+            fg: c.fgcolor(),
+            bold: c.bold(),
+        })
     }
 
     /// The colour of the first cell of the first occurrence of `needle`.

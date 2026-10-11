@@ -1,0 +1,16 @@
+---
+source: tests/navigation_test.rs
+expression: screen(&mut pty)
+---
+
+◆ Manage Connections
+│   No matches for "zzz"
+│
+│
+│
+│
+│
+│
+│
+│   Esc cancel · ↑↓ navigate · Ctrl+X delete · Ctrl+A add · Ctrl+E edit
+└
