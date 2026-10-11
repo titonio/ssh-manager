@@ -36,10 +36,12 @@ import time
 # in — so the size is set here rather than left to chance.
 ROWS, COLS = 24, 80
 
-# How long to wait, at most, for each stage. Generous for a loaded CI runner
-# and short enough that a wedged binary still reports within a minute.
-OPEN_TIMEOUT = 15.0
-EXIT_TIMEOUT = 15.0
+# How long to wait, at most, for each stage. Generous for a loaded CI runner,
+# and short enough that the whole run finishes inside the 20 s cargo-mutants
+# gives a test: a mutant that wedges the binary should be reported by the
+# check that caught it, not by a timeout that says nothing.
+OPEN_TIMEOUT = 10.0
+EXIT_TIMEOUT = 6.0
 
 COOKED = termios.ECHO | termios.ICANON
 
@@ -142,15 +144,15 @@ def main():
             % child.returncode
         )
 
-    if not failures:
-        # The frame is open and waiting. What does the terminal say about
-        # itself right now?
-        if lflag(master) & COOKED == COOKED:
-            failures.append(
-                "the frame is open but the terminal is still cooked: keys are "
-                "being echoed and buffered by the line discipline"
-            )
+    if not failures and lflag(master) & COOKED == COOKED:
+        failures.append(
+            "the frame is open but the terminal is still cooked: keys are "
+            "being echoed and buffered by the line discipline"
+        )
 
+    if not failures:
+        # The frame is open and the terminal is ours, so a keystroke can reach
+        # it. Escape cancels.
         os.write(master, b"\x1b")  # Escape: cancel
         drained = pump(
             master, lambda b: CURSOR_RESTORE in b, time.monotonic() + EXIT_TIMEOUT
@@ -171,6 +173,12 @@ def main():
             )
         if CURSOR_RESTORE not in drawn:
             failures.append("the cursor was never given back")
+    elif child.poll() is None:
+        # Something above already went wrong. If the terminal was never taken,
+        # the keystroke that would end the frame cannot reach it, so waiting
+        # for the frame to close on its own would only spend the deadline.
+        child.kill()
+        child.wait()
 
     # The terminal itself, after the frame is gone: handed back as it was
     # found, or left raw for whatever runs next in this shell.

@@ -239,6 +239,20 @@ The application stores its configuration in:
 | `key_path` | Path to private key | No |
 | `folder` | Folder/group for organization | No |
 
+### Where Updates Come From
+
+`sshm check-update` and `sshm update` ask GitHub's release API, which decides
+which release is the latest one — `sshm` does not order releases itself. A
+GitHub Enterprise install asks its own API instead:
+
+```bash
+export SSHM_GITHUB_API_URL='https://github.example.com/api/v3'
+```
+
+Set it to the API root with no trailing slash. With nothing set, the question
+goes to `https://api.github.com`. The release assets come from the same
+response, so an install that can ask its own API downloads from its own API.
+
 ## Architecture
 
 ### Project Structure

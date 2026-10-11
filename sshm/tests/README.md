@@ -38,8 +38,9 @@ bytes the frame emits, which a glyph snapshot cannot.
 | `tests/frame_test.rs` | The frame seam: the Clack grammar, rows, the hint rail and its fitting, transparency, the empty / no-match states, windowing, and column-accurate width fitting |
 | `tests/inline_test.rs` | The live half through the public seam: `diff_rows`, `settle_trace`, `plan_resize`, and that the frame never enters the alternate screen |
 | `tests/main_tests.rs` | `ssh` argument building and execution plumbing |
+| `tests/pty_test.rs` | The frame in a real pseudo-terminal, driven by `tests/pty_frame_check.py`: it draws and waits, the terminal is raw while it does, and the terminal is cooked again afterwards. The only gate with no seam — it runs the built binary and reads the answer off the terminal |
 
-Typical shape of a green run: **624 passed / 0 failed / 4 ignored**, and it is
+Typical shape of a green run: **693 passed / 0 failed / 4 ignored**, and it is
 green with the network unplugged. The four ignored tests are:
 
 | Ignored test | Why |
@@ -53,6 +54,13 @@ wired with (`apply_update_must_not_run` panics if a check or a frame path ever
 reaches the applier) and `NotACheckout` in `update.rs`, which restores
 `CARGO_MANIFEST_DIR` after a test borrowed the absence of it to pose as an
 installed binary.
+
+Two tests cross a process boundary on purpose: the update check against a stub
+on the loopback interface, and the frame under a pseudo-terminal. Neither
+waits on anything outside this machine, which is the property the sentence
+above is really protecting — a sweep runs the suite once per mutant, so
+anything slow is multiplied by ~800 and anything remote makes the result
+depend on the hour.
 
 ## Running
 
@@ -75,7 +83,7 @@ count lines that ran; only a mutant checks that the line matters.
 
 ```bash
 cd sshm
-./mutants.sh                       # the whole crate: 776 mutants, ~40 min on 12 cores
+./mutants.sh                       # the whole crate: 779 mutants, ~40 min on 12 cores
 git diff --relative origin/master > /tmp/d.diff
 ./mutants.sh --in-diff /tmp/d.diff # only the mutants in the lines this branch touched
 ```
@@ -96,35 +104,45 @@ tolerable as standing debt: the suite runs once per mutant, about 800 times a
 sweep, so a flaky test is a flake with 800 chances to land and a hang costs the
 run its signal.
 
-### The five outside the suite's reach
+### The five that were outside the suite's reach
 
-The current sweep is 776 mutants: 660 caught, 111 unviable, 5 missed. None of
-the five is excluded — each runs in every sweep and fails `mutants-in-diff`
-when its line is touched — and each is here so the next reader with a red check
-does not have to work out from scratch what is unreachable about it.
+The sweep is 779 mutants: 668 caught, 111 unviable, **none missed**. It was not
+always: five survived, and each survived because the suite had no way to observe
+the thing it changed. They are recorded here because the seams that closed them
+are not obvious, and because the next mutant that survives will be in the same
+shape — a fact about a terminal, or a fact about a network, sitting behind a
+seam the tests never crossed.
 
-| Mutant | What no test in `cargo test` can see |
-| --- | --- |
-| `run_frame_command` → `Ok(())` | The whole frame command, doing nothing. Proving it does something needs a terminal to draw on; with a pipe for stdout and no `/dev/tty`, the correct code fails for the environment's reason, not the mutant's. |
-| `CrosstermRawMode::enter` → `Ok(())` | Raw mode is a termios state on a real terminal. `enable_raw_mode` opens `/dev/tty`, and a test runner has none, so an error is what the correct code returns there too. |
-| `RawModeGuard::drop` → `()` | The guard's whole job is handing the terminal back, and there is no terminal in the runner to hand back. |
-| `latest_release` → `Ok("")`, `Ok("xyzzy")` | The answer comes from GitHub's `releases/latest`. Nothing in this suite reaches the network by design: the suite runs once per mutant, so a request per mutant is a rate limit and a suite whose result depends on the hour. |
+| Mutant | Why nothing saw it | What closes it |
+| --- | --- | --- |
+| `run_frame_command` → `Ok(())` | The whole frame command, doing nothing. With a pipe for stdout and no controlling terminal, the correct code fails for the environment's reason, not the mutant's. | `tests/pty_test.rs` |
+| `CrosstermRawMode::enter` → `Ok(())` | Raw mode is a termios state on a real terminal, and a test runner has none — so `enable_raw_mode` failed for the correct code too. | `tests/pty_test.rs` |
+| `RawModeGuard::drop` → `()` | The guard's whole job is handing the terminal back, and there was no terminal to hand back. | `tests/pty_test.rs` |
+| `latest_release` → `Ok("")`, `Ok("xyzzy")` | The only answer it can get comes from GitHub's `releases/latest`, and a suite run once per mutant cannot afford a request per mutant. | `SSHM_GITHUB_API_URL` and a loopback stub in `src/update.rs` |
 
-What would kill them, and what each costs:
+The pty harness is the interesting one, because it has no seam: it runs the
+built binary under a pseudo-terminal and reads the answer off the terminal
+itself. On Linux the line discipline belongs to the pty's slave, so
+`tcgetattr` on the master reports the settings the child is running under —
+the test asserts what the terminal says, not what the program claims. It
+checks four things in one session: the frame draws and stays open, the
+terminal is out of cooked mode while it is, Escape ends it with 130, and the
+terminal is cooked again afterwards. It costs 50 ms, which is what makes it
+affordable 779 times a sweep; every wait in it has a deadline, so a mutant that
+wedges the binary is reported by the check that caught it rather than by a
+timeout. A fresh pty has no window size and a terminal with no rows is one the
+frame correctly refuses to draw in, so the harness sets 24x80 first.
 
-- A pty inside `cargo test`: spawn the binary under a pseudo-terminal, assert
-  the frame appears, assert `termios` reports `ECHO` and `ISIG` off while it is
-  open and restored after it closes, assert nothing lands on a piped stdout.
-  That covers the first three, at the price of a pty round-trip in every one of
-  the ~800 test runs a sweep makes, and of the flakiness that comes with timing
-  in a terminal. `scripts/inline-pty-check.py` already drives the binary in a
-  real pty and checks what the frame draws — it does not check termios, and it
-  is wired into neither `cargo test` nor CI.
-- A base-URL seam on the update adapter: the `self-github-update-enhanced` fork
-  already takes `with_url` for GitHub Enterprise, so pointing it at a loopback
-  stub serving one canned body kills the last two offline and deterministically.
-  That is a feature rather than a test-only hole, but it is in the code path that
-  replaces the running binary.
+The update seam is a real feature, not a test hook: the dependency already
+takes a different API root for GitHub Enterprise, and `SSHM_GITHUB_API_URL`
+sets it. The test points it at a one-request server on the loopback interface
+that answers `releases/latest` from a canned body and remembers the request
+line it served, so the check is exercised end to end without anything leaving
+the machine.
+
+`scripts/inline-pty-check.py` remains the manual look-at-the-frame tool; it
+predates the harness and checks what the frame draws rather than what the
+terminal is.
 
 ## The one snapshot that exists
 
