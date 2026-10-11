@@ -304,7 +304,18 @@ cargo test
 ### Run with Coverage
 
 ```bash
-cargo llvm-cov --all-features --lcov --output-path lcov.info
+cd sshm
+./coverage.sh
+```
+
+That runs `cargo llvm-cov --all-features --fail-under-lines 80 --lcov
+--output-path lcov.info`, then the CRAP gate over the same file. CRAP scores
+each function by how complex it is times how little of it the tests cover, so it
+points at the risky gaps rather than at raw coverage. The threshold (12) and
+`--fail-above` live in `sshm/.cargo-crap.toml`, and CI enforces that same file.
+
+```bash
+cargo binstall cargo-llvm-cov cargo-crap   # or: cargo install … --locked
 ```
 
 ### Code Quality
@@ -338,6 +349,7 @@ The project uses GitHub Actions for:
 - Clippy linting
 - Unit testing
 - Coverage reporting (80% threshold)
+- CRAP gate (no function above score 12, from `sshm/.cargo-crap.toml`)
 - Security auditing
 - Installer linting (`shellcheck`) and a fixture-driven smoke test of the update path
 - Automatic releases on version tags
