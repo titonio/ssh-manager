@@ -135,6 +135,39 @@ fn the_chord_letters_are_still_search_text() {
     }
 }
 
+/// A Ctrl chord the frame does not bind is dropped, never typed.
+///
+/// `Ctrl+R` means nothing here, and the user who hits it — reaching for the
+/// reverse search their shell has, say — must be left with exactly the list
+/// they had. What it must not do is glue an `r` to the front of their
+/// filter: the filter takes *printables*, and a chord is not a printable.
+/// The sweep above covers the unmodified half of that rule; this is the
+/// modified half, and the four bound chords (`Ctrl+C`, `Ctrl+X`, `Ctrl+E`,
+/// `Ctrl+A`) are the only Ctrl keys with anywhere else to go.
+#[test]
+fn an_unbound_chord_is_dropped_rather_than_typed_into_the_filter() {
+    let typing = step(&ManageState::new(), plain('w'), Some(&web01()));
+
+    for ch in ['r', 's', 'd', 'u', 'w'] {
+        let step = step(&typing.state, ctrl(ch), Some(&web01()));
+
+        assert_eq!(
+            step.state.query, "w",
+            "Ctrl+{ch} must not put a `{ch}` into the filter: {:?}",
+            step.state
+        );
+        assert_eq!(
+            step.state, typing.state,
+            "Ctrl+{ch} must change nothing else about the frame either"
+        );
+        assert!(
+            step.effects.is_empty(),
+            "Ctrl+{ch} must ask for nothing: {:?}",
+            step.effects
+        );
+    }
+}
+
 /// User story 21, taken literally: the manage frame's filter accepts
 /// **every printable character**, and `j` and `k` are printable. They were
 /// bound to movement by the pick path and carried over here, which made
@@ -491,6 +524,47 @@ fn answering_y_asks_for_exactly_one_delete_and_returns_to_the_list() {
     );
 }
 
+/// `y` wipes the note that was on the glass, as well as asking for the delete.
+///
+/// The frame is often sitting on a `◇ deleted` from the last delete when the
+/// user arms the next one — the confirm inherits whatever the list was
+/// showing — and the note is about the *previous* action. Pressing `y` has
+/// to clear it, because from that keystroke the frame is waiting on the
+/// store: the delete has been asked for, not done. A note left standing
+/// answers a question the user has only just asked, and if the store then
+/// refused, the frame would be reading `deleted` over a Connection still in
+/// the file.
+#[test]
+fn answering_y_clears_the_note_left_by_the_previous_action() {
+    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
+    let first = step(&armed.state, plain('y'), Some(&web01()));
+    let deleted = manage::settle_delete(&first.state, &web01(), DeleteOutcome::Removed(web01()))
+        .expect("a Connection that was really removed settles onto the list");
+
+    assert_eq!(
+        deleted.trace,
+        Some(Trace::Deleted {
+            connection: web01()
+        }),
+        "setup: the frame is showing the note the first delete earned"
+    );
+
+    let rearmed = step(&deleted, ctrl('x'), Some(&web02()));
+    let second = step(&rearmed.state, plain('y'), Some(&web02()));
+
+    assert_eq!(
+        second.effects,
+        vec![Effect::Delete { target: web02() }],
+        "the second confirm asks for the Connection it was armed over"
+    );
+    assert_eq!(
+        second.state.trace, None,
+        "the note from the first delete must not survive the second one's `y`: \
+         the keystroke asks, it does not report — `settle_delete` is what earns \
+         the note"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Slice 6 — the note reports what the store actually did
 // ─────────────────────────────────────────────────────────────────────────────
@@ -698,6 +772,82 @@ fn up_and_down_saturate_at_the_ends_of_the_map() {
     }
 }
 
+/// `↓` names every row, in the order the map draws them, and then stops.
+///
+/// Alias, Host, User, Port, Key, Folder, `▶` — seven rows, one row per
+/// press, and the seventh press is the last one that goes anywhere. This
+/// matters because the row under the cursor decides which field the next
+/// keystroke edits: a `↓` that skipped a row or repeated one would type
+/// into a field the user is not looking at, and one that wrapped would drop
+/// them back at the Alias row they had just finished reading.
+#[test]
+fn down_walks_every_row_in_map_order_and_stops_at_the_submit_row() {
+    let walk = [
+        FormCursor::Field(FormField::Host),
+        FormCursor::Field(FormField::User),
+        FormCursor::Field(FormField::Port),
+        FormCursor::Field(FormField::Key),
+        FormCursor::Field(FormField::Folder),
+        FormCursor::Submit,
+    ];
+
+    let mut state = add_at(FormCursor::Field(FormField::Alias));
+    for (i, want) in walk.iter().enumerate() {
+        let moved = step(&state, key(KeyCode::Down), Some(&web01()));
+        assert_eq!(
+            cursor_of(&moved.state),
+            *want,
+            "`↓` #{} off the top must land on {want:?}",
+            i + 1
+        );
+        state = moved.state;
+    }
+
+    for _ in 0..3 {
+        let stuck = step(&state, key(KeyCode::Down), Some(&web01()));
+        assert_eq!(
+            cursor_of(&stuck.state),
+            FormCursor::Submit,
+            "`↓` past the `▶` row runs out of map rather than wrapping to the \
+             Alias row"
+        );
+    }
+}
+
+/// `BackTab` moves up exactly one row at a time, and off the `▶` row it
+/// wraps to the last field rather than sitting still.
+///
+/// The wrap is what makes the travel keys usable on a seven-row map: from
+/// the `▶` row one `Shift+Tab` is the Folder row, not a cursor with nowhere
+/// to go and a key the user has to hold down. Every row is named here on the
+/// way up, because a `prev` that landed anywhere else would put the next
+/// keystroke's edit in the wrong field.
+#[test]
+fn backtab_walks_up_one_row_at_a_time_and_wraps_off_the_submit_row() {
+    let walk = [
+        FormCursor::Field(FormField::Folder),
+        FormCursor::Field(FormField::Key),
+        FormCursor::Field(FormField::Port),
+        FormCursor::Field(FormField::User),
+        FormCursor::Field(FormField::Host),
+        FormCursor::Field(FormField::Alias),
+        FormCursor::Submit,
+    ];
+
+    let mut state = add_at(FormCursor::Submit);
+    for (i, want) in walk.iter().enumerate() {
+        let moved = step(&state, key(KeyCode::BackTab), Some(&web01()));
+        assert_eq!(
+            cursor_of(&moved.state),
+            *want,
+            "BackTab #{} off the `▶` row must land on {want:?}: one row up \
+             each press, with the Alias row wrapping back down to the `▶` row",
+            i + 1
+        );
+        state = moved.state;
+    }
+}
+
 /// Enter on a field is a movement key, not a validation gate: it advances
 /// whatever the field holds, including nothing at all.
 ///
@@ -902,6 +1052,50 @@ fn the_chord_letters_still_type_at_an_add_step() {
         last.effects.is_empty(),
         "and none of them fired a management action: {:?}",
         last.effects
+    );
+}
+
+/// A Ctrl chord typed inside the map is not a letter in the field.
+///
+/// The map is a text field, so it takes printables — but the keys it takes
+/// are *unadorned* printables, not anything that arrives with a character
+/// attached. A user who hits `Ctrl+S` mid-word, reaching for the save their
+/// editor has, must not find an `s` inserted into the row under the cursor:
+/// that character would then be saved into a Connection they never typed.
+/// Shift is the one modifier that counts as typing, because `Shift+A` is
+/// how a capital `A` reaches the field — `Web-01` has to be spellable.
+#[test]
+fn a_chord_typed_inside_the_map_is_not_a_letter_in_the_field() {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+
+    for ch in ['r', 's', 'd', 'u', 'x'] {
+        let stepped = step(&adding.state, ctrl(ch), Some(&web01()));
+
+        assert_eq!(
+            form(&stepped.state).draft.alias,
+            "",
+            "Ctrl+{ch} must not insert a `{ch}` into the row under the cursor"
+        );
+        assert_eq!(
+            stepped.state, adding.state,
+            "and a chord the map does not bind must leave it exactly as it was"
+        );
+        assert!(
+            stepped.effects.is_empty(),
+            "Ctrl+{ch} must ask for nothing: {:?}",
+            stepped.effects
+        );
+    }
+
+    let capital = step(
+        &adding.state,
+        KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
+        Some(&web01()),
+    );
+    assert_eq!(
+        form(&capital.state).draft.alias,
+        "A",
+        "the shift is how a capital letter is typed, so it must type"
     );
 }
 
@@ -1466,6 +1660,44 @@ fn finishing_the_map_asks_for_the_add_without_claiming_it_happened() {
         matches!(&finalised.effects[0], Effect::Add { .. }),
         "and the one thing it asks for is the add: {:?}",
         finalised.effects
+    );
+}
+
+/// Submitting also clears the note the frame was carrying, and that is the
+/// half the test above cannot see.
+///
+/// The note above the rows is always about an action that has *finished*.
+/// The `▶` row has just asked, and until `settle_add` answers the frame
+/// knows nothing about `connections.json`. A note left standing under a
+/// list the frame has not written yet reads as the answer to the submit —
+/// and if the store refused the write, the frame would still be claiming
+/// something about a file it never touched.
+#[test]
+fn submitting_the_map_clears_the_note_left_by_the_previous_action() {
+    let with_note = ManageState {
+        trace: Some(Trace::Declined {
+            connection: web01(),
+        }),
+        ..filled_add()
+    };
+
+    let finalised = submit(&with_note);
+
+    assert_eq!(
+        finalised.effects.len(),
+        1,
+        "clearing the note is not skipping the write: {:?}",
+        finalised.effects
+    );
+    assert!(
+        matches!(&finalised.effects[0], Effect::Add { .. }),
+        "and the one thing it asks for is still the add: {:?}",
+        finalised.effects
+    );
+    assert_eq!(
+        finalised.state.trace, None,
+        "the note from before the map must not survive the submit: the frame \
+         has added nothing until `settle_add` says it did"
     );
 }
 
@@ -2455,6 +2687,40 @@ fn the_edit_outcome_classifies_the_store_answer() {
     );
 }
 
+/// The `▶` row says in words what Enter there will do: `▶ Add connection`
+/// over a new Connection, `▶ Save changes to web-01` over an existing one.
+///
+/// The row is the only place the form can commit, so it is the only place a
+/// user can find out, before pressing Enter, whether they are creating a
+/// Connection or rewriting the one they selected. `Ctrl+A` and `Ctrl+E`
+/// open the same six rows and write different things; the label is the one
+/// line on the screen that tells them apart. A label that goes blank, or
+/// names no alias, leaves the user guessing at the moment guessing is
+/// expensive.
+#[test]
+fn the_submit_row_says_which_connection_it_will_write() {
+    let adding = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+    assert_eq!(
+        form(&adding.state).submit_label(),
+        "Add connection",
+        "a map opened with `Ctrl+A` commits a new Connection, and must say so"
+    );
+
+    let editing = edit_state(&web01());
+    assert_eq!(
+        form(&editing).submit_label(),
+        "Save changes to web-01",
+        "a map opened with `Ctrl+E` names the Connection it will rewrite"
+    );
+
+    let other = edit_state(&web02());
+    assert_eq!(
+        form(&other).submit_label(),
+        "Save changes to web-02",
+        "and it names the Connection the chord was pressed over, not a fixed one"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Slice 12 — the first-run import offer (#38)
 //
@@ -2513,6 +2779,45 @@ fn answering_y_at_the_import_offer_asks_for_exactly_one_import_of_the_offered_pa
         "the keystroke must not pre-commit an `imported` note. The state \
          machine owns no disk: the claim is earned by the store's answer, \
          folded in by `settle_import`"
+    );
+}
+
+/// `y` at the offer clears the note on the glass, exactly as it does at the
+/// delete confirm.
+///
+/// The note above the rows is about an action that has finished, and the
+/// moment the offer is answered the frame is waiting on the store: nothing
+/// has been imported. A note left standing under the list would be read as
+/// the answer to the offer — a user who sees a stale line under a question
+/// they just said yes to cannot tell whether the file was written, and if
+/// the store refused, the frame would be describing a write that never
+/// happened. The fixture hands the step a state that carries a note from an
+/// earlier ask, because the rule is about the answer: whatever was on the
+/// glass goes with the answer, and `◇ imported` arrives later, through
+/// `settle_import`, only if the store really wrote.
+#[test]
+fn answering_y_at_the_import_offer_clears_the_note_on_the_glass() {
+    let with_note = ManageState {
+        trace: Some(Trace::Declined {
+            connection: web01(),
+        }),
+        ..offered()
+    };
+
+    let step = step(&with_note, plain('y'), None);
+
+    assert_eq!(
+        step.effects,
+        vec![Effect::Import {
+            path: OFFER_PATH.to_string()
+        }],
+        "clearing the note is not skipping the import: it must still be asked \
+         for, once, of the offered path"
+    );
+    assert_eq!(
+        step.state.trace, None,
+        "whatever note was on the glass when the offer was answered must go \
+         with the answer: the frame has imported nothing yet"
     );
 }
 

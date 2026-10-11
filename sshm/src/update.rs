@@ -2562,4 +2562,111 @@ mod tests {
             );
         }
     }
+
+    /// Points `dirs::config_dir()` at a directory of the test's own, so the
+    /// cache being read is one the test wrote. Restored on the way out, in the
+    /// same spirit as `NotACheckout`: an env change that leaks into another
+    /// test is a flake waiting for an ordering.
+    struct ConfigHome(Option<std::ffi::OsString>);
+
+    impl ConfigHome {
+        fn pointing_at(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("XDG_CONFIG_HOME");
+            std::env::set_var("XDG_CONFIG_HOME", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for ConfigHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    /// A cache recording a check made at `last_check`, written where the code
+    /// under test will look for it. Named apart from the production
+    /// `write_cache`, which is the thing that *decides* to record an answer.
+    fn seed_cache(dir: &std::path::Path, last_check: u64) {
+        let cache = CacheData {
+            last_check,
+            new_version: None,
+        };
+        fs::write(
+            dir.join("update_cache.json"),
+            serde_json::to_string(&cache).expect("a cache that serialises"),
+        )
+        .expect("the cache file is writable");
+    }
+
+    /// The binary an update replaces is the one that is running. An empty path
+    /// here is an update that writes nowhere — or, once a `join` gets hold of
+    /// it, somewhere nobody meant to write at all.
+    #[test]
+    fn the_replacement_target_is_the_running_binary() {
+        let target = replace_target().expect("the running binary can be located");
+        let exe = std::env::current_exe().expect("the harness knows which binary is running");
+
+        assert_eq!(
+            fs::canonicalize(&target).expect("the target is a real file"),
+            fs::canonicalize(&exe).expect("the running binary is a real file"),
+            "the update has to land on the binary the reader is standing in"
+        );
+    }
+
+    /// A writable install directory passes the preflight, and passing is the
+    /// only thing that lets the update download anything. The question the
+    /// preflight asks is "is it *not* writable"; invert that and every healthy
+    /// machine is told its own directory is unwritable, while every broken one
+    /// is waved through to fail halfway through swapping its binary.
+    #[test]
+    #[serial]
+    fn a_writable_install_directory_passes_the_preflight() {
+        let _not_a_checkout = NotACheckout::take();
+
+        let outcome = preflight();
+        assert!(
+            outcome.is_ok(),
+            "the directory this test binary sits in is writable, so the preflight must say so: {outcome:?}"
+        );
+    }
+
+    /// The once-a-day rule at its boundary: a check older than the day is due,
+    /// one made an hour ago is not. The comparison is between two timestamps,
+    /// and get it wrong and the note either never appears again or reappears
+    /// on every single start of the program.
+    #[test]
+    #[serial]
+    fn a_check_older_than_the_cache_duration_is_due_and_a_fresh_one_is_not() {
+        let _not_a_checkout = NotACheckout::take();
+        let home = tempfile::tempdir().expect("a config home to point at");
+        let _config_home = ConfigHome::pointing_at(home.path());
+
+        let dir = get_cache_dir().expect("the cache directory the code reads");
+        assert!(
+            dir.starts_with(home.path()),
+            "the test must not be reading anyone's real update cache: {dir:?}"
+        );
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("a clock past 1970")
+            .as_secs();
+
+        seed_cache(&dir, now - (CACHE_DURATION_SECS + 100));
+        assert_eq!(
+            should_check_update(),
+            Ok(true),
+            "a check from yesterday is due: the note is allowed to ask again"
+        );
+
+        seed_cache(&dir, now - 3_600);
+        assert_eq!(
+            should_check_update(),
+            Ok(false),
+            "a check from an hour ago is not due: the note must not nag"
+        );
+    }
 }

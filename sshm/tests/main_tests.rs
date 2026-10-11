@@ -423,3 +423,68 @@ mod tests {
         assert_eq!(args[0], "user-name@example.com");
     }
 }
+
+mod ssh_session_exit_code {
+    use serial_test::serial;
+    use sshm::execute_ssh;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A stand-in `ssh` earlier on the `PATH` than the real one, exiting with
+    /// the code the test asks about.
+    fn stand_in_ssh(dir: &std::path::Path, code: u8) {
+        let path = dir.join("ssh");
+        std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).expect("the stand-in is written");
+        let mut perms = std::fs::metadata(&path).expect("the stand-in exists").permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).expect("the stand-in is executable");
+    }
+
+    /// The exit code of `ssh` is the exit code of `sshm`. The wrapper hands the
+    /// terminal back and the reader's next command runs whether the session
+    /// connected, timed out or was refused, and a script wrapped around `sshm`
+    /// can only tell those apart if the code survives the trip. A fixed answer
+    /// — every session reported as 1, or as -1 — makes the tool lie about the
+    /// session it just ran.
+    #[test]
+    #[serial]
+    fn the_exit_code_of_ssh_is_the_exit_code_of_sshm() {
+        let dir = tempfile::tempdir().expect("a directory for the stand-in ssh");
+        stand_in_ssh(dir.path(), 7);
+
+        let previous = std::env::var_os("PATH");
+        let mut path = std::ffi::OsString::from(dir.path());
+        path.push(":");
+        path.push(previous.clone().unwrap_or_default());
+        std::env::set_var("PATH", &path);
+        let code = execute_ssh(&[]);
+        match previous {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert_eq!(code, 7, "ssh answered 7, so sshm must answer 7");
+    }
+
+    /// A session that ends in success is reported as success: the code that
+    /// matters most is the boring one, and a tool that answers `1` for a
+    /// session that closed cleanly teaches its users to ignore the answer.
+    #[test]
+    #[serial]
+    fn a_clean_session_is_reported_as_a_clean_session() {
+        let dir = tempfile::tempdir().expect("a directory for the stand-in ssh");
+        stand_in_ssh(dir.path(), 0);
+
+        let previous = std::env::var_os("PATH");
+        let mut path = std::ffi::OsString::from(dir.path());
+        path.push(":");
+        path.push(previous.clone().unwrap_or_default());
+        std::env::set_var("PATH", &path);
+        let code = execute_ssh(&[]);
+        match previous {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert_eq!(code, 0, "a session that closed cleanly must not be reported as a failure");
+    }
+}

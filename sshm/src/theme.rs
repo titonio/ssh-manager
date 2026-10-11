@@ -297,6 +297,12 @@ pub mod ansi {
     const FG_BASE: u8 = 30;
     /// The background base of an SGR colour parameter.
     const BG_BASE: u8 = 40;
+    /// The parameter that means *the terminal's own colour*, per tier: `39` in
+    /// the foreground, `49` in the background. Spelled as the two parameters a
+    /// terminal is actually sent rather than derived as base-plus-nine: they
+    /// are not a multiple of anything, they are what ECMA-48 chose.
+    const FG_DEFAULT: &str = "39";
+    const BG_DEFAULT: &str = "49";
 
     /// The sixteen named ANSI colours, in their SGR index order.
     ///
@@ -338,25 +344,27 @@ pub mod ansi {
     /// offset by ten: `31` and `41`, `91` and `101`, `38;5;n` and `48;5;n`.
     /// Two hand-written copies of that arithmetic is a palette fork waiting
     /// to happen.
-    fn color_code(color: Color, base: u8) -> String {
+    fn color_code(color: Color, base: u8, unnamed: &str) -> String {
         match color {
-            Color::Reset => (base + 9).to_string(),
+            Color::Reset => unnamed.to_string(),
             Color::Indexed(n) => format!("{};5;{n}", base + 8),
             Color::Rgb(r, g, b) => format!("{};2;{r};{g};{b}", base + 8),
             named => match ansi_index(named) {
                 Some(i) if i < 8 => (base + i).to_string(),
                 Some(i) => (base + 60 + (i - 8)).to_string(),
-                None => (base + 9).to_string(),
+                // A colour with no ANSI name is not a colour this serializer
+                // was asked to name: hand the tier's default back instead.
+                None => unnamed.to_string(),
             },
         }
     }
 
     fn fg_code(color: Color) -> String {
-        color_code(color, FG_BASE)
+        color_code(color, FG_BASE, FG_DEFAULT)
     }
 
     fn bg_code(color: Color) -> String {
-        color_code(color, BG_BASE)
+        color_code(color, BG_BASE, BG_DEFAULT)
     }
 
     /// Build the SGR parameter list for a set of modifiers.
@@ -587,5 +595,49 @@ mod tests {
     #[test]
     fn an_unset_colour_is_the_terminal_default() {
         assert_eq!(ansi::style_to_ansi(Style::default()), "\x1b[39;49m");
+    }
+
+    /// A 16-colour terminal has no grey below `fg_muted` to sit the placeholder
+    /// in, so the placeholder collapses onto the muted token — the trade its
+    /// own doc comment names. Drop that field and the placeholder keeps its
+    /// 256-colour grey, which a 16-colour terminal answers with whatever it
+    /// likes: the dimmed text comes back louder than the text beside it.
+    #[test]
+    fn ansi16_snaps_the_placeholder_it_cannot_render_too() {
+        let resolved = Theme::clack().resolve(ColorSupport::Ansi16);
+
+        assert_eq!(
+            resolved.fg_placeholder,
+            Color::DarkGray,
+            "the placeholder must collapse onto a token the palette actually has"
+        );
+        assert_eq!(
+            resolved.fg_placeholder, resolved.fg_muted,
+            "in sixteen colours the placeholder and the muted tier are one token, not two"
+        );
+    }
+
+    /// `end_line` is what turns a run of styled text back into a stack of
+    /// *lines*: the colour is closed so nothing bleeds into the next row, then
+    /// the row ends. Without it a whole frame serializes onto a single line,
+    /// painted in the colour of whichever span happened to be last.
+    #[test]
+    fn a_closed_line_ends_the_colour_and_starts_the_next() {
+        let mut out = String::new();
+        let mut runs = ansi::RunWriter::new(&mut out);
+        runs.push(Style::default().fg(Color::Red), "first");
+        runs.end_line();
+        runs.push(Style::default().fg(Color::Green), "second");
+        runs.end_line();
+
+        assert_eq!(
+            out.matches('\n').count(),
+            2,
+            "one newline per line, or the frame arrives as one line: {out:?}"
+        );
+        assert!(
+            out.ends_with("\x1b[0m\n"),
+            "the last line must be closed too, or its colour runs past the frame: {out:?}"
+        );
     }
 }
