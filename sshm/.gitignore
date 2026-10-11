@@ -1,1 +1,5 @@
 /target
+# cargo-mutants results: regenerated on every run, and the interesting files
+# (missed.txt, out.txt, log/) are all in here.
+/mutants.out
+/mutants.out.old

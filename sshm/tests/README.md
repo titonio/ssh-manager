@@ -64,6 +64,36 @@ cargo test -- --nocapture        # see eprintln output (frame dumps, skips)
 cargo test -- -- the_rendered_row_is_the_row_text   # filter by name
 ```
 
+## Mutation testing
+
+`cargo test` says the suite passes. `./mutants.sh` asks whether the suite
+*cares*: cargo-mutants rewrites one function body, condition or match arm at a
+time into a trivial value, and each rewrite must turn a test red. A mutant that
+survives is a behaviour no test guards — an inverted comparison, a `||` where
+`&&` was meant, a field nothing reads. The coverage gate and the CRAP gate both
+count lines that ran; only a mutant checks that the line matters.
+
+```bash
+cd sshm
+./mutants.sh                       # the whole crate: ~800 mutants, about two hours
+git diff --relative origin/master > /tmp/d.diff
+./mutants.sh --in-diff /tmp/d.diff # only the mutants in the lines this branch touched
+```
+
+`--relative` is what makes the second form honest: cargo-mutants matches the
+diff's paths against its own, rooted at `sshm/`, so a repo-root diff names
+`sshm/src/frame.rs`, matches nothing, and passes having tested nothing.
+
+CI runs both: the diff form is a required check on master, the whole-crate sweep
+runs weekly and reports. `.github/workflows/mutants.yml` says which is which,
+and `sshm/.cargo/mutants.toml` holds the options that both share.
+
+A surviving mutant is a work list, not a verdict: write the test, or mark the
+code `#[mutants::skip]` with the reason beside it. What is not acceptable is
+leaving it in the list, because the suite is run once per mutant — about 800
+times a sweep — so a flaky test is a flake with 800 chances to land, and a
+timeout costs the whole run its signal.
+
 ## The one snapshot that exists
 
 `src/main.rs` asserts the generated shell init scripts with insta **inline**

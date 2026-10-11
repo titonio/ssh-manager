@@ -1,0 +1,19 @@
+# cargo-mutants configuration.
+#
+# Read automatically whenever `cargo mutants` runs from `sshm/`, the crate root,
+# so a bare `cargo mutants` does the same thing here, in CI and on a fresh clone.
+# Schema: https://json.schemastore.org/cargo-mutants-config.json
+#
+# Run it with `--in-place` (see sshm/mutants.sh): the tree is mutated and tested
+# in this directory instead of a copy, which is the only way a mutant reuses the
+# 12 GB `target/` — a copied tree rebuilds every dependency from nothing.
+
+# The same feature set the coverage and CRAP gates compile, so mutants are tested
+# against the binary that ships.
+all_features = true
+
+# CI sets `RUSTFLAGS: -D warnings`. A mutant that compiles with a warning would
+# then fail its build and be reported as *unviable* — neither caught nor missed,
+# silently dropped from the count. `--cap-lints=warn` is appended to RUSTFLAGS so
+# the tests, and not the linter, decide whether a mutant matters.
+cap_lints = true
