@@ -419,97 +419,11 @@ pub struct ImportOfferFlow {
 /// user needs to see *what happened*, and the settled question is the
 /// redundant half.
 fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> {
-    let mut lines = match &flow.trace {
-        Some(crate::manage::Trace::Deleted { connection }) => vec![
-            settled_confirm_line(connection, true, t),
-            note_line("deleted", connection, t),
-        ],
-        // The user answered yes and the store had nothing to remove. The
-        // settled line still records the answer — it was given — but the
-        // note says the opposite of `deleted`, because nothing was.
-        Some(crate::manage::Trace::DeleteFailed { connection }) => vec![
-            settled_confirm_line(connection, true, t),
-            note_line(DELETE_FAILED_NOTE, connection, t),
-        ],
-        Some(crate::manage::Trace::Declined { connection }) => {
-            vec![settled_confirm_line(connection, false, t)]
-        }
-        Some(crate::manage::Trace::AddAbandoned) => {
-            vec![plain_note_line(ADD_ABANDONED_NOTE, t)]
-        }
-        // The note the ticket asks for: `◇ added [prod] web-01`. It is
-        // one line, not two — there was no confirm question to settle
-        // first, only the write that happened.
-        Some(crate::manage::Trace::Added { connection }) => {
-            vec![note_line("added", connection, t)]
-        }
-        // The edit's note: `◇ edited [prod] web-01`. One line, like the
-        // add's — there was no confirm question to settle first, only the
-        // write that happened.
-        Some(crate::manage::Trace::Edited { connection }) => {
-            vec![note_line("edited", connection, t)]
-        }
-        // Backing out of an edit. Worded to answer the one question the
-        // user has: did the half-typed field get saved? It did not.
-        Some(crate::manage::Trace::EditAbandoned) => {
-            vec![plain_note_line(EDIT_ABANDONED_NOTE, t)]
-        }
-        // The user pressed Enter on a Connection the store does not have.
-        // The note says the edit did not happen, because a `◇ edited`
-        // over a list still showing the old row would contradict the
-        // rows underneath it.
-        Some(crate::manage::Trace::EditFailed { connection }) => {
-            vec![note_line(EDIT_FAILED_NOTE, connection, t)]
-        }
-        // The import's note: `◇ imported 12 connections`. One line, like
-        // the add's — the offer was asked on the header, not here, so
-        // there is no settled question to record, only the write that
-        // happened. The skipped count rides along when there is one, and
-        // it is called *skipped*, not *failed*: the offer's number came
-        // from a scan that already left those stanzas out, so they are
-        // not a shortfall of what the user was promised. The live PTY
-        // run for #38 caught `1 failed` reading as "one of your three
-        // failed" when nothing of the three had — the skipped stanza was
-        // never one of them. The word carries the difference.
-        Some(crate::manage::Trace::Imported { imported, failed }) => {
-            let noun = if *imported == 1 {
-                "connection"
-            } else {
-                "connections"
-            };
-            let text = if *failed > 0 {
-                format!("imported {imported} {noun}, {failed} skipped")
-            } else {
-                format!("imported {imported} {noun}")
-            };
-            vec![plain_note_line(&text, t)]
-        }
-        // The offer was heard and refused. The note is what makes the
-        // empty list underneath read as *declined* rather than as a
-        // screen that never asked anything.
-        Some(crate::manage::Trace::ImportDeclined) => {
-            vec![plain_note_line(IMPORT_DECLINED_NOTE, t)]
-        }
-        None => Vec::new(),
-    };
+    let mut lines = trace_lines(&flow.trace, t);
 
     // The form map: six field rows, the rule row, then the ▶ row.
-    //
-    // The rule row is the one that pays for the error line. It is
-    // decorative and the refusal is not, and a `!` at that position still
-    // separates the fields from the button — so the map occupies exactly
-    // eight rows whether or not anything is wrong, which is what keeps the
-    // frame's height constant across the whole form instead of jumping a
-    // line every time a keystroke changes the validation state.
     if let Some(form) = &flow.form {
-        for row in &form.rows {
-            lines.push(map_row_line(row, form.placeholder, t));
-        }
-        match &form.error {
-            Some(error) => lines.push(error_line(error, t)),
-            None => lines.push(rule_line(t)),
-        }
-        lines.push(submit_line(form, t));
+        push_form_lines(&mut lines, form, t);
     }
 
     if lines.len() > budget {
@@ -517,6 +431,150 @@ fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> 
     }
 
     lines
+}
+
+/// The note lines a [`Trace`] puts above the rows, if it puts any.
+///
+/// The families are disjoint: a trace belongs to exactly one of them, and each
+/// one knows how to word itself. Which one is decided here, by a `match` the
+/// compiler checks for exhaustiveness, rather than by asking each family in
+/// turn — a chain of fallbacks lets a new `Trace` variant slip through every
+/// family and render nothing at all. Split this way, adding a trace means one
+/// arm here and the wording in the family that already speaks about that kind
+/// of action.
+fn trace_lines(trace: &Option<crate::manage::Trace>, t: &Theme) -> Vec<Line<'static>> {
+    let Some(trace) = trace else {
+        return Vec::new();
+    };
+
+    use crate::manage::Trace;
+    match trace {
+        Trace::Deleted { .. } | Trace::DeleteFailed { .. } | Trace::Declined { .. } => {
+            delete_trace_lines(trace, t)
+        }
+        Trace::Added { .. } | Trace::Edited { .. } | Trace::EditFailed { .. } => {
+            write_trace_lines(trace, t)
+        }
+        Trace::Imported { .. } | Trace::ImportDeclined => import_trace_lines(trace, t),
+        Trace::AddAbandoned | Trace::EditAbandoned => abandoned_trace_lines(trace, t),
+    }
+    // Not a silent empty note: every variant is routed above, and the frame
+    // tests word every one of them, so a family that does not recognise what
+    // it was asked for means the routing and the enum have drifted apart.
+    .unwrap_or_else(|| unreachable!("every Trace variant routes to the family that words it"))
+}
+
+/// The delete family: the settled answer first, then what the store did.
+///
+/// The settled line and the note are two lines because they are two facts —
+/// *you answered yes* and *it was removed* — and the second one is the
+/// store's to tell, not the frame's.
+fn delete_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Line<'static>>> {
+    use crate::manage::Trace;
+    match trace {
+        Trace::Deleted { connection } => Some(vec![
+            settled_confirm_line(connection, true, t),
+            note_line("deleted", connection, t),
+        ]),
+        // The user answered yes and the store had nothing to remove. The
+        // settled line still records the answer — it was given — but the
+        // note says the opposite of `deleted`, because nothing was.
+        Trace::DeleteFailed { connection } => Some(vec![
+            settled_confirm_line(connection, true, t),
+            note_line(DELETE_FAILED_NOTE, connection, t),
+        ]),
+        Trace::Declined { connection } => Some(vec![settled_confirm_line(connection, false, t)]),
+        _ => None,
+    }
+}
+
+/// The write family: one note line, `◇ added [prod] web-01`.
+///
+/// One line, not two — there was no confirm question to settle first, only
+/// the write that happened. `EditFailed` belongs here rather than with the
+/// edits that worked because it is the same shape with the opposite verb: the
+/// user pressed Enter on a Connection the store does not have, and a
+/// `◇ edited` over a list still showing the old row would contradict the
+/// rows underneath it.
+fn write_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Line<'static>>> {
+    use crate::manage::Trace;
+    let (verb, connection) = match trace {
+        Trace::Added { connection } => ("added", connection),
+        Trace::Edited { connection } => ("edited", connection),
+        Trace::EditFailed { connection } => (EDIT_FAILED_NOTE, connection),
+        _ => return None,
+    };
+    Some(vec![note_line(verb, connection, t)])
+}
+
+/// The import family (#38).
+///
+/// The offer was asked on the header, not here, so there is no settled
+/// question to record — only the write that happened, or the refusal of it.
+/// The refused note is what makes the empty list underneath read as
+/// *declined* rather than as a screen that never asked anything.
+fn import_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Line<'static>>> {
+    use crate::manage::Trace;
+    match trace {
+        Trace::Imported { imported, failed } => {
+            Some(vec![plain_note_line(&import_note(*imported, *failed), t)])
+        }
+        Trace::ImportDeclined => Some(vec![plain_note_line(IMPORT_DECLINED_NOTE, t)]),
+        _ => None,
+    }
+}
+
+/// `imported 12 connections`, with the skipped count alongside when there is
+/// one — and it is called *skipped*, not *failed*: the offer's number came
+/// from a scan that already left those stanzas out, so they are not a
+/// shortfall of what the user was promised. The live PTY run for #38 caught
+/// `1 failed` reading as "one of your three failed" when nothing of the three
+/// had — the skipped stanza was never one of them. The word carries the
+/// difference.
+fn import_note(imported: usize, failed: usize) -> String {
+    let noun = if imported == 1 {
+        "connection"
+    } else {
+        "connections"
+    };
+    if failed > 0 {
+        format!("imported {imported} {noun}, {failed} skipped")
+    } else {
+        format!("imported {imported} {noun}")
+    }
+}
+
+/// The abandoned family: a sequence backed out of with nothing written.
+///
+/// Worded to answer the one question the user has — did the half-typed field
+/// get saved? It did not.
+fn abandoned_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Line<'static>>> {
+    use crate::manage::Trace;
+    let note = match trace {
+        Trace::AddAbandoned => ADD_ABANDONED_NOTE,
+        Trace::EditAbandoned => EDIT_ABANDONED_NOTE,
+        _ => return None,
+    };
+    Some(vec![plain_note_line(note, t)])
+}
+
+/// The form map's own rows, appended after any trace note.
+///
+/// The rule row is the one that pays for the error line. It is
+/// decorative and the refusal is not, and a `!` at that position still
+/// separates the fields from the button — so the map occupies exactly
+/// eight rows whether or not anything is wrong, which is what keeps the
+/// frame's height constant across the whole form instead of jumping a
+/// line every time a keystroke changes the validation state.
+fn push_form_lines(lines: &mut Vec<Line<'static>>, form: &FormFlow, t: &Theme) {
+    for row in &form.rows {
+        lines.push(map_row_line(row, form.placeholder, t));
+    }
+    match &form.error {
+        Some(error) => lines.push(error_line(error, t)),
+        None => lines.push(rule_line(t)),
+    }
+    lines.push(submit_line(form, t));
 }
 
 /// One row of the form map: `\u2713 Alias  prod`.
