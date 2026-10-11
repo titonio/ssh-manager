@@ -34,3 +34,13 @@ clap_complete = "4.5"
 tempfile = "3.8"
 insta = "1.34"
 serial_test = "3.4.0"
+# The PTY harness. `tests/pty_test.rs` is the crate's only seam-free gate, and
+# it is built on the same harness the end-to-end suite uses rather than on a
+# second implementation of the same thing. It is a *dev* dependency: the shipped
+# binary pulls in none of it, and `cargo test` here still runs none of
+# `sshm-e2e`'s own tests — only its `src/`, which is the harness and nothing
+# about the app.
+sshm-e2e = { path = "../sshm-e2e" }
+# `kill(pid, 0)` in the PTY test: "are you still there", asked without
+# disturbing anybody.
+libc = "0.2"

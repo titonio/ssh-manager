@@ -38,7 +38,7 @@ bytes the frame emits, which a glyph snapshot cannot.
 | `tests/frame_test.rs` | The frame seam: the Clack grammar, rows, the hint rail and its fitting, transparency, the empty / no-match states, windowing, and column-accurate width fitting |
 | `tests/inline_test.rs` | The live half through the public seam: `diff_rows`, `settle_trace`, `plan_resize`, and that the frame never enters the alternate screen |
 | `tests/main_tests.rs` | `ssh` argument building and execution plumbing |
-| `tests/pty_test.rs` | The frame in a real pseudo-terminal, driven by `tests/pty_frame_check.py`: it draws and waits, the terminal is raw while it does, and the terminal is cooked again afterwards. The only gate with no seam — it runs the built binary and reads the answer off the terminal |
+| `tests/pty_test.rs` | The frame in a real pseudo-terminal, driven by the shared `sshm-e2e` harness: it draws and waits, the terminal is raw while it does, and the terminal is cooked again afterwards. The only gate with no seam — it runs the built binary and reads the answer off the terminal |
 
 Typical shape of a green run: **693 passed / 0 failed / 4 ignored**, and it is
 green with the network unplugged. The four ignored tests are:
@@ -127,8 +127,8 @@ itself. On Linux the line discipline belongs to the pty's slave, so
 the test asserts what the terminal says, not what the program claims. It
 checks four things in one session: the frame draws and stays open, the
 terminal is out of cooked mode while it is, Escape ends it with 130, and the
-terminal is cooked again afterwards. It costs 50 ms, which is what makes it
-affordable 779 times a sweep; every wait in it has a deadline, so a mutant that
+terminal is cooked again afterwards. It costs a few milliseconds, which is what
+makes it affordable 779 times a sweep; every wait in it has a deadline, so a mutant that
 wedges the binary is reported by the check that caught it rather than by a
 timeout. A fresh pty has no window size and a terminal with no rows is one the
 frame correctly refuses to draw in, so the harness sets 24x80 first.
@@ -140,9 +140,11 @@ that answers `releases/latest` from a canned body and remembers the request
 line it served, so the check is exercised end to end without anything leaving
 the machine.
 
-`scripts/inline-pty-check.py` remains the manual look-at-the-frame tool; it
-predates the harness and checks what the frame draws rather than what the
-terminal is.
+`scripts/inline-pty-check.py` remains the manual look-at-the-frame tool the
+design loop uses; it is not part of the test story and checks what the frame
+draws rather than what the terminal is. The test harness is Rust only: the
+Python one that used to drive `tests/pty_test.rs` is gone, because a second
+harness language is a second thing to keep honest.
 
 ## The one snapshot that exists
 
