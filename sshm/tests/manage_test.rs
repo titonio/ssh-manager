@@ -180,6 +180,91 @@ fn arrows_move_the_cursor_in_the_manage_frame() {
     assert_eq!(clamped.state.selection, 0, "up at the top stays at the top");
 }
 
+/// `Esc` is the list's own way out, and it asks for exactly what `Ctrl+C`
+/// asks for: the frame closes as a cancel and nothing else happens. Two keys
+/// leaving the same frame must not mean two different cancels.
+#[test]
+fn escape_at_the_list_cancels_the_frame() {
+    let cancelled = step(&ManageState::new(), key(KeyCode::Esc), Some(&web01()));
+
+    assert_eq!(
+        cancelled.effects,
+        vec![Effect::Exit(InlineOutcome::Cancelled)],
+        "`Esc` leaves the frame the way `Ctrl+C` does"
+    );
+    assert_eq!(cancelled.state.phase, Phase::List);
+}
+
+/// Enter on a row is the pick, and it is the pick *of that row*: the
+/// Connection under the cursor at the keystroke is the one that leaves.
+#[test]
+fn enter_at_the_list_picks_the_connection_under_the_cursor() {
+    let picked = step(&ManageState::new(), key(KeyCode::Enter), Some(&web01()));
+
+    assert_eq!(
+        picked.effects,
+        vec![Effect::Exit(InlineOutcome::Picked(web01()))],
+        "Enter closes the frame with the Connection the cursor was on"
+    );
+}
+
+/// Enter with nothing under the cursor picks nothing. An empty list, or a
+/// filter that matched nothing, has no Connection to name, and the frame does
+/// not invent one to satisfy the keystroke.
+#[test]
+fn enter_over_nothing_under_the_cursor_picks_nothing() {
+    let step = step(&ManageState::new(), key(KeyCode::Enter), None);
+
+    assert!(
+        step.effects.is_empty(),
+        "with nothing under the cursor Enter asks for nothing: {:?}",
+        step.effects
+    );
+    assert_eq!(step.state, ManageState::new());
+}
+
+/// Backspace belongs to the filter, which is the only text the list has. It
+/// shortens what the user typed and moves nothing else.
+#[test]
+fn backspace_shortens_the_filter() {
+    let typed = step(&ManageState::new(), plain('w'), Some(&web01()));
+
+    let shortened = step(&typed.state, key(KeyCode::Backspace), Some(&web01()));
+
+    assert_eq!(shortened.state.query, "", "the typed character is gone");
+    assert_eq!(
+        shortened.state.selection, typed.state.selection,
+        "and the cursor did not move"
+    );
+
+    let at_empty = step(&ManageState::new(), key(KeyCode::Backspace), Some(&web01()));
+    assert_eq!(
+        at_empty.state.query, "",
+        "backspace at an empty filter is inert"
+    );
+}
+
+/// A key that is neither a chord, nor a printable, nor one of the named moves
+/// changes nothing at all — not the filter, not the cursor, not the note.
+/// Silence is the right answer to a keystroke the frame has no meaning for.
+#[test]
+fn an_unbound_key_at_the_list_changes_nothing() {
+    let state = ManageState {
+        query: "web".into(),
+        selection: 1,
+        ..ManageState::new()
+    };
+
+    let step = step(&state, key(KeyCode::PageDown), Some(&web01()));
+
+    assert_eq!(step.state, state, "an unbound key leaves the state alone");
+    assert!(
+        step.effects.is_empty(),
+        "and asks the driver for nothing: {:?}",
+        step.effects
+    );
+}
+
 /// The whole printable range, asserted as filter text rather than movement:
 /// story 21 is about the set, not about three example letters.
 #[test]

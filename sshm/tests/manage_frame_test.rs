@@ -106,6 +106,19 @@ fn deleted_state() -> ManageState {
         .expect("a Connection that was really removed settles back onto the list")
 }
 
+/// The frame's `◇` note line, with the rail taken off the front: what the
+/// note says, and nothing else.
+fn note(frame: &sshm::frame::Frame) -> String {
+    let lines = frame_text(frame);
+    lines
+        .iter()
+        .find(|line| line.contains('◇'))
+        .unwrap_or_else(|| panic!("no ◇ note in {lines:?}"))
+        .trim_start_matches('│')
+        .trim()
+        .to_string()
+}
+
 /// The line of the frame that carries `glyph`, if any.
 fn line_with(frame: &sshm::frame::Frame, glyph: char) -> &Line<'static> {
     let text = frame_text(frame);
@@ -294,6 +307,96 @@ fn the_flow_glyphs_survive_monochrome() {
     assert!(
         joined.contains("deleted"),
         "the note word vanished: {joined}"
+    );
+}
+
+/// The write family's notes are the frame's only claim that a write happened,
+/// and each one is earned through `settle_add` / `settle_edit` rather than set
+/// by a keystroke — so all three are rendered here the way the driver builds
+/// them: `◇ added`, `◇ edited`, and the wording that replaces the claim when
+/// the store had no such Connection to change.
+#[test]
+fn every_write_the_store_answered_for_gets_its_own_note() {
+    let added = manage::settle_add(&ManageState::new(), &conns(), Ok(web02()))
+        .expect("a Connection the store really wrote");
+    assert_eq!(
+        note(&render(&added)),
+        "◇ added [prod] web-02",
+        "the add note names the Connection the store made"
+    );
+
+    let renamed = Connection {
+        alias: "web-99".into(),
+        ..web01()
+    };
+    let edited = manage::settle_edit(
+        &ManageState::new(),
+        &conns(),
+        &web01(),
+        manage::EditOutcome::Updated(renamed),
+    )
+    .expect("a Connection the store really changed");
+    assert_eq!(
+        note(&render(&edited)),
+        "◇ edited [prod] web-99",
+        "the note reports the alias the store ended up with"
+    );
+
+    let absent = manage::settle_edit(
+        &ManageState::new(),
+        &conns(),
+        &web01(),
+        manage::EditOutcome::Absent,
+    )
+    .expect("an edit that landed on nothing still settles");
+    assert_eq!(
+        note(&render(&absent)),
+        "◇ edit failed — no such Connection: [prod] web-01",
+        "no edit happened, so no edit is claimed"
+    );
+}
+
+/// Backing out of a half-filled add answers the one question the user has —
+/// *did any of it get saved?* — and the answer is the frame's to give: the
+/// dim note sits where every other note sits, and it names no Connection
+/// because none was ever written.
+#[test]
+fn the_abandoned_add_notes_that_nothing_was_saved() {
+    let opened = step(&ManageState::new(), ctrl('a'), None);
+    let abandoned = step(&opened.state, key(KeyCode::Esc), None);
+
+    let text = frame_text(&render(&abandoned.state));
+    let note = text
+        .iter()
+        .find(|l| l.contains('◇'))
+        .unwrap_or_else(|| panic!("no ◇ note in {text:?}"));
+
+    assert_eq!(
+        note.trim_start_matches('│').trim(),
+        "◇ add abandoned — nothing saved",
+        "the note is the ticket's string, and it is about the add, not about a row"
+    );
+}
+
+/// The edit half of the same answer. The map was opened from a real row, so
+/// the temptation is to word this like `◇ edited [prod] web-01` — but
+/// nothing was edited, and a note that read as a write over a list still
+/// showing the old value would be the frame lying.
+#[test]
+fn the_abandoned_edit_notes_that_nothing_was_saved() {
+    let opened = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let abandoned = step(&opened.state, key(KeyCode::Esc), Some(&web01()));
+
+    let text = frame_text(&render(&abandoned.state));
+    let note = text
+        .iter()
+        .find(|l| l.contains('◇'))
+        .unwrap_or_else(|| panic!("no ◇ note in {text:?}"));
+
+    assert_eq!(
+        note.trim_start_matches('│').trim(),
+        "◇ edit abandoned — nothing saved",
+        "the edit's abandonment says the same thing as the add's, about the edit"
     );
 }
 
