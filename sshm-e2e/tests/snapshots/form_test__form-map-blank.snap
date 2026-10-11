@@ -1,0 +1,16 @@
+---
+source: tests/form_test.rs
+expression: pty.screen_document()
+---
+
+◆ New connection
+│   ◆ Alias  <required>
+│   ○ Host   <required>
+│   · User   <optional>
+│   · Port   <optional>
+│   · Key    <optional>
+│   · Folder <optional>
+│   ──────────────────────────────────
+│   ▶ Add connection
+│   Esc back · Enter next · ↑↓ move · Ctrl+C quit
+└
