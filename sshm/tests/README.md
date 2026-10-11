@@ -75,7 +75,7 @@ count lines that ran; only a mutant checks that the line matters.
 
 ```bash
 cd sshm
-./mutants.sh                       # the whole crate: 791 mutants, ~45 min on 12 cores
+./mutants.sh                       # the whole crate: 776 mutants, ~40 min on 12 cores
 git diff --relative origin/master > /tmp/d.diff
 ./mutants.sh --in-diff /tmp/d.diff # only the mutants in the lines this branch touched
 ```
@@ -95,6 +95,36 @@ and the sweep is what tells you the suite has a hole in it. Nor is the list
 tolerable as standing debt: the suite runs once per mutant, about 800 times a
 sweep, so a flaky test is a flake with 800 chances to land and a hang costs the
 run its signal.
+
+### The five outside the suite's reach
+
+The current sweep is 776 mutants: 660 caught, 111 unviable, 5 missed. None of
+the five is excluded — each runs in every sweep and fails `mutants-in-diff`
+when its line is touched — and each is here so the next reader with a red check
+does not have to work out from scratch what is unreachable about it.
+
+| Mutant | What no test in `cargo test` can see |
+| --- | --- |
+| `run_frame_command` → `Ok(())` | The whole frame command, doing nothing. Proving it does something needs a terminal to draw on; with a pipe for stdout and no `/dev/tty`, the correct code fails for the environment's reason, not the mutant's. |
+| `CrosstermRawMode::enter` → `Ok(())` | Raw mode is a termios state on a real terminal. `enable_raw_mode` opens `/dev/tty`, and a test runner has none, so an error is what the correct code returns there too. |
+| `RawModeGuard::drop` → `()` | The guard's whole job is handing the terminal back, and there is no terminal in the runner to hand back. |
+| `latest_release` → `Ok("")`, `Ok("xyzzy")` | The answer comes from GitHub's `releases/latest`. Nothing in this suite reaches the network by design: the suite runs once per mutant, so a request per mutant is a rate limit and a suite whose result depends on the hour. |
+
+What would kill them, and what each costs:
+
+- A pty inside `cargo test`: spawn the binary under a pseudo-terminal, assert
+  the frame appears, assert `termios` reports `ECHO` and `ISIG` off while it is
+  open and restored after it closes, assert nothing lands on a piped stdout.
+  That covers the first three, at the price of a pty round-trip in every one of
+  the ~800 test runs a sweep makes, and of the flakiness that comes with timing
+  in a terminal. `scripts/inline-pty-check.py` already drives the binary in a
+  real pty and checks what the frame draws — it does not check termios, and it
+  is wired into neither `cargo test` nor CI.
+- A base-URL seam on the update adapter: the `self-github-update-enhanced` fork
+  already takes `with_url` for GitHub Enterprise, so pointing it at a loopback
+  stub serving one canned body kills the last two offline and deterministically.
+  That is a feature rather than a test-only hole, but it is in the code path that
+  replaces the running binary.
 
 ## The one snapshot that exists
 
