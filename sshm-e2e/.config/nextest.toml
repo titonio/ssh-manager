@@ -1,0 +1,18 @@
+# Per-test policy for the end-to-end suite.
+#
+# nextest runs each test in its own process, which is what a PTY suite needs:
+# one wedged child then fails one named test instead of taking the run with it.
+#
+# `slow-timeout` is the deadline that makes that true. Every wait inside the
+# harness already has its own deadline, so anything still running at ten seconds
+# is wedged in a way the harness did not predict — the most likely cause being a
+# child that outlived the test that spawned it. Terminate on the first period
+# rather than warning and waiting again.
+#
+# `retries = 0` is the flake policy, not a tuning choice. A test that passes on
+# the second attempt is a test that will fail in front of a user after shipping
+# the thing it was supposed to guard, and a retry is how that gets shipped
+# anyway.
+[profile.default]
+slow-timeout = { period = "10s", terminate-after = 1 }
+retries = 0

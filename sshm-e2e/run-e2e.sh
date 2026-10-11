@@ -39,7 +39,11 @@ echo "testing $SSHM_E2E_BIN"
 # nextest when it is installed: per-test process isolation and a per-test
 # timeout mean one hung PTY child fails one named test instead of eating the
 # job. Plain libtest is the fallback so a fresh laptop needs nothing extra.
+# The config is named explicitly rather than left to discovery: nextest looks for
+# it beside the *current* directory, and this script is called from wherever the
+# caller happens to be standing.
 if cargo nextest --version >/dev/null 2>&1; then
-  exec cargo nextest run --manifest-path "$here/Cargo.toml" "$@"
+  exec cargo nextest run --manifest-path "$here/Cargo.toml" \
+    --config-file "$here/.config/nextest.toml" "$@"
 fi
 exec cargo test --manifest-path "$here/Cargo.toml" "$@"

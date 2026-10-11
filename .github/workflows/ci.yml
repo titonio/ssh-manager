@@ -81,6 +81,60 @@ jobs:
     - name: Run tests
       run: cargo test --manifest-path sshm/Cargo.toml --all-features
 
+  # The end-to-end suite: the real binary in a real pseudo-terminal, driven with
+  # real keystrokes. Everything in `test` above drives the frame through a seam,
+  # and the seam cannot see whether a chord arrives as the bytes crossterm
+  # decodes or whether the terminal is handed back — both of which are the
+  # app's contract with the user.
+  #
+  # Plain `ubuntu-latest`, with no `container:` on purpose. A container job has
+  # no controlling terminal of its own and no guarantee of `/dev/ptmx`, and a PTY
+  # test that cannot open a pty does not fail loudly — it fails confusingly, or
+  # not at all. The runner image has pty devices; a container inherits whatever
+  # the job happened to mount.
+  #
+  # Worth marking as a required status check on master, like `installer`.
+  e2e:
+    needs: check
+    runs-on: ubuntu-latest
+    # The suite itself is a handful of seconds; the bound is for a cold
+    # dependency build of the crate and its harness. Roughly twice what a warm
+    # run costs, because a job killed by the runner timeout reports nothing.
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          sshm
+          sshm-e2e
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@cargo-nextest
+
+    # The same script a laptop runs, so the two cannot drift: it builds the
+    # binary, points the suite at that binary through SSHM_E2E_BIN, and uses
+    # nextest when it is installed. Per-test isolation and the ten-second
+    # per-test deadline are in sshm-e2e/.config/nextest.toml, and there are no
+    # retries anywhere — a flake is a bug, not a hiccup.
+    - name: Run the end-to-end suite
+      run: ./sshm-e2e/run-e2e.sh
+
+    # The Shell Widget tests drive real zsh and bash. The runner image ships
+    # both; the step asserts it rather than letting a future image change turn
+    # a shell test into a skip.
+    - name: Check the shells the suite drives are present
+      run: command -v zsh && command -v bash
+
   design:
     needs: check
     runs-on: ubuntu-latest
