@@ -1382,16 +1382,6 @@ pub mod tests {
         );
     }
 
-    /// An edit selection comes back through the command as a clean success:
-    /// nothing printed, nothing executed, exit as before.
-    #[test]
-    fn an_edit_selection_leaves_cleanly() {
-        assert!(
-            finish_frame(Emit::Edit, inline::InlineOutcome::Picked(web01())).is_ok(),
-            "the edit path is a success that writes nothing here"
-        );
-    }
-
     /// The first-run offer is a manage step and nothing else: the pick frame
     /// asks no questions, and an import is a write (#38).
     #[test]
@@ -2397,7 +2387,8 @@ pub mod tests {
         }
     }
 
-    const TWO_STANZAS: &str = "Host web-01\n    HostName web.example.com\n\nHost db-01\n    HostName db.example.com\n";
+    const TWO_STANZAS: &str =
+        "Host web-01\n    HostName web.example.com\n\nHost db-01\n    HostName db.example.com\n";
 
     /// The file a first run could import from, with how many stanzas it holds.
     /// Both halves are the offer: the count is what the frame says and the
@@ -2411,7 +2402,8 @@ pub mod tests {
         home.write_ssh_config(TWO_STANZAS);
         let store = config::Config::new();
 
-        let (count, path) = importable_ssh_config(&store).expect("two stanzas in an empty set is an offer");
+        let (count, path) =
+            importable_ssh_config(&store).expect("two stanzas in an empty set is an offer");
 
         assert_eq!(count, 2, "the offer counts the stanzas, not the hosts");
         assert_eq!(
@@ -2427,7 +2419,8 @@ pub mod tests {
     #[test]
     #[serial_test::serial]
     fn a_home_with_no_ssh_config_offers_nothing() {
-        let home = TempHome::new();
+        // Held, not used: the throwaway home has to outlive the question.
+        let _home = TempHome::new();
         let store = config::Config::new();
 
         assert!(
@@ -2450,7 +2443,10 @@ pub mod tests {
         let offer = opening_offer(&store, FrameMode::Manage)
             .expect("an empty set with stanzas behind it opens on the offer");
         let Phase::ConfirmImport { count, path } = offer.phase else {
-            panic!("manage opens on the offer, not on the list: {:?}", offer.phase);
+            panic!(
+                "manage opens on the offer, not on the list: {:?}",
+                offer.phase
+            );
         };
         assert_eq!(count, 2, "the offer says how many stanzas are waiting");
         assert_eq!(
@@ -2473,6 +2469,200 @@ pub mod tests {
         assert!(
             opening_offer(&store, FrameMode::Pick).is_none(),
             "picking never offers an import, however importable the file"
+        );
+    }
+
+    // ── what the frame's answer does to the process ─────────────────────
+    //
+    // `finish_frame` and `emitted` end a process: they print the line the
+    // shell widget reads off stdout, and they leave with the status that says
+    // whether the reader picked anything. That is a contract about processes,
+    // so the only honest witness is a process. Each test below runs itself
+    // again as a child — `--exact` so the child runs only that test, and an
+    // env var so the child knows it is the child.
+
+    /// The Connection every child is asked to have picked.
+    fn picked_connection() -> config::Connection {
+        config::Connection {
+            id: "web-01-id".to_string(),
+            alias: "web-01".to_string(),
+            host: "10.0.0.7".to_string(),
+            user: "www".to_string(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        }
+    }
+
+    /// Run this same test again as a child, which hands `finish_frame` the
+    /// answer named by `case` and then ends.
+    fn frame_departure_child(case: &str, extra_env: &[(&str, &str)]) -> std::process::Output {
+        let mut cmd = std::process::Command::new(
+            std::env::current_exe().expect("the test binary knows itself"),
+        );
+        cmd.args(["--exact", &format!("tests::{case}"), "--nocapture"]);
+        cmd.env("SSHM_FINISH_FRAME_CHILD", case);
+        for (key, value) in extra_env {
+            cmd.env(key, value);
+        }
+        cmd.output().expect("the child runs")
+    }
+
+    /// The child's side: hand `finish_frame` the answer this case names, and
+    /// report what it did. `__returned__` is the marker that `finish_frame`
+    /// came back instead of ending the process, and 99 that it failed.
+    fn child_hands_over_the_answer(case: &str) -> ! {
+        // The marker the parent cuts on: everything before it is the test
+        // harness's own chatter about the child, not the child's answer.
+        println!("__child__");
+        let outcome = match case {
+            "a_pick_that_inserts_the_alias_ends_the_process_with_the_alias_on_stdout" => (
+                Emit::Insert,
+                inline::InlineOutcome::Picked(picked_connection()),
+            ),
+            "a_cancel_ends_the_process_with_the_interrupt_status" => {
+                (Emit::Insert, inline::InlineOutcome::Cancelled)
+            }
+            "an_edit_prints_nothing_and_leaves_the_terminal_to_the_edit_path" => (
+                Emit::Edit,
+                inline::InlineOutcome::Picked(picked_connection()),
+            ),
+            "the_session_exit_code_is_the_frame_exit_code" => (
+                Emit::Execute,
+                inline::InlineOutcome::Picked(picked_connection()),
+            ),
+            other => panic!("unknown departure case {other:?}"),
+        };
+        match finish_frame(outcome.0, outcome.1) {
+            Ok(()) => {
+                println!("__returned__");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(99);
+            }
+        }
+    }
+
+    /// What the child itself printed, with the harness's chatter about the
+    /// child cut off the front. The first of these lines is what the shell
+    /// widget would read.
+    fn child_lines(text: &str) -> Vec<&str> {
+        text.lines()
+            .skip_while(|line| *line != "__child__")
+            .skip(1)
+            .collect()
+    }
+
+    /// **Pick** answers by writing the alias on stdout and leaving cleanly:
+    /// the shell widget puts that text on the command line, and anything else
+    /// on the first line — nothing, the frame's own chatter, a settle line —
+    /// is text the reader then has to delete.
+    #[test]
+    fn a_pick_that_inserts_the_alias_ends_the_process_with_the_alias_on_stdout() {
+        if std::env::var_os("SSHM_FINISH_FRAME_CHILD").is_some() {
+            child_hands_over_the_answer(
+                "a_pick_that_inserts_the_alias_ends_the_process_with_the_alias_on_stdout",
+            );
+        }
+
+        let out = frame_departure_child(
+            "a_pick_that_inserts_the_alias_ends_the_process_with_the_alias_on_stdout",
+            &[],
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "a pick is a success: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            child_lines(&stdout).first().copied(),
+            Some("web-01"),
+            "the alias is the first and only thing the shell has to read: {stdout:?}"
+        );
+    }
+
+    /// A cancel leaves with 130, the status a shell reads as "the reader
+    /// pressed `Ctrl+C`". Leave it as a success and a wrapper cannot tell a
+    /// cancel from a pick — it just finds nothing where the selection should
+    /// have been, and carries on as if that were the plan.
+    #[test]
+    fn a_cancel_ends_the_process_with_the_interrupt_status() {
+        if std::env::var_os("SSHM_FINISH_FRAME_CHILD").is_some() {
+            child_hands_over_the_answer("a_cancel_ends_the_process_with_the_interrupt_status");
+        }
+
+        let out = frame_departure_child("a_cancel_ends_the_process_with_the_interrupt_status", &[]);
+
+        assert_eq!(
+            out.status.code(),
+            Some(130),
+            "cancel has to leave a status that says so, not the one that says carry on: {:?}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    /// **Manage** answers with nothing at all on stdout: the frame has already
+    /// said what it has to say on the glass, and a settle line printed over it
+    /// is the second voice the cut-over promised to silence.
+    #[test]
+    fn an_edit_prints_nothing_and_leaves_the_terminal_to_the_edit_path() {
+        if std::env::var_os("SSHM_FINISH_FRAME_CHILD").is_some() {
+            child_hands_over_the_answer(
+                "an_edit_prints_nothing_and_leaves_the_terminal_to_the_edit_path",
+            );
+        }
+
+        let out = frame_departure_child(
+            "an_edit_prints_nothing_and_leaves_the_terminal_to_the_edit_path",
+            &[],
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+
+        assert_eq!(out.status.code(), Some(0), "an edit is a success");
+        assert_eq!(
+            child_lines(&stdout).first().copied(),
+            Some("__returned__"),
+            "nothing may be printed before the frame comes back: {stdout:?}"
+        );
+    }
+
+    /// **Execute** hands the terminal to `ssh` and takes its exit code as the
+    /// frame's own, so a session that ended badly is not reported as a clean
+    /// one to whatever wrapped the command.
+    #[test]
+    fn the_session_exit_code_is_the_frame_exit_code() {
+        if std::env::var_os("SSHM_FINISH_FRAME_CHILD").is_some() {
+            child_hands_over_the_answer("the_session_exit_code_is_the_frame_exit_code");
+        }
+
+        let dir = tempfile::tempdir().expect("a directory for the stand-in ssh");
+        let stand_in = dir.path().join("ssh");
+        std::fs::write(&stand_in, "#!/bin/sh\nexit 7\n").expect("the stand-in is written");
+        let mut perms = std::fs::metadata(&stand_in)
+            .expect("the stand-in exists")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&stand_in, perms).expect("the stand-in is executable");
+
+        let mut path = std::ffi::OsString::from(dir.path());
+        path.push(":");
+        path.push(std::env::var_os("PATH").unwrap_or_default());
+
+        let out = frame_departure_child(
+            "the_session_exit_code_is_the_frame_exit_code",
+            [("PATH", path.to_string_lossy().as_ref())].as_slice(),
+        );
+
+        assert_eq!(
+            out.status.code(),
+            Some(7),
+            "the session said 7, so the frame says 7: {:?}",
+            String::from_utf8_lossy(&out.stdout)
         );
     }
 }

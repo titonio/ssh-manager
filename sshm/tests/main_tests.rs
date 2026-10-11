@@ -104,8 +104,8 @@ mod test_main {
 
 #[cfg(test)]
 mod tests {
-    use serial_test::serial;
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn test_build_ssh_args_with_key_path() {
@@ -438,8 +438,11 @@ mod ssh_session_exit_code {
     /// the code the test asks about.
     fn stand_in_ssh(dir: &std::path::Path, code: u8) {
         let path = dir.join("ssh");
-        std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).expect("the stand-in is written");
-        let mut perms = std::fs::metadata(&path).expect("the stand-in exists").permissions();
+        std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n"))
+            .expect("the stand-in is written");
+        let mut perms = std::fs::metadata(&path)
+            .expect("the stand-in exists")
+            .permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).expect("the stand-in is executable");
     }
@@ -490,7 +493,10 @@ mod ssh_session_exit_code {
             None => std::env::remove_var("PATH"),
         }
 
-        assert_eq!(code, 0, "a session that closed cleanly must not be reported as a failure");
+        assert_eq!(
+            code, 0,
+            "a session that closed cleanly must not be reported as a failure"
+        );
     }
 }
 
@@ -552,10 +558,7 @@ mod running_the_binary {
     #[test]
     fn an_added_connection_lands_in_the_file_the_list_reads() {
         let home = tempfile::tempdir().expect("an empty home");
-        let out = sshm(
-            &["add", "--alias", "web-01", "10.0.0.7"],
-            Some(home.path()),
-        );
+        let out = sshm(&["add", "--alias", "web-01", "10.0.0.7"], Some(home.path()));
 
         assert!(
             out.status.success(),
@@ -582,7 +585,11 @@ mod running_the_binary {
         let out = sshm(&["init", "zsh"], None);
         let script = text(&out.stdout);
 
-        assert!(out.status.success(), "`sshm init zsh` failed: {}", text(&out.stderr));
+        assert!(
+            out.status.success(),
+            "`sshm init zsh` failed: {}",
+            text(&out.stderr)
+        );
         assert!(
             script.contains("zle -N _sshm_inline_picker"),
             "the widget has to be registered with zle, or no keystroke reaches it: {script}"
@@ -600,7 +607,11 @@ mod running_the_binary {
         let out = sshm(&["init", "bash"], None);
         let script = text(&out.stdout);
 
-        assert!(out.status.success(), "`sshm init bash` failed: {}", text(&out.stderr));
+        assert!(
+            out.status.success(),
+            "`sshm init bash` failed: {}",
+            text(&out.stderr)
+        );
         assert!(
             script.contains("bind -x") && script.contains("_sshm_inline_picker"),
             "the widget has to be bound to a key, or nothing calls it: {script}"

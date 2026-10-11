@@ -1672,10 +1672,7 @@ fn map_row_drawn<'a>(frame: &'a sshm::frame::Frame, label: &str) -> &'a Line<'st
 }
 
 /// The glyph span of a row: `"<glyph> "`, after the rail and the gutter pad.
-fn glyph_span<'a>(
-    line: &'a Line<'static>,
-    glyph: char,
-) -> &'a ratatui::text::Span<'static> {
+fn glyph_span<'a>(line: &'a Line<'static>, glyph: char) -> &'a ratatui::text::Span<'static> {
     let want = format!("{glyph} ");
     line.spans
         .iter()

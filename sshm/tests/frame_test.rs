@@ -1906,7 +1906,10 @@ fn a_line_that_spends_the_budget_exactly_is_kept_whole() {
 fn hints_are_dropped_whole_from_the_end_and_the_separator_costs_its_columns() {
     // "aa | bb" is exactly 7; the third hint would need 12.
     assert_eq!(fit_hints_with(&["aa", "bb", "cc"], 7, " | "), "aa | bb");
-    assert_eq!(fit_hints_with(&["aa", "bb", "cc"], 12, " | "), "aa | bb | cc");
+    assert_eq!(
+        fit_hints_with(&["aa", "bb", "cc"], 12, " | "),
+        "aa | bb | cc"
+    );
 }
 
 /// The rail spends four columns before any hint text — the `│`, the gutter pad
@@ -1974,7 +1977,9 @@ fn a_tie_between_fields_highlights_the_earlier_field() {
         .expect("alias has a display offset");
 
     assert!(
-        indices.iter().all(|i| (alias_start..alias_start + alias_len).contains(i)),
+        indices
+            .iter()
+            .all(|i| (alias_start..alias_start + alias_len).contains(i)),
         "alias and host tie, so the highlight belongs on the alias at \
          {alias_start}..{}; got {indices:?}",
         alias_start + alias_len
