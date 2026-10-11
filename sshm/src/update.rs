@@ -62,12 +62,28 @@ pub enum ApplyResult {
 /// Windows outright, and `install.sh` refuses Windows before anyone gets a
 /// binary to update. Fixing the name here would imply the swap works, which is
 /// the claim nobody has tested.
+/// Where the release API is asked.
+///
+/// `https://api.github.com` unless `SSHM_GITHUB_API_URL` names another one,
+/// which is how a GitHub Enterprise install asks its own: the endpoint moves
+/// and nothing else does — release selection stays GitHub's, which is the
+/// whole reason #46 stopped ordering releases by hand.
+///
+/// Set to the API root with no trailing slash, e.g. `https://github.example
+/// .com/api/v3`. It redirects the question *and* the answer's asset URLs,
+/// because the assets come from the same response: an install that can ask
+/// its own API can download from its own API.
+fn api_base_url() -> Option<String> {
+    std::env::var("SSHM_GITHUB_API_URL").ok()
+}
+
 fn update_config(
     current_version: &str,
 ) -> Result<Box<dyn self_github_update_enhanced::update::ReleaseUpdate>, String> {
     let asset_name = get_platform_asset_name()?;
 
-    Update::configure()
+    let mut builder = Update::configure();
+    builder
         .repo_owner("titonio")
         .repo_name("ssh-manager")
         .bin_name("sshm")
@@ -76,7 +92,11 @@ fn update_config(
         .current_version(current_version)
         .no_confirm(true)
         .show_output(false)
-        .show_download_progress(true)
+        .show_download_progress(true);
+    if let Some(base) = api_base_url() {
+        builder.with_url(&base);
+    }
+    builder
         .build()
         .map_err(|e| format!("Failed to build update configuration: {e}"))
 }
@@ -2667,6 +2687,130 @@ mod tests {
             should_check_update(),
             Ok(false),
             "a check from an hour ago is not due: the note must not nag"
+        );
+    }
+
+    // ── Where the release question goes ────────────────────────────────────
+    //
+    // The update check asks a question of an API, and a check that cannot be
+    // asked cannot be tested — so the question gets an answer that is not the
+    // internet. The stub listens on the loopback interface and serves one
+    // response; nothing leaves this machine, which is what keeps the repo's
+    // "no test reaches the network" property intact while the check is still
+    // exercised end to end.
+
+    /// A one-request GitHub API. It answers `releases/latest` with a canned
+    /// body and remembers the request line it served, so a test can check not
+    /// just what came back but where it was asked for.
+    struct StubApi {
+        base: String,
+        asked: std::sync::mpsc::Receiver<String>,
+    }
+
+    impl StubApi {
+        fn start(body: &'static str) -> Self {
+            use std::io::{Read, Write};
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+            let base = format!(
+                "http://127.0.0.1:{}",
+                listener.local_addr().expect("the port it bound").port()
+            );
+            let (tx, asked) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 2048];
+                let read = stream.read(&mut buf).unwrap_or(0);
+                let request_line = String::from_utf8_lossy(&buf[..read])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                let _ = tx.send(request_line);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            });
+            Self { base, asked }
+        }
+
+        /// The request line the stub served. Empty if nothing ever asked.
+        fn request_line(&self) -> String {
+            self.asked
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_default()
+        }
+    }
+
+    /// Puts `SSHM_GITHUB_API_URL` where a test needs it and puts it back after.
+    struct ApiUrl(Option<std::ffi::OsString>);
+
+    impl ApiUrl {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var_os("SSHM_GITHUB_API_URL");
+            std::env::set_var("SSHM_GITHUB_API_URL", value);
+            Self(previous)
+        }
+
+        fn unset() -> Self {
+            let previous = std::env::var_os("SSHM_GITHUB_API_URL");
+            std::env::remove_var("SSHM_GITHUB_API_URL");
+            Self(previous)
+        }
+    }
+
+    impl Drop for ApiUrl {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("SSHM_GITHUB_API_URL", value),
+                None => std::env::remove_var("SSHM_GITHUB_API_URL"),
+            }
+        }
+    }
+
+    /// The canned answer: `tag_name` is the version the check reports, and the
+    /// asset fields are what the library insists on reading even for a check
+    /// that downloads nothing.
+    const ONE_RELEASE: &str = r#"{"tag_name":"v9.9.9","created_at":"2026-01-01T00:00:00Z","assets":[{"name":"sshm-x.tar.gz","url":"http://127.0.0.1/sshm-x.tar.gz"}]}"#;
+
+    /// A GitHub Enterprise install asks its own API and gets its own releases:
+    /// the endpoint is what moves, not the answer's shape or the version that
+    /// comes out of it.
+    #[test]
+    #[serial]
+    fn the_release_question_goes_where_the_environment_points_it() {
+        let stub = StubApi::start(ONE_RELEASE);
+        let _url = ApiUrl::set(&stub.base);
+
+        assert_eq!(
+            latest_release("0.1.13").as_deref(),
+            Ok("9.9.9"),
+            "the version the stubbed API calls latest is the version the check reports"
+        );
+        assert_eq!(
+            stub.request_line(),
+            "GET /repos/titonio/ssh-manager/releases/latest HTTP/1.1",
+            "the question is the endpoint's own, asked of the host the environment named"
+        );
+    }
+
+    /// The override is opt-in. With nothing set the question goes to GitHub, so
+    /// a stray variable in a build farm cannot quietly point the update check
+    /// at somebody else's release list.
+    #[test]
+    #[serial]
+    fn with_nothing_set_the_question_goes_to_github() {
+        let _url = ApiUrl::unset();
+
+        assert_eq!(
+            api_base_url(),
+            None,
+            "no override means the default API and no other"
         );
     }
 }
