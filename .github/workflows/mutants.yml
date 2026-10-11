@@ -52,9 +52,9 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     # An ordinary PR touches a handful of functions and finishes in minutes. The
-    # bound is for the refactor that rewrites half the crate — ~790 mutants at
-    # ~10s each if the diff covers every line of it — and a job killed by the
-    # runner timeout reports nothing at all.
+    # bound is for the refactor that rewrites half the crate — 791 mutants, ~3s
+    # each on 12 cores and the runner has 4 — and a job killed by the runner
+    # timeout reports nothing at all.
     timeout-minutes: 120
     steps:
     - uses: actions/checkout@v4
@@ -129,9 +129,9 @@ jobs:
   mutants-full:
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # ~790 mutants, each one rebuild of the crate plus the whole suite: measured
-    # at ~10s apiece, so about two hours, plus a cold dependency build. Generous,
-    # because a job killed by the runner timeout reports nothing at all.
+    # 791 mutants, each one rebuild of the crate plus the whole suite: measured at
+    # 43 minutes on 12 cores, and the runner has 4, plus a cold dependency build.
+    # Generous, because a job killed by the runner timeout reports nothing at all.
     timeout-minutes: 240
     steps:
     - uses: actions/checkout@v4

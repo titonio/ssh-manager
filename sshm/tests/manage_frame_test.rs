@@ -17,7 +17,7 @@ use sshm::frame::{
     build_frame_with_flow, Canvas, FormFlow, FrameFlow, FrameMode, ImportOfferFlow, FRAME_LINES,
 };
 use sshm::manage::{self, step, DeleteOutcome, FormCursor, ManageState};
-use sshm::theme::ColorSupport;
+use sshm::theme::{ColorSupport, Theme};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -1647,5 +1647,113 @@ fn the_empty_cta_shows_in_both_modes_while_the_offer_is_open() {
     assert!(
         !joined.contains("Import"),
         "the pick frame asks no questions: {joined}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The glyph colours of a map row
+//
+// The glyph says whether a field is filled, changed, or blocking the save, and
+// it says it in colour first — the character is the fallback for a terminal
+// that will not render it. A glyph whose colour is wrong is a state that reads
+// wrong, so these assert the role each one wears, and that focus and validity
+// are two facts the frame can state separately.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The map row as drawn, spans and all — for the assertions about colour, which
+/// `map_row` flattens away.
+fn map_row_drawn<'a>(frame: &'a sshm::frame::Frame, label: &str) -> &'a Line<'static> {
+    let padded = format!("{label:<6}");
+    frame
+        .lines()
+        .iter()
+        .find(|l| line_text(l).contains(&padded))
+        .unwrap_or_else(|| panic!("no map row for {label:?} in {:?}", frame_text(frame)))
+}
+
+/// The glyph span of a row: `"<glyph> "`, after the rail and the gutter pad.
+fn glyph_span<'a>(
+    line: &'a Line<'static>,
+    glyph: char,
+) -> &'a ratatui::text::Span<'static> {
+    let want = format!("{glyph} ");
+    line.spans
+        .iter()
+        .find(|s| s.content == want)
+        .unwrap_or_else(|| panic!("no {want:?} glyph span in {:?}", line_text(line)))
+}
+
+/// A field whose content will not validate wears the warning role, and keeps
+/// wearing it after the cursor moves on. The problem does not go away when the
+/// reader looks elsewhere, and a `!` that recedes to the dim of an untouched
+/// row is a blocked save that looks ready.
+#[test]
+fn an_invalid_field_keeps_the_warning_role_after_the_cursor_moves_on() {
+    let filled = type_into(&goto_row(&edit_open(), "Port"), "abc");
+    let moved_on = step(&filled, key(KeyCode::Down), Some(&web01())).state;
+
+    let frame = render(&moved_on);
+    let glyph = glyph_span(map_row_drawn(&frame, "Port"), '!');
+
+    assert_eq!(
+        glyph.style.fg,
+        Some(Theme::clack().warning),
+        "the ! must wear the warning role, not the dim of an untouched row"
+    );
+    assert!(
+        glyph.style.add_modifier.contains(Modifier::BOLD),
+        "the ! is bold so it reads without colour: {:?}",
+        glyph.style
+    );
+}
+
+/// A field that differs from the stored Connection is marked in the accent —
+/// but without the bold the focused row owns. "Changed" and "the cursor is
+/// here" are two facts, and a frame that can only say them together cannot say
+/// either.
+#[test]
+fn a_changed_field_is_marked_in_accent_without_the_focus_bold() {
+    let filled = type_into(&edit_open(), "x");
+    let moved_on = step(&filled, key(KeyCode::Down), Some(&web01())).state;
+
+    let frame = render(&moved_on);
+    let glyph = glyph_span(map_row_drawn(&frame, "Alias"), '●');
+
+    assert_eq!(glyph.style.fg, Some(Theme::clack().accent));
+    assert!(
+        !glyph.style.add_modifier.contains(Modifier::BOLD),
+        "the changed glyph must not borrow the focus row's bold: {:?}",
+        glyph.style
+    );
+}
+
+/// The row the cursor is on is unmistakable whatever its own state says: the
+/// `◆` in accent bold, in place of the `✓` the field would draw for itself.
+/// Focus has to win, because every key the user presses next acts on this row.
+#[test]
+fn the_focused_row_wears_the_accent_glyph_whatever_its_own_state() {
+    let frame = render(&edit_open());
+    let glyph = glyph_span(map_row_drawn(&frame, "Alias"), '◆');
+
+    assert_eq!(glyph.style.fg, Some(Theme::clack().accent));
+    assert!(
+        glyph.style.add_modifier.contains(Modifier::BOLD),
+        "focus is the one state that must be obvious: {:?}",
+        glyph.style
+    );
+}
+
+/// A row that is neither focused nor a problem recedes to `fg_muted`. Six rows
+/// all emphasised is six rows saying nothing, and the two rows that do need
+/// shouting at — the focused one and the broken one — lose their edge.
+#[test]
+fn an_untouched_field_recedes_behind_the_focus_and_the_problems() {
+    let frame = render(&edit_open());
+    let glyph = glyph_span(map_row_drawn(&frame, "Host"), '✓');
+
+    assert_eq!(
+        glyph.style.fg,
+        Some(Theme::clack().fg_muted),
+        "an untouched row must recede so the focused and invalid rows stand out"
     );
 }

@@ -9,13 +9,13 @@
 //! expectations below come from the spec rather than from the code under test.
 
 use fuzzy_matcher::skim::SkimMatcherV2;
-use ratatui::style::{Color, Modifier};
-use ratatui::text::Line;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use sshm::config::Connection;
 use sshm::frame::{
-    build_frame, build_frame_with_flow, build_frame_with_note, build_row_text, compute_matches,
-    display_import_path, visible_window, Canvas, FrameFlow, FrameMode, FrameState, FRAME_LINES,
-    VISIBLE_ROWS,
+    build_frame, build_frame_with_flow, build_frame_with_note, build_row_text,
+    compute_field_offsets, compute_matches, display_import_path, fit, fit_hints_with,
+    visible_window, Canvas, FrameFlow, FrameMode, FrameState, FRAME_LINES, VISIBLE_ROWS,
 };
 use sshm::theme::{ColorSupport, Theme};
 
@@ -1863,5 +1863,172 @@ fn the_update_note_survives_monochrome() {
     assert!(
         text.starts_with('◆') && text.contains("update available") && text.contains("sshm update"),
         "the note's meaning must not depend on colour: {text:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The budget: what the frame spends, and where the cut falls
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A line cut in the middle of a span keeps every column it still has room
+/// for. Dropping the whole span would hand back fewer columns than the row has
+/// space for, and keeping half a wide glyph would render as a hole in a column
+/// the row count does not know about — so the cut is per character, at exactly
+/// the point the budget runs out.
+#[test]
+fn a_line_cut_mid_span_keeps_every_column_it_still_has_room_for() {
+    let line = Line::from(vec![
+        Span::raw("ab"),
+        Span::styled("cdef", Style::default().fg(Color::Green)),
+    ]);
+
+    // Four columns: `ab` fits whole, then `cd` fits and `ef` does not.
+    assert_eq!(line_text(&fit::fit_line(line, 4)), "abcd");
+}
+
+/// The cut falls *after* the last column of the budget, not before it: a line
+/// that spends the width exactly has not overflowed and loses nothing.
+#[test]
+fn a_line_that_spends_the_budget_exactly_is_kept_whole() {
+    let line = Line::from(vec![
+        Span::raw("ab"),
+        Span::styled("cdef", Style::default().fg(Color::Green)),
+    ]);
+
+    assert_eq!(line_text(&fit::fit_line(line, 6)), "abcdef");
+}
+
+/// Hints are dropped whole, from the least-needed end, and only when the
+/// separator they would need does not fit too. The separator's three columns
+/// are part of the cost of a second hint: subtract them instead of adding them
+/// and the budget underflows, dropping every hint after the first.
+#[test]
+fn hints_are_dropped_whole_from_the_end_and_the_separator_costs_its_columns() {
+    // "aa | bb" is exactly 7; the third hint would need 12.
+    assert_eq!(fit_hints_with(&["aa", "bb", "cc"], 7, " | "), "aa | bb");
+    assert_eq!(fit_hints_with(&["aa", "bb", "cc"], 12, " | "), "aa | bb | cc");
+}
+
+/// The rail spends four columns before any hint text — the `│`, the gutter pad
+/// and the column the row's cursor sits in — so the hint budget is the canvas
+/// less one for reflow and less those four. Get the gutter wrong by a column
+/// and a hint is dropped a canvas-width early, or the rail overruns the single
+/// physical row the driver counted it as.
+#[test]
+fn the_hint_budget_is_the_canvas_less_the_rail_and_the_gutter() {
+    let frame = build_frame(&conns(), "", 0, FrameMode::Manage, canvas(71));
+
+    // The manage rail's five segments need 67 columns; a 71-column canvas
+    // leaves 66, so the least-needed segment is the one that goes.
+    assert_eq!(
+        hint_rail(&frame),
+        "│   Esc cancel · ↑↓ navigate · Ctrl+X delete · Ctrl+A add",
+        "at 71 columns the frame has room for four of the five manage hints"
+    );
+}
+
+/// A window of zero rows is empty *at the top*, not empty at the selection.
+/// The caller slices the rows with the range it is handed, and a range that
+/// started at the selection would name rows the frame never drew.
+#[test]
+fn a_window_with_no_rows_is_empty_at_the_top() {
+    assert_eq!(visible_window(5, 3, 0), 0..0);
+    assert_eq!(visible_window(0, 0, 5), 0..0);
+}
+
+/// The frame reports the row it actually selected. Enter is routed through
+/// this answer, so a `selection()` that reported the first row whatever the
+/// cursor was on would open the wrong Connection while drawing the right one.
+#[test]
+fn the_frame_reports_the_row_it_selected() {
+    let frame = build_frame(&conns(), "", 1, FrameMode::Pick, canvas(80));
+
+    assert_eq!(frame.selection(), 1);
+    assert_eq!(frame.selected_connection_index(), Some(1));
+}
+
+/// When two fields score the same match, the earlier field in field order wins,
+/// so the highlight lands where the reader's eye started rather than on
+/// whichever field the loop happened to reach last.
+#[test]
+fn a_tie_between_fields_highlights_the_earlier_field() {
+    let conn = Connection {
+        id: "1".into(),
+        alias: "web-01".into(),
+        host: "web-01".into(),
+        user: "deploy".into(),
+        port: 22,
+        key_path: None,
+        folder: None,
+    };
+    let matcher = SkimMatcherV2::default();
+    let matches = compute_matches(&[conn.clone()], &matcher, "web");
+    let [(_, _, indices)] = matches.as_slice() else {
+        panic!("expected exactly one match");
+    };
+
+    let (alias_start, alias_len) = compute_field_offsets(&conn)
+        .into_iter()
+        .find(|(name, _, _)| *name == "alias")
+        .map(|(_, start, len)| (start, len))
+        .expect("alias has a display offset");
+
+    assert!(
+        indices.iter().all(|i| (alias_start..alias_start + alias_len).contains(i)),
+        "alias and host tie, so the highlight belongs on the alias at \
+         {alias_start}..{}; got {indices:?}",
+        alias_start + alias_len
+    );
+}
+
+/// At a terminal too short to hold the note *and* the full window, the note
+/// costs a list row: the frame comes out exactly as tall as it was without the
+/// note, because the terminal did not grow. A note that instead pushed the
+/// frame past the rows the driver counted would break the one-line-per-row
+/// invariant the settle-collapse depends on.
+#[test]
+fn a_note_costs_a_row_the_terminal_has_rather_than_a_row_it_never_had() {
+    let many: Vec<Connection> = (0..12)
+        .map(|i| Connection {
+            id: i.to_string(),
+            alias: format!("web-{i:02}"),
+            host: "10.0.0.4".into(),
+            user: "deploy".into(),
+            port: 22,
+            key_path: None,
+            folder: None,
+        })
+        .collect();
+    let short = Canvas::new(80, 12, ColorSupport::Truecolor);
+
+    let without = build_frame_with_note(
+        &many,
+        "",
+        0,
+        FrameMode::Pick,
+        short,
+        &FrameFlow::default(),
+        None,
+    );
+    let with = build_frame_with_note(
+        &many,
+        "",
+        0,
+        FrameMode::Pick,
+        short,
+        &FrameFlow::default(),
+        Some("0.1.11"),
+    );
+
+    assert!(
+        line_text(&with.lines()[0]).contains("update available"),
+        "the note has to still be drawn, or this proves nothing: {:?}",
+        frame_text(&with)
+    );
+    assert_eq!(
+        with.lines().len(),
+        without.lines().len(),
+        "a 12-row terminal cannot hold a note *and* the window it held before: \
+         the note must give up a row, not grow the frame"
     );
 }

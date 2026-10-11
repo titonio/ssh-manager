@@ -1924,4 +1924,269 @@ mod tests {
         assert_eq!(driven.settled(), &InlineOutcome::Cancelled);
         assert!(plain(&driven.glass).contains("cancelled"));
     }
+
+    // ── The pick frame's own keystrokes ────────────────────────────────────
+    //
+    // The pick frame decides its keys for itself rather than asking
+    // `manage::step`, so nothing above this line proves they work. Each one is
+    // asserted by what the frame *does* with the key: which row the cursor
+    // ends on, what the filter holds, and whether the frame is still open.
+
+    /// Typing narrows the list, which is the whole reason the frame is open.
+    /// Asserted by what `Enter` takes: if the keystroke never reached the
+    /// filter, `Enter` picks the first row of the *unfiltered* list and looks
+    /// exactly like success.
+    #[test]
+    fn typing_narrows_the_list_to_what_matches() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let driven = drive_script(
+            vec![key(KeyCode::Char('2')), key(KeyCode::Enter)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(web02()),
+            "`2` matches only web-02, so that is the row Enter takes"
+        );
+    }
+
+    /// A chord is not a letter. `Ctrl+A` means *add* in the manage frame and
+    /// nothing in the pick frame, but it must never mean *type an `a`*: a chord
+    /// swallowed as text filters the list to something the user never typed,
+    /// and the frame is now lying about the query.
+    #[test]
+    fn a_chord_is_not_a_letter() {
+        let mut store = ledger(vec![web01()]);
+        let alone = drive_script(
+            vec![key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+        let mut store = ledger(vec![web01()]);
+        let chorded = drive_script(
+            vec![ctrl('a'), key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            plain(&chorded.glass),
+            plain(&alone.glass),
+            "Ctrl+A is not the letter a: the frame must not repaint as if it were"
+        );
+    }
+
+    /// The cursor moves with the arrows and with `j`/`k`, and both ways: a
+    /// frame that could only go down would strand the first row, and one that
+    /// could only go up would strand the last.
+    #[test]
+    fn the_cursor_walks_both_ways_with_arrows_and_with_j_k() {
+        let picked = |keys: Vec<Event>| {
+            let mut store = ledger(vec![web01(), web02()]);
+            let mut script = keys;
+            script.push(key(KeyCode::Enter));
+            let driven = drive_script(
+                script,
+                &mut store,
+                canvas(),
+                ManageState::new(),
+                FrameMode::Pick,
+            );
+            driven.settled().clone()
+        };
+
+        assert_eq!(
+            picked(vec![key(KeyCode::Down)]),
+            InlineOutcome::Picked(web02()),
+            "Down moves the cursor to the next row"
+        );
+        assert_eq!(
+            picked(vec![key(KeyCode::Char('j'))]),
+            InlineOutcome::Picked(web02()),
+            "`j` is Down"
+        );
+        assert_eq!(
+            picked(vec![key(KeyCode::Down), key(KeyCode::Up)]),
+            InlineOutcome::Picked(web01()),
+            "Up moves the cursor back"
+        );
+        assert_eq!(
+            picked(vec![key(KeyCode::Char('j')), key(KeyCode::Char('k'))]),
+            InlineOutcome::Picked(web01()),
+            "`k` is Up"
+        );
+    }
+
+    /// Backspace shortens the filter, so the rows that were filtered away come
+    /// back. Asserted by what is under the cursor afterwards, because a
+    /// Backspace that did nothing would still leave a frame that looks fine.
+    #[test]
+    fn backspace_shortens_the_filter_and_brings_the_rows_back() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let driven = drive_script(
+            vec![
+                key(KeyCode::Char('2')),
+                key(KeyCode::Backspace),
+                key(KeyCode::Enter),
+            ],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(web01()),
+            "the filter is empty again, so the first row of the whole list is under the cursor"
+        );
+    }
+
+    /// `Ctrl+C` is the cancel chord; not every chord is. `Ctrl+Backspace` is
+    /// still a Backspace, and a frame that read every chord as *give up* would
+    /// throw away the work of a filter every time a user reaches for the
+    /// word-delete they use everywhere else.
+    #[test]
+    fn a_chord_over_the_filter_is_not_a_cancel() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let driven = drive_script(
+            vec![
+                key(KeyCode::Char('2')),
+                Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+                key(KeyCode::Enter),
+            ],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(web01()),
+            "Ctrl+Backspace shortens the filter; only Ctrl+C leaves the frame"
+        );
+    }
+
+    /// Enter with nothing to take leaves the frame open and repainted: the key
+    /// was the frame's, it just had nothing to act on. A frame that swallowed
+    /// it silently would look frozen, which is how a user decides the program
+    /// has hung.
+    #[test]
+    fn enter_over_nothing_answers_with_a_repaint() {
+        let mut store = ledger(Vec::new());
+        let alone = drive_script(
+            vec![key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+        let mut store = ledger(Vec::new());
+        let pressed = drive_script(
+            vec![key(KeyCode::Enter), key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(pressed.settled(), &InlineOutcome::Cancelled);
+        assert!(
+            plain(&pressed.glass).len() > plain(&alone.glass).len(),
+            "Enter over nothing still answers: the frame repaints rather than ignoring the key"
+        );
+    }
+
+    /// A key *released* is not a key pressed. Terminals in kitty-keyboard mode
+    /// report releases, and a release read as a press would move the cursor
+    /// twice for one keystroke.
+    #[test]
+    fn a_released_key_is_not_a_keystroke() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let release = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+        let driven = drive_script(
+            vec![release, key(KeyCode::Enter)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(web01()),
+            "the cursor never moved, so Enter still takes the first row"
+        );
+    }
+
+    /// A refusal writes a refusal and nothing else. There are no live rows to
+    /// delete on this path, and asking for zero of them is not harmless:
+    /// `ESC [ 0 M` means *one line* to a terminal that reads a zero parameter
+    /// as the ECMA-48 default, so the frame could eat the user's prompt on its
+    /// way out of a terminal it never drew in.
+    #[test]
+    fn a_refusal_deletes_no_rows_it_never_drew() {
+        let mut store = ledger(vec![web01()]);
+        let short = Canvas::new(80, 4, ColorSupport::Monochrome);
+        let driven = drive_script(
+            vec![],
+            &mut store,
+            short,
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(driven.settled(), &InlineOutcome::Cancelled);
+        assert!(
+            !driven.glass.contains("\u{1b}[0M"),
+            "the refusal must not ask to delete rows it never drew: {:?}",
+            driven.glass
+        );
+    }
+
+    // ── The two small helpers the settle lines are built from ──────────────
+
+    /// A blank is not a value: `key_path: ""` must not be written to the file
+    /// as an empty path, and a path of any length must survive untouched.
+    #[test]
+    fn a_blank_field_holds_no_value_at_all() {
+        assert_eq!(none_if_blank(""), None, "empty is not a value");
+        assert_eq!(
+            none_if_blank("web-01"),
+            Some("web-01"),
+            "a value comes back as it was given"
+        );
+    }
+
+    /// A reason that fits is the reason; one that does not is cut with the
+    /// ellipsis that tells the reader there was more; one with no room at all
+    /// is dropped, because `◆ error  web-01` already says what happened and
+    /// the full text is on stderr.
+    #[test]
+    fn a_reason_is_kept_whole_cut_with_an_ellipsis_or_dropped() {
+        assert_eq!(fit_reason("disk on fire", 10, 40), "disk on fire");
+        assert_eq!(
+            fit_reason("disk on fire", 25, 40),
+            "disk on fi…",
+            "the cut is marked, so a truncated reason is not mistaken for the whole one"
+        );
+        assert_eq!(
+            fit_reason("disk on fire", 36, 40),
+            "",
+            "with no room for even one character the reason is dropped, not smeared"
+        );
+    }
 }

@@ -17,3 +17,9 @@ all_features = true
 # silently dropped from the count. `--cap-lints=warn` is appended to RUSTFLAGS so
 # the tests, and not the linter, decide whether a mutant matters.
 cap_lints = true
+
+# Nothing else belongs in this file. `exclude_globs`, `examine_globs`,
+# `exclude_re` and `skip_calls` each shrink the sweep by deciding in advance that
+# some code will not be tested, which is the opposite of what the sweep is for:
+# a mutant filtered out is a bug filtered out. A survivor is answered with a
+# test, in the suite, where the next reader can see it.

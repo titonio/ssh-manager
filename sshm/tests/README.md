@@ -75,7 +75,7 @@ count lines that ran; only a mutant checks that the line matters.
 
 ```bash
 cd sshm
-./mutants.sh                       # the whole crate: ~800 mutants, about two hours
+./mutants.sh                       # the whole crate: 791 mutants, ~45 min on 12 cores
 git diff --relative origin/master > /tmp/d.diff
 ./mutants.sh --in-diff /tmp/d.diff # only the mutants in the lines this branch touched
 ```
@@ -88,11 +88,13 @@ CI runs both: the diff form is a required check on master, the whole-crate sweep
 runs weekly and reports. `.github/workflows/mutants.yml` says which is which,
 and `sshm/.cargo/mutants.toml` holds the options that both share.
 
-A surviving mutant is a work list, not a verdict: write the test, or mark the
-code `#[mutants::skip]` with the reason beside it. What is not acceptable is
-leaving it in the list, because the suite is run once per mutant — about 800
-times a sweep — so a flaky test is a flake with 800 chances to land, and a
-timeout costs the whole run its signal.
+A surviving mutant is a work list, not a verdict, and there is one way off the
+list: the test that kills it. Nothing is skipped — no `#[mutants::skip]`, no
+`exclude_globs`, no `--exclude-re` — because a skipped mutant is a bug skipped,
+and the sweep is what tells you the suite has a hole in it. Nor is the list
+tolerable as standing debt: the suite runs once per mutant, about 800 times a
+sweep, so a flaky test is a flake with 800 chances to land and a hang costs the
+run its signal.
 
 ## The one snapshot that exists
 
