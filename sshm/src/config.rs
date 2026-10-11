@@ -143,15 +143,17 @@ impl Stanza {
 
 /// One ssh_config line as its lowercased keyword and its value.
 ///
-/// `None` for the three things that are not directives: a blank line, a
-/// comment, and a keyword with nothing to give it. The keyword is lowercased
-/// because ssh_config is spelled however the user likes and the importer
-/// matches on meaning, not on case.
+/// `None` when the line names no keyword or gives it nothing: a blank line, a
+/// line of spaces, a bare `Host` with no value. A comment needs no special
+/// case here — its first word is `#something`, and `Stanza::set` ignores every
+/// keyword it does not know, which is the same reason an unknown ssh_config
+/// keyword is skipped. Guarding on `#` as well would be a second place that
+/// decides what a comment means, and the two could disagree.
+///
+/// The keyword is lowercased because ssh_config is spelled however the user
+/// likes and the importer matches on meaning, not on case.
 fn directive(line: &str) -> Option<(String, String)> {
     let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
     let mut parts = line.split_whitespace();
     let keyword = parts.next()?.to_lowercase();
     let value = parts.next()?.to_string();

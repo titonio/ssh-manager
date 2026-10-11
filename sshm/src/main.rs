@@ -2665,4 +2665,76 @@ pub mod tests {
             String::from_utf8_lossy(&out.stdout)
         );
     }
+
+    /// The frame never draws on a captured stdout.
+    ///
+    /// When stdout is a pipe the shell widget reads the chosen alias off it,
+    /// so a frame's worth of cursor and colour sequences landing there is read
+    /// as the answer: the picker would appear to select a frame border. The
+    /// frame goes to `/dev/tty` instead, and the only way to watch which stream
+    /// it chose is to own the far end of the pipe — so this test runs itself
+    /// again with its stdout captured and looks for the frame's writing there.
+    ///
+    /// A child with no `/dev/tty` behind it says so rather than falling back to
+    /// the pipe: having nowhere to draw is an honest failure, drawing over the
+    /// emit is not.
+    #[test]
+    fn the_frame_never_draws_on_a_captured_stdout() {
+        if std::env::var_os("SSHM_FRAME_STREAM_CHILD").is_some() {
+            child_writes_through_the_frame_stream();
+        }
+
+        let out = std::process::Command::new(
+            std::env::current_exe().expect("the test binary knows itself"),
+        )
+        .args([
+            "--exact",
+            "tests::the_frame_never_draws_on_a_captured_stdout",
+            "--nocapture",
+        ])
+        .env("SSHM_FRAME_STREAM_CHILD", "1")
+        .output()
+        .expect("the child runs");
+
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let said = child_lines(&stdout)
+            .last()
+            .copied()
+            .unwrap_or_default()
+            .to_owned();
+
+        assert_eq!(
+            out.status.code(),
+            Some(0),
+            "the child reports what it found instead of failing on the environment: {stdout:?}"
+        );
+        assert!(
+            said == "__opened__" || said == "__no_tty__",
+            "the child has to say whether the frame stream opened: {stdout:?}"
+        );
+        assert!(
+            !stdout.contains("SSHM_FRAME_STREAM_PROBE"),
+            "the frame drew on the pipe the alias is read from ({said}): {stdout:?}"
+        );
+    }
+
+    /// The child's side: write one probe through the stream the frame would
+    /// draw on, then report whether that stream opened. The probe goes wherever
+    /// the frame would go, so if it comes back down the pipe the routing is
+    /// wrong; the report itself always travels on the pipe.
+    fn child_writes_through_the_frame_stream() -> ! {
+        use std::io::Write;
+
+        println!("__child__");
+        let wrote = open_frame_stream().and_then(|mut stream| {
+            stream
+                .write_all(b"SSHM_FRAME_STREAM_PROBE\n")
+                .and_then(|()| stream.flush())
+        });
+        match wrote {
+            Ok(()) => println!("__opened__"),
+            Err(_) => println!("__no_tty__"),
+        }
+        std::process::exit(0);
+    }
 }
