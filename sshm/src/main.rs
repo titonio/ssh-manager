@@ -161,63 +161,25 @@ fn dispatch(
     read_note_fn: fn() -> Option<String>,
     apply_update_fn: fn() -> ApplyResult,
 ) -> io::Result<()> {
-    // Handle completions command
-    if let Some(Commands::Completions { shell }) = cli.command {
-        generate_completions(shell);
-        return Ok(());
+    // The commands that answer before the cached update note is read: shell
+    // completions, the shell integration snippet, and **Apply Update**. They
+    // are asked as one group because they share the one property the frame
+    // paths depend on — none of them may reach `read_note_fn`, and none of
+    // them may fall through into a frame.
+    if let Some(result) = commands_before_the_note(&cli, apply_update_fn) {
+        return result;
     }
 
-    // Handle init command
-    if let Some(Commands::Init { shell, no_bind }) = cli.command {
-        // The --no-bind flag overrides the env var when set.
-        if no_bind {
-            std::env::set_var("SSHM_NO_BIND", "1");
-        }
-        match shell {
-            ShellType::Zsh => {
-                print_init_zsh_script();
-                return Ok(());
-            }
-            ShellType::Bash => {
-                print_init_bash_script();
-                return Ok(());
-            }
-        }
-    }
-
-    // `sshm update` — Apply Update (#46). Handled with the other non-frame
-    // paths, and *before* the single cached note read, so it can never
-    // pollute a captured stdout and can never fall through into a frame.
-    // Every branch returns.
-    if let Some(Commands::Update) = cli.command {
-        return match apply_update_fn() {
-            ApplyResult::Applied { from, to } => {
-                println!("sshm {from} → {to}");
-                Ok(())
-            }
-            ApplyResult::UpToDate { version } => {
-                println!("sshm {version} is already the latest release.");
-                Ok(())
-            }
-            ApplyResult::Unwritable { path } => Err(io::Error::other(unwritable_text(&path))),
-            ApplyResult::DevBuild { manifest_dir } => {
-                Err(io::Error::other(dev_build_text(&manifest_dir)))
-            }
-            ApplyResult::Error(reason) => Err(io::Error::other(retryable_text(&reason))),
-        };
-    }
-
-    // `sshm pick` — the insert emit. Runs before the update checker so a
-    // captured stdout is never polluted by it, and returns straight from
-    // the frame. The note is read from cache here, once, before the frame
-    // opens (#39).
-    //
     // The note is read once after the non-frame paths (completions, init)
     // have returned, so all three frame paths (pick, manage, bare) share
     // a single cache read. The `--check-update` path below calls
     // `check_update_fn` (the network checker), not this cached reader.
     let note = read_note_fn();
 
+    // `sshm pick` — the insert emit. Runs before the update checker so a
+    // captured stdout is never polluted by it, and returns straight from
+    // the frame. The note is read from cache here, once, before the frame
+    // opens (#39).
     if let Some(Commands::Pick { query }) = cli.command {
         let mut config = config::Config::load();
         return run_frame_fn(Emit::Insert, &mut config, query.unwrap_or_default(), note);
@@ -258,6 +220,76 @@ fn dispatch(
     // once above, before the frame opens (#39).
     let mut config = config::Config::load();
     run_frame_fn(Emit::Execute, &mut config, String::new(), note)
+}
+
+/// The commands that answer before the cached update note is read: shell
+/// completions, the shell integration snippet, and **Apply Update**.
+///
+/// `Some` means one of them owned the answer and `dispatch` must hand it back
+/// unchanged; `None` means the command is a frame path or a question, and the
+/// note may now be read. Grouped because they share the two properties the
+/// frame paths depend on: none of them may reach `read_note_fn`, and none of
+/// them may fall through into a frame. `sshm update` in particular is handled
+/// here so it can never pollute a captured stdout (#46).
+fn commands_before_the_note(
+    cli: &Cli,
+    apply_update_fn: fn() -> ApplyResult,
+) -> Option<io::Result<()>> {
+    if let Some(Commands::Completions { shell }) = &cli.command {
+        generate_completions(*shell);
+        return Some(Ok(()));
+    }
+
+    if let Some(Commands::Init { shell, no_bind }) = &cli.command {
+        return Some(run_init(shell.clone(), *no_bind));
+    }
+
+    if let Some(Commands::Update) = &cli.command {
+        return Some(report_apply(apply_update_fn()));
+    }
+
+    None
+}
+
+/// `sshm init`: print the shell integration snippet and stop.
+///
+/// The `--no-bind` flag overrides the env var when set, which is why the two
+/// shells share one entry point rather than each reading the flag themselves.
+fn run_init(shell: ShellType, no_bind: bool) -> io::Result<()> {
+    if no_bind {
+        std::env::set_var("SSHM_NO_BIND", "1");
+    }
+
+    match shell {
+        ShellType::Zsh => print_init_zsh_script(),
+        ShellType::Bash => print_init_bash_script(),
+    }
+
+    Ok(())
+}
+
+/// What **Apply Update** did, in the words the command leaves behind (#46).
+///
+/// Every branch returns: an apply that failed must not fall through into a
+/// frame, and an apply that succeeded has already printed the one line it
+/// owns. The three failure texts live beside this function so the escape
+/// hatch appears on exactly one of them.
+fn report_apply(result: ApplyResult) -> io::Result<()> {
+    match result {
+        ApplyResult::Applied { from, to } => {
+            println!("sshm {from} → {to}");
+            Ok(())
+        }
+        ApplyResult::UpToDate { version } => {
+            println!("sshm {version} is already the latest release.");
+            Ok(())
+        }
+        ApplyResult::Unwritable { path } => Err(io::Error::other(unwritable_text(&path))),
+        ApplyResult::DevBuild { manifest_dir } => {
+            Err(io::Error::other(dev_build_text(&manifest_dir)))
+        }
+        ApplyResult::Error(reason) => Err(io::Error::other(retryable_text(&reason))),
+    }
 }
 
 // The three ways Apply Update can fail to replace the binary, and the text
@@ -358,61 +390,121 @@ fn run_frame_command(
     query: String,
     note: Option<String>,
 ) -> io::Result<()> {
+    let outcome = frame_outcome(emit, store, query, note)?;
+    finish_frame(emit, outcome)
+}
+
+/// Open the frame, let the user answer it, and hand back what their last
+/// keystroke meant along the emit axis.
+///
+/// The only lines in this command that touch a terminal, kept apart from
+/// [`finish_frame`], which decides what the answer does to the process. The
+/// frame is always the same driver opened on some state; the only question
+/// this answers is which state it opens on.
+fn frame_outcome(
+    emit: Emit,
+    store: &mut dyn connections::Store,
+    query: String,
+    note: Option<String>,
+) -> io::Result<inline::InlineOutcome> {
     let mut frame_out = open_frame_stream()?;
+    let initial =
+        opening_offer(store, emit.frame_mode()).unwrap_or_else(|| ManageState::with_query(query));
+    inline::run_inline_with_state(&mut frame_out, store, initial, emit.frame_mode(), note)
+}
 
-    // The first-run import offer (#38) belongs to manage only: the pick
-    // frame asks no questions, and an import is a write. When manage
-    // opens on an empty set with importable stanzas in ~/.ssh/config,
-    // the frame opens on the offer instead of the list — seeded as a
-    // `ManageState`, because the offer is a step the frame answers, not
-    // a flag the driver re-derives. Every other path is untouched.
-    let offer = if emit.frame_mode() == FrameMode::Manage {
-        config::ssh_config_path()
-            .filter(|path| path.exists())
-            .and_then(|path| {
-                let path = path.to_string_lossy().into_owned();
-                first_run_import_offer(store, &path).map(|count| (count, path))
-            })
-    } else {
-        None
-    };
-
-    let outcome = match offer {
-        Some((count, path)) => {
-            let initial = ManageState {
-                phase: Phase::ConfirmImport { count, path },
-                ..Default::default()
-            };
-            inline::run_inline_with_state(&mut frame_out, store, initial, emit.frame_mode(), note)?
-        }
-        None => inline::run_inline(&mut frame_out, store, query, emit.frame_mode(), note)?,
-    };
-
-    match emit.resolve(outcome) {
-        Action::Execute(args) => {
-            let code = ssh::execute_ssh(&args);
-            std::process::exit(code);
-        }
-        Action::Insert(alias) => {
-            // The emitted selection: the alias alone, on the real stdout.
-            println!("{alias}");
-            Ok(())
-        }
-        Action::Edit(_) => {
-            // Nothing to write. The frame's own collapse already left the
-            // single settle line story 13 asks for, and this is the whole
-            // cut-over contract for `sshm manage`: Enter routes the
-            // selection to the edit path instead of to `ssh`. The edit
-            // itself is #36/#37 — until they land no file is written here,
-            // so the runner adds no verb claiming that something changed
-            // (the `◆ editing` it used to print sat on top of the frame's
-            // own `◆ picked`: one keystroke, two settle lines).
-            Ok(())
-        }
-        Action::Cancelled => {
-            std::process::exit(130);
-        }
+/// The step manage opens on when there is something to import (#38), or
+/// `None` for every frame that opens on its list.
+///
+/// The first-run import offer belongs to manage only: the pick frame asks no
+/// questions, and an import is a write. When manage opens on an empty set
+/// with importable stanzas in `~/.ssh/config`, the frame opens on the offer
+/// instead of the list — seeded as a `ManageState`, because the offer is a
+/// step the frame answers, not a flag the driver re-derives.
+fn opening_offer(store: &dyn connections::Store, mode: FrameMode) -> Option<ManageState> {
+    if mode != FrameMode::Manage {
+        return None;
     }
+
+    let (count, path) = importable_ssh_config(store)?;
+    Some(ManageState {
+        phase: Phase::ConfirmImport { count, path },
+        ..Default::default()
+    })
+}
+
+/// The file a first run could import from, with how many stanzas it holds:
+/// `None` when there is no such file, or it has nothing to offer.
+fn importable_ssh_config(store: &dyn connections::Store) -> Option<(usize, String)> {
+    let path = config::ssh_config_path().filter(|path| path.exists())?;
+    let path = path.to_string_lossy().into_owned();
+    first_run_import_offer(store, &path).map(|count| (count, path))
+}
+
+/// What the frame's answer means for the process: hand the terminal over to
+/// `ssh`, print the emitted selection, or leave the way a cancel leaves.
+fn finish_frame(emit: Emit, outcome: inline::InlineOutcome) -> io::Result<()> {
+    match departure(emit.resolve(outcome)) {
+        Departure::Ssh(args) => std::process::exit(ssh::execute_ssh(&args)),
+        Departure::Leave { stdout, exit } => emitted(stdout, exit),
+    }
+}
+
+/// Where a resolved outcome sends the process, as data.
+///
+/// Pure on purpose: the interesting question is which of the four outcomes
+/// means which exit, and a question with a data answer is a question a test
+/// can ask without spawning `ssh` or ending the test process.
+#[derive(Debug, PartialEq)]
+enum Departure {
+    /// Hand the terminal to `ssh`; its exit status becomes ours.
+    Ssh(Vec<std::ffi::OsString>),
+    /// Print this line on the real stdout, if there is one, and leave with
+    /// this status.
+    Leave { stdout: Option<String>, exit: i32 },
+}
+
+fn departure(action: Action) -> Departure {
+    match action {
+        Action::Execute(args) => Departure::Ssh(args),
+        Action::Insert(alias) => Departure::Leave {
+            stdout: Some(alias),
+            exit: 0,
+        },
+        // Nothing to write. The frame's own collapse already left the
+        // single settle line story 13 asks for, and this is the whole
+        // cut-over contract for `sshm manage`: Enter routes the
+        // selection to the edit path instead of to `ssh`. The edit
+        // itself is #36/#37 — until they land no file is written here,
+        // so the runner adds no verb claiming that something changed
+        // (the `◆ editing` it used to print sat on top of the frame's
+        // own `◆ picked`: one keystroke, two settle lines).
+        Action::Edit(_) => Departure::Leave {
+            stdout: None,
+            exit: 0,
+        },
+        Action::Cancelled => Departure::Leave {
+            stdout: None,
+            exit: 130,
+        },
+    }
+}
+
+/// Print the emitted selection on the real stdout, then leave with the status
+/// the outcome means.
+///
+/// A selection that only printed leaves `Ok` for `main` to report, exactly as
+/// it always did; a cancel takes the 130 with it.
+fn emitted(stdout: Option<String>, exit: i32) -> io::Result<()> {
+    if let Some(alias) = stdout {
+        println!("{alias}");
+    }
+
+    if exit != 0 {
+        std::process::exit(exit);
+    }
+
+    Ok(())
 }
 
 /// The stream the frame draws to: stdout when it is a real terminal,
@@ -426,15 +518,23 @@ fn run_frame_command(
 /// which is what keeps the captured pipe free of control sequences.
 fn open_frame_stream() -> io::Result<Box<dyn Write>> {
     use std::io::IsTerminal;
-    match emit::frame_stream(std::io::stdout().is_terminal()) {
-        emit::FrameStream::Stdout => Ok(Box::new(io::stdout())),
-        emit::FrameStream::Tty => Ok(Box::new(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/tty")?,
-        )),
+
+    if emit::frame_stream(std::io::stdout().is_terminal()) == emit::FrameStream::Tty {
+        return open_tty();
     }
+
+    Ok(Box::new(io::stdout()))
+}
+
+/// `/dev/tty`, opened read-write: the frame draws there when stdout is
+/// reserved for the emitted selection.
+fn open_tty() -> io::Result<Box<dyn Write>> {
+    Ok(Box::new(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty")?,
+    ))
 }
 
 fn run_add_command(
@@ -445,10 +545,27 @@ fn run_add_command(
     key_path: Option<String>,
     folder: Option<String>,
 ) -> Result<(), String> {
+    let conn = build_add_connection(alias, host, user, port, key_path, folder)?;
+    save_new_connection(conn)
+}
+
+/// The Connection `sshm add` describes, or the refusal it owes the user.
+///
+/// Two flags are required and the rest have defaults; the id is minted here
+/// because nothing else can. Pure, so the two refusals are assertable without
+/// touching anyone's `connections.json`.
+fn build_add_connection(
+    alias: Option<String>,
+    host: Option<String>,
+    user: Option<String>,
+    port: u16,
+    key_path: Option<String>,
+    folder: Option<String>,
+) -> Result<config::Connection, String> {
     let alias = alias.ok_or("Error: --alias is required")?;
     let host = host.ok_or("Error: user@host is required")?;
 
-    let conn = config::Connection {
+    Ok(config::Connection {
         id: uuid::Uuid::new_v4().to_string(),
         alias,
         host,
@@ -456,8 +573,11 @@ fn run_add_command(
         port,
         key_path,
         folder,
-    };
+    })
+}
 
+/// Write the new Connection through the one store the command has, and say so.
+fn save_new_connection(conn: config::Connection) -> Result<(), String> {
     let mut config = config::Config::load();
     config.add_connection(conn);
     config
@@ -1145,6 +1265,214 @@ pub mod tests {
             "the underlying error is surfaced unedited, got: {err}"
         );
         assert!(take_calls().is_empty());
+    }
+
+    /// The five answers Apply Update can give, and what each one costs the
+    /// user: two successes that print one line, three failures that say why.
+    /// The escape hatch appears on exactly one of them — the failure Apply
+    /// Update can never work around (#46).
+    #[test]
+    fn apply_answers_are_two_successes_and_three_refusals() {
+        assert!(
+            report_apply(ApplyResult::Applied {
+                from: "0.1.12".into(),
+                to: "0.1.13".into()
+            })
+            .is_ok(),
+            "a replaced binary is a success"
+        );
+        assert!(
+            report_apply(ApplyResult::UpToDate {
+                version: "0.1.13".into()
+            })
+            .is_ok(),
+            "already newest is a success too"
+        );
+
+        let unwritable = report_apply(ApplyResult::Unwritable {
+            path: "/usr/local/bin/sshm".into(),
+        })
+        .expect_err("an install that cannot be written is a failure");
+        let unwritable = format!("{unwritable}");
+        assert!(
+            unwritable.contains("/usr/local/bin/sshm") && unwritable.contains("install.sh"),
+            "the unwritable path is named, and the way out with it: {unwritable}"
+        );
+
+        let dev_build = report_apply(ApplyResult::DevBuild {
+            manifest_dir: "/home/dev/ssh-manager".into(),
+        })
+        .expect_err("a checkout is refused");
+        assert!(
+            format!("{dev_build}").contains("checkout"),
+            "a Dev Build says why it is refused: {dev_build}"
+        );
+
+        let failed = report_apply(ApplyResult::Error("rate limit exceeded".into()))
+            .expect_err("a failed apply is a failure");
+        let failed = format!("{failed}");
+        assert!(
+            failed.contains("rate limit exceeded") && !failed.contains("install.sh"),
+            "a retryable failure keeps the reason and does not print the \
+             sledgehammer: {failed}"
+        );
+    }
+
+    /// `sshm init` prints the snippet for either shell and opens nothing.
+    /// Neither call touches `SSHM_NO_BIND`: the flag is what the test would
+    /// have to clean up, and it is not what this is about.
+    #[test]
+    #[serial]
+    fn init_prints_a_snippet_for_either_shell() {
+        assert!(run_init(ShellType::Zsh, false).is_ok());
+        assert!(run_init(ShellType::Bash, false).is_ok());
+    }
+
+    // ── What the frame's answer does to the process ────────────────────────
+    //
+    // The frame runner needs a terminal; what it *decides* does not. The
+    // decisions are asserted here — which outcome execs, which prints, which
+    // status each leaves — so the only unproved part of the command is the
+    // terminal work itself.
+
+    fn web01() -> config::Connection {
+        config::Connection {
+            id: "id-web-01".into(),
+            alias: "web-01".into(),
+            host: "10.0.0.4".into(),
+            user: "deploy".into(),
+            port: 22,
+            key_path: None,
+            folder: Some("prod".into()),
+        }
+    }
+
+    /// The four resolutions and where each sends the process.
+    #[test]
+    fn every_resolution_sends_the_process_where_the_emit_axis_says() {
+        let ssh = std::ffi::OsString::from("ssh");
+        assert_eq!(
+            departure(Action::Execute(vec![ssh.clone()])),
+            Departure::Ssh(vec![ssh]),
+            "execute hands the terminal to ssh"
+        );
+        assert_eq!(
+            departure(Action::Insert("web-01".into())),
+            Departure::Leave {
+                stdout: Some("web-01".into()),
+                exit: 0,
+            },
+            "insert prints the alias alone and succeeds"
+        );
+        assert_eq!(
+            departure(Action::Edit(web01())),
+            Departure::Leave {
+                stdout: None,
+                exit: 0,
+            },
+            "edit writes nothing and says nothing more than the frame already did"
+        );
+        assert_eq!(
+            departure(Action::Cancelled),
+            Departure::Leave {
+                stdout: None,
+                exit: 130,
+            },
+            "a cancel leaves the way a cancelled command leaves"
+        );
+    }
+
+    /// An edit selection comes back through the command as a clean success:
+    /// nothing printed, nothing executed, exit as before.
+    #[test]
+    fn an_edit_selection_leaves_cleanly() {
+        assert!(
+            finish_frame(Emit::Edit, inline::InlineOutcome::Picked(web01())).is_ok(),
+            "the edit path is a success that writes nothing here"
+        );
+    }
+
+    /// The first-run offer is a manage step and nothing else: the pick frame
+    /// asks no questions, and an import is a write (#38).
+    #[test]
+    fn the_import_offer_never_opens_a_pick_frame() {
+        assert!(
+            opening_offer(&EmptyStore, FrameMode::Pick).is_none(),
+            "a pick never opens on an import"
+        );
+    }
+
+    /// A store with nothing in it, for the paths that only ask what it holds.
+    /// The mutating half of the trait panics: reaching it is the test failing,
+    /// and no file is written by accident.
+    struct EmptyStore;
+
+    impl connections::Store for EmptyStore {
+        fn all(&self) -> &[config::Connection] {
+            &[]
+        }
+
+        fn remove(&mut self, _id: &str) -> Result<Option<config::Connection>, String> {
+            panic!("the offer asks, it does not delete")
+        }
+
+        fn add(
+            &mut self,
+            _draft: &connections::ConnectionDraft,
+        ) -> Result<config::Connection, String> {
+            panic!("the offer asks, it does not add")
+        }
+
+        fn update(
+            &mut self,
+            _existing_id: &str,
+            _draft: &connections::ConnectionDraft,
+        ) -> Result<Option<config::Connection>, String> {
+            panic!("the offer asks, it does not edit")
+        }
+
+        fn import_ssh_config(&mut self, _path: &str) -> Result<config::ImportReport, String> {
+            panic!("the offer asks, it does not import")
+        }
+    }
+
+    /// The two flags `sshm add` requires and the defaults it supplies,
+    /// asserted on the Connection it builds rather than on the file it would
+    /// write: the file is the user's (#46).
+    #[test]
+    fn add_refuses_what_it_cannot_write_and_defaults_what_it_can() {
+        let no_alias =
+            build_add_connection(None, Some("deploy@10.0.0.4".into()), None, 22, None, None)
+                .expect_err("--alias is required");
+        assert!(no_alias.contains("--alias"), "got: {no_alias}");
+
+        let no_host = build_add_connection(Some("web".into()), None, None, 22, None, None)
+            .expect_err("user@host is required");
+        assert!(no_host.contains("user@host"), "got: {no_host}");
+
+        let conn = build_add_connection(
+            Some("web".into()),
+            Some("deploy@10.0.0.4".into()),
+            None,
+            2222,
+            Some("~/.ssh/id_ed25519".into()),
+            Some("prod".into()),
+        )
+        .expect("a complete add builds");
+
+        assert_eq!(conn.alias, "web");
+        assert_eq!(conn.host, "deploy@10.0.0.4");
+        assert_eq!(
+            conn.user, "",
+            "an absent user is the empty string, as it has always been"
+        );
+        assert_eq!(conn.port, 2222);
+        assert_eq!(conn.key_path.as_deref(), Some("~/.ssh/id_ed25519"));
+        assert_eq!(conn.folder.as_deref(), Some("prod"));
+        assert!(
+            !conn.id.is_empty(),
+            "the id is minted here, as nothing else can"
+        );
     }
 
     /// A failed check is the same: non-zero, and no frame. This is the
