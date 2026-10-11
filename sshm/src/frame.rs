@@ -426,9 +426,12 @@ fn flow_lines(flow: &FrameFlow, budget: usize, t: &Theme) -> Vec<Line<'static>> 
         push_form_lines(&mut lines, form, t);
     }
 
-    if lines.len() > budget {
-        lines.drain(..lines.len() - budget);
-    }
+    // Drop the oldest rows that do not fit. Spelled as a saturating subtraction
+    // rather than a length test with a subtraction inside it: when the count
+    // equals the budget there is nothing to drop either way, and a comparison
+    // that cannot change the answer is a comparison no test can ever check.
+    let excess = lines.len().saturating_sub(budget);
+    lines.drain(..excess);
 
     lines
 }
@@ -1281,11 +1284,11 @@ pub fn build_frame_with_note(
     // and the budget saturates (never overflows) at very small heights.
     let note_line = note.map(|v| update_note_line(v, &t, canvas.fit_width()));
     let note_rows = usize::from(note_line.is_some());
-    let visible = if note_rows > 0 {
-        fit_visible_rows(canvas.height.saturating_sub(note_rows)).unwrap_or(0)
-    } else {
-        canvas.visible_rows().unwrap_or(0)
-    };
+    // One expression, because there is only one quantity here: `Canvas::visible_rows()`
+    // *is* `fit_visible_rows(canvas.height)`, so the no-note case is this case
+    // with `note_rows` of zero. A branch between two spellings of the same
+    // arithmetic is a branch no test can tell apart.
+    let visible = fit_visible_rows(canvas.height.saturating_sub(note_rows)).unwrap_or(0);
 
     let mut lines = Vec::new();
     if let Some(line) = note_line {

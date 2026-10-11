@@ -1754,3 +1754,62 @@ fn an_untouched_field_recedes_behind_the_focus_and_the_problems() {
         "an untouched row must recede so the focused and invalid rows stand out"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Where the caret is, and where it is not
+//
+// The caret is the only thing on the glass that says which row takes the next
+// keystroke. Two ways to get that wrong, and each has to be pinned separately:
+// painting a caret on every row that holds text, and painting one nowhere.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The row the cursor is on shows its text bold and ends in the caret: the text
+/// is the fact and the caret is chrome, so the caret is dim and the text is
+/// not. Drop the focus from this row's rendering and the reader is typing into
+/// a field they have to find by counting.
+#[test]
+fn the_focused_row_shows_its_text_bold_and_ends_with_the_caret() {
+    let frame = render(&edit_open());
+    let alias = map_row_drawn(&frame, "Alias");
+
+    let value = alias
+        .spans
+        .iter()
+        .find(|s| s.content == "web-01")
+        .unwrap_or_else(|| panic!("no alias value span in {:?}", line_text(alias)));
+    assert!(
+        value.style.add_modifier.contains(Modifier::BOLD),
+        "the text being edited is the fact on the row: {:?}",
+        value.style
+    );
+    assert!(
+        alias.spans.iter().any(|s| s.content == "_"),
+        "the row that takes the next keystroke has to say so: {:?}",
+        line_text(alias)
+    );
+}
+
+/// A row the cursor has left shows its text plain and carries no caret, however
+/// much text it holds. A caret on every filled row is a caret that says nothing,
+/// and the reader types into the wrong field believing the glass.
+#[test]
+fn a_row_the_cursor_has_left_shows_its_text_plain_and_carries_no_caret() {
+    let frame = render(&edit_open());
+    let host = map_row_drawn(&frame, "Host");
+
+    let value = host
+        .spans
+        .iter()
+        .find(|s| s.content == "10.0.0.4")
+        .unwrap_or_else(|| panic!("no host value span in {:?}", line_text(host)));
+    assert!(
+        !value.style.add_modifier.contains(Modifier::BOLD),
+        "a row that is not focused must not dress its text as if it were: {:?}",
+        value.style
+    );
+    assert!(
+        !host.spans.iter().any(|s| s.content == "_"),
+        "one caret per frame, on the row the cursor is on: {:?}",
+        line_text(host)
+    );
+}
