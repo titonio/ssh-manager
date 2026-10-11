@@ -21,7 +21,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::unix::io::RawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -209,6 +209,52 @@ impl Pty {
         builder.env = fixture.env();
         builder.cwd = Some(fixture.home_dir().to_path_buf());
         builder.spawn()
+    }
+
+    /// Wait until a file the child is expected to write has appeared.
+    ///
+    /// This is a *pumping* wait, which is the only kind that works here: the
+    /// child writes the file as a side effect of a keystroke, and it cannot
+    /// take that keystroke while its output buffer is full. A test that polled
+    /// the file without draining the terminal would be waiting for a child that
+    /// is waiting for the test.
+    pub fn wait_for_file(&mut self, path: &Path, timeout: Duration) -> io::Result<()> {
+        self.wait_until_pumping(
+            &format!("{} to be written", path.display()),
+            timeout,
+            || path.exists(),
+        )
+    }
+
+    /// Wait for something outside the screen, pumping the terminal meanwhile.
+    ///
+    /// The escape hatch for assertions about the world the child leaves behind
+    /// — a store file that must have changed, a shim log that must have grown.
+    /// Same rule as every other wait here: a deadline, and a failure that names
+    /// what it was waiting for.
+    pub fn wait_until_pumping<F>(
+        &mut self,
+        what: &str,
+        timeout: Duration,
+        mut check: F,
+    ) -> io::Result<()>
+    where
+        F: FnMut() -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if check() {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(io_other(&format!(
+                    "timed out after {} ms waiting for {what}\n--- screen ---\n{}",
+                    timeout.as_millis(),
+                    self.grid()
+                )));
+            }
+            self.pump_slice();
+        }
     }
 
     /// Send bytes to the child exactly as a keyboard would.

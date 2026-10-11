@@ -156,15 +156,33 @@ impl Fixture {
         let bin = self.home_dir().join("shim-bin");
         fs::create_dir_all(&bin)?;
         let log = self.home_dir().join("ssh-calls.log");
-        let script = format!(
-            "#!/bin/sh\n{{ \
-             for arg in \"$@\"; do \
-             if [ -n \"$record\" ]; then printf '\\037%s' \"$arg\"; else record=\"$arg\"; fi; \
-             done; \
-             printf '%s\\n' \"$record\"; \
-             }} >> '{}'\nexit 0\n",
-            log.display()
-        );
+        // One record per call: the argv fields joined by the ASCII unit
+        // separator (0x1f), the record terminated by NUL. Both are chosen
+        // because they cannot occur in an argument — NUL is impossible by the
+        // definition of argv, and 0x1f is not a character a path or a hostname
+        // contains — so the recording round-trips exactly and no quoting rule
+        // can lie about what was passed. A newline-terminated, space-separated
+        // log would merge two arguments whenever one of them contained a space,
+        // which is the one case worth catching.
+        //
+        // The `first` flag is there because the obvious trick of remembering the
+        // first argument and printing it at the end prints it *last*, silently
+        // reordering the argv it is meant to be recording.
+        let script = [
+            "#!/bin/sh",
+            "{",
+            "  first=t",
+            "  for arg in \"$@\"; do",
+            "    if [ -z \"$first\" ]; then printf '\\037'; fi",
+            "    printf '%s' \"$arg\"",
+            "    first=",
+            "  done",
+            "  printf '\\000'",
+            &format!("}} >> '{}'", log.display()),
+            "exit 0",
+        ]
+        .join("\n")
+            + "\n";
         let script_path = bin.join("ssh");
         fs::write(&script_path, script)?;
         let mut perms = fs::metadata(&script_path)?.permissions();
@@ -188,17 +206,28 @@ impl Fixture {
         if !path.exists() {
             return Ok(Vec::new());
         }
-        let text = fs::read_to_string(path)?;
-        Ok(text
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| line.split('\u{1f}').map(String::from).collect())
+        let bytes = fs::read(path)?;
+        Ok(bytes
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .map(|record| {
+                record
+                    .split(|byte| *byte == 0x1f)
+                    .map(|field| String::from_utf8_lossy(field).into_owned())
+                    .collect()
+            })
             .collect())
     }
 
     /// Where the shim writes, for a test that waits on the file itself.
     pub fn ssh_calls_path(&self) -> Option<&Path> {
         self.ssh_calls.as_deref()
+    }
+
+    /// The stub `ssh` itself. Normally found through `PATH`, which is the
+    /// point; named here so the shim can be tested in its own right.
+    pub fn ssh_stub_path(&self) -> Option<PathBuf> {
+        self.shim_dir.as_ref().map(|dir| dir.join("ssh"))
     }
 
     /// An extra environment variable for the child.
@@ -295,4 +324,44 @@ pub fn seeded_fixture(aliases: &[&str]) -> Fixture {
         .map(|(idx, alias)| connection(alias, &format!("10.0.0.{}", idx + 1), "deploy"))
         .collect();
     Fixture::new().with_connections(&connections).expect("seed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The stub `ssh` records what it was handed, in order and unaltered.
+    ///
+    /// The emit tests assert on this recording, so a shim that reordered or
+    /// mangled argv would make them lie. An argument with a space and one with
+    /// a newline are in there because those are the two ways a naive
+    /// whitespace-separated log would silently merge two arguments into one.
+    #[test]
+    fn the_ssh_stub_records_argv_exactly_as_it_was_handed_it() {
+        let fixture = Fixture::new().with_ssh_shim().expect("the shim");
+        let path = fixture.ssh_stub_path().expect("the shim is there");
+
+        let run = |args: &[&str]| {
+            std::process::Command::new(&path)
+                .args(args)
+                .status()
+                .expect("the shim runs")
+        };
+        run(&["-i", "/keys/id", "-p", "2222", "ci@10.0.0.42"]);
+        run(&["with a space", "with\na newline"]);
+
+        assert_eq!(
+            fixture.ssh_calls().expect("the log reads"),
+            vec![
+                vec![
+                    "-i".to_string(),
+                    "/keys/id".to_string(),
+                    "-p".to_string(),
+                    "2222".to_string(),
+                    "ci@10.0.0.42".to_string(),
+                ],
+                vec!["with a space".to_string(), "with\na newline".to_string()],
+            ]
+        );
+    }
 }
