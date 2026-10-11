@@ -1293,7 +1293,7 @@ fn list_key_step(state: &ManageState, key: KeyEvent, selected: Option<&Connectio
         // moves with the arrows, which is what its hint rail names; the
         // pick frame keeps `hjkl` because story 21 is a manage requirement
         // and nothing here needs to win an argument with it.
-        KeyCode::Char(ch) if key.modifiers.is_empty() => next.query.push(ch),
+        KeyCode::Char(ch) if is_text(key) => next.query.push(ch),
         _ => return Step::state_only(state.clone()),
     }
 
@@ -1341,7 +1341,7 @@ fn confirm_step(state: &ManageState, key: KeyEvent, target: &Connection) -> Step
     }
 
     if let KeyCode::Char(ch) = key.code {
-        if key.modifiers.is_empty() {
+        if is_text(key) {
             let mut next = declined(state, target);
             next.query.push(ch);
             return Step::state_only(next);
@@ -1408,7 +1408,7 @@ fn confirm_import_step(state: &ManageState, key: KeyEvent, path: &str) -> Step {
     }
 
     if let KeyCode::Char(ch) = key.code {
-        if key.modifiers.is_empty() {
+        if is_text(key) {
             let mut next = import_declined(state);
             next.query.push(ch);
             return Step::state_only(next);
@@ -1471,12 +1471,10 @@ fn form_step(state: &ManageState, key: KeyEvent, map: &FormMap) -> Step {
             phase: Phase::Form(Box::new(map.clone().deleted())),
             ..state.clone()
         }),
-        KeyCode::Char(ch) if key.modifiers.difference(KeyModifiers::SHIFT).is_empty() => {
-            Step::state_only(ManageState {
-                phase: Phase::Form(Box::new(map.clone().typed(ch))),
-                ..state.clone()
-            })
-        }
+        KeyCode::Char(ch) if is_text(key) => Step::state_only(ManageState {
+            phase: Phase::Form(Box::new(map.clone().typed(ch))),
+            ..state.clone()
+        }),
         _ => Step::state_only(state.clone()),
     }
 }
@@ -1572,14 +1570,28 @@ fn submit_form(state: &ManageState, map: &FormMap) -> Step {
     }
 }
 
+/// Is this key text, as opposed to a chord?
+///
+/// Shift is the one modifier that is *part of typing*: a terminal sends the
+/// byte `W` for a capital and crossterm reports it as `Char('W')` with SHIFT
+/// set, so a rule that insisted on no modifiers at all could not type an
+/// uppercase letter — a Connection named `Web-01` could not be found by typing
+/// its own name, and the list filter dropped the capital in silence while the
+/// form map three rows away accepted it. Every other modifier turns the key
+/// into a *different question*, which is the same line [`is_chord`] reads from
+/// the other side: the frame binds nothing to Alt, and a chord is not a
+/// printable.
+fn is_text(key: KeyEvent) -> bool {
+    key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
+}
+
 /// Is this key the unadorned answer `ch` to the `(y/N)` prompt?
 ///
 /// Shift is allowed (`Y` answers the same as `y`); every other modifier is
 /// not, because a Ctrl chord is a *different question* and must not be read
 /// as an answer to this one.
 fn is_answer(key: KeyEvent, ch: char) -> bool {
-    key.modifiers.difference(KeyModifiers::SHIFT).is_empty()
-        && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&ch))
+    is_text(key) && matches!(key.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&ch))
 }
 
 /// Is this key the Ctrl chord `ch`?

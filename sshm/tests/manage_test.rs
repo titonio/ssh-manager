@@ -200,6 +200,172 @@ fn j_and_k_type_into_the_filter_rather_than_moving_the_cursor() {
     assert_eq!(k.state.selection, 0, "`k` must not move the cursor");
 }
 
+// ── Capital letters: the keystroke a terminal actually sends ────────────────
+//
+// A terminal does not send "capital W". It sends the byte `W`, and crossterm
+// turns that byte into `Char('W')` **with SHIFT set** — `char_code_to_event`
+// in its unix parser, and `normalize_case` on the equality side, both make
+// SHIFT present exactly when the character is an uppercase ASCII letter. So
+// any rule about modifiers that does not mention SHIFT is a rule about capital
+// letters whether it meant to be or not.
+//
+// This is why the sweep in `no_printable_character_starts_a_management_action`
+// does not cover it: that test presses `plain('W')`, and `plain` builds
+// `Char('W')` with no modifiers, which is a keystroke no terminal can send.
+
+/// A capital letter, as a terminal reports it.
+fn shifted(ch: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT)
+}
+
+/// An Alt chord. Named for the same reason as `ctrl` and `shifted`: pressing
+/// the key you mean is the whole job of these helpers.
+fn alt(ch: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT)
+}
+
+/// A word typed the way a keyboard sends it: capitals with SHIFT, everything
+/// else bare. There is no "type a word" event, so a word is N keystrokes and
+/// each one carries the modifiers its character brings.
+fn typed(word: &str) -> Vec<KeyEvent> {
+    word.chars()
+        .map(|c| {
+            if c.is_ascii_uppercase() {
+                shifted(c)
+            } else {
+                plain(c)
+            }
+        })
+        .collect()
+}
+
+/// The README's key table says *any printable character* appends to the
+/// filter, and a capital is printable. Nothing in the alias rules stops a
+/// Connection being named `Web-01`, so a user searching for it typed the name
+/// and got `eb-01`: the capital vanished without a trace, and the list
+/// narrowed to something the name was not.
+#[test]
+fn a_capital_letter_types_into_the_filter_like_any_other_printable() {
+    let one = step(&ManageState::new(), shifted('W'), Some(&web01()));
+    assert_eq!(
+        one.state.query, "W",
+        "a capital on its own must type itself, not be dropped"
+    );
+
+    let mut state = ManageState::new();
+    for k in typed("Web-01") {
+        state = step(&state, k, Some(&web01())).state;
+    }
+
+    assert_eq!(
+        state.query, "Web-01",
+        "every character of the name must reach the filter: {:?}",
+        state.query
+    );
+}
+
+/// The delete confirm takes any other printable as "no, and I am searching
+/// now" (user story 21). A capital is one of those printables, so reaching for
+/// the shift key with a delete armed must decline *and* filter — not decline
+/// and swallow the letter.
+#[test]
+fn a_capital_letter_declines_the_delete_and_filters_like_any_other_printable() {
+    let armed = step(&ManageState::new(), ctrl('x'), Some(&web01()));
+    assert_eq!(
+        armed.state.phase,
+        Phase::ConfirmDelete { target: web01() },
+        "the fixture must actually be sitting on a delete confirm"
+    );
+
+    let step = step(&armed.state, shifted('W'), Some(&web01()));
+
+    assert_eq!(
+        step.state.phase,
+        Phase::List,
+        "a printable declines the delete"
+    );
+    assert_eq!(
+        step.state.query, "W",
+        "and the declined letter goes to the filter rather than being wasted"
+    );
+    assert!(
+        step.effects.is_empty(),
+        "and nothing is deleted: {:?}",
+        step.effects
+    );
+}
+
+/// The same rule one phase over: the first-run import offer declines on any
+/// printable and passes it to the filter, capitals included.
+#[test]
+fn a_capital_letter_declines_the_import_offer_and_filters_like_any_other_printable() {
+    let step = step(&offered(), shifted('W'), None);
+
+    assert_eq!(
+        step.state.phase,
+        Phase::List,
+        "a printable declines the offer"
+    );
+    assert_eq!(
+        step.state.query, "W",
+        "and the declined letter reaches the filter, capital or not"
+    );
+    assert!(
+        step.effects.is_empty(),
+        "and nothing is imported: {:?}",
+        step.effects
+    );
+}
+
+/// Shift is the one modifier that is *part of typing*. Alt is not: the frame
+/// binds nothing to it, and a chord is not a printable, so `Alt+W` stays out
+/// of the filter. Fixing capitals must not quietly become "accept whatever
+/// modifiers arrive".
+#[test]
+fn an_alt_key_is_dropped_rather_than_typed_into_the_filter() {
+    let typing = step(&ManageState::new(), plain('w'), Some(&web01()));
+
+    let step = step(&typing.state, alt('W'), Some(&web01()));
+
+    assert_eq!(
+        step.state, typing.state,
+        "Alt+W must change nothing about the frame: {:?}",
+        step.state
+    );
+    assert!(
+        step.effects.is_empty(),
+        "Alt+W must ask for nothing: {:?}",
+        step.effects
+    );
+}
+
+/// One surface, one key set: the frame reads these keys in every mode, and the
+/// form map already took capitals — which is what made the list's refusal an
+/// inconsistency inside a single frame rather than a design decision. Pinned
+/// so the two halves cannot drift apart again.
+#[test]
+fn a_capital_letter_types_into_a_form_field_too() {
+    let opened = step(&ManageState::new(), ctrl('a'), Some(&web01()));
+    assert!(
+        matches!(opened.state.phase, Phase::Form(_)),
+        "Ctrl+A must open the add map"
+    );
+
+    let mut state = opened.state;
+    for k in typed("Web-01") {
+        state = step(&state, k, Some(&web01())).state;
+    }
+
+    let map = match &state.phase {
+        Phase::Form(map) => map,
+        other => panic!("still on the form map, got {other:?}"),
+    };
+    assert_eq!(
+        map.draft.alias, "Web-01",
+        "the alias row is where the map opens, so the word lands there"
+    );
+}
+
 /// Arrows are the manage frame's movement, and the only thing that is.
 #[test]
 fn arrows_move_the_cursor_in_the_manage_frame() {
