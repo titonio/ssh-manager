@@ -1,0 +1,21 @@
+[package]
+name = "sshm-e2e"
+version = "0.1.0"
+edition = "2021"
+description = "End-to-end PTY tests for the sshm binary, outside the sshm crate so the mutation sweep never sees them"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The terminal: a real pty, plus an emulator that keeps the colours a
+# glyph-only snapshot throws away.
+portable-pty = "0.9"
+vt100 = "0.16"
+# tcgetattr on the master, and killpg on the way out.
+libc = "0.2"
+serde_json = "1.0"
+tempfile = "3.8"
+
+[dev-dependencies]
+insta = "1.34"
