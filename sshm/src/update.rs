@@ -182,38 +182,61 @@ fn replace_target() -> Result<PathBuf, String> {
 pub fn apply_update() -> ApplyResult {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
 
-    // First, and before anything else touches the network: a checkout's
-    // binary is not ours to rewrite.
+    match preflight() {
+        Err(result) => result,
+        Ok(()) => report(build_update(&current_version), current_version),
+    }
+}
+
+/// Everything that has to be true before a single byte is downloaded.
+///
+/// Two questions, in this order, because each one is cheaper than the next
+/// and a refusal is worth the most when it costs the least:
+///
+/// * Is this a checkout? A checkout's binary is not ours to rewrite: under
+///   `cargo run -- update` the resolved executable is a build artefact, and
+///   replacing it would overwrite the developer's own work with a release
+///   build.
+/// * Can the install location be written at all? Asking before the download
+///   is what makes "nothing was downloaded" true, and it is the only way the
+///   diagnostic can name the path. No second install location is offered as a
+///   workaround — a shadowed binary reproducing "`which sshm` and
+///   `sshm --version` disagree" is the confusion this command exists to end.
+fn preflight() -> Result<(), ApplyResult> {
     if let Some(manifest_dir) = dev_build() {
-        return ApplyResult::DevBuild { manifest_dir };
+        return Err(ApplyResult::DevBuild { manifest_dir });
     }
 
-    // Then: can the install location be written at all? Asking before the
-    // download is what makes "nothing was downloaded" true, and it is the
-    // only way the diagnostic can name the path. No second install location
-    // is offered as a workaround — a shadowed binary reproducing "`which
-    // sshm` and `sshm --version` disagree" is the confusion this command
-    // exists to end.
-    let target = match replace_target() {
-        Ok(target) => target,
-        Err(e) => return ApplyResult::Error(e),
-    };
+    let target = replace_target().map_err(ApplyResult::Error)?;
     if !install_dir_writable(&target) {
-        return ApplyResult::Unwritable { path: target };
+        return Err(ApplyResult::Unwritable { path: target });
     }
 
-    let update = match update_config(&current_version) {
-        Ok(update) => update,
-        Err(e) => return ApplyResult::Error(e),
-    };
+    Ok(())
+}
 
-    match update.update() {
+/// Ask the library to fetch and install the latest release.
+///
+/// The only lines in this module that touch the network or write a binary,
+/// which is why they are kept apart from the two functions that decide
+/// *whether* to and the one that says what came back.
+fn build_update(current_version: &str) -> Result<Status, String> {
+    let update = update_config(current_version)?;
+    update.update().map_err(|e| e.to_string())
+}
+
+/// The library's answer, in the words this command reports in.
+///
+/// `Applied` needs the version it came *from*, which only the caller knows:
+/// the library reports where it got to, not where it started.
+fn report(answer: Result<Status, String>, current_version: String) -> ApplyResult {
+    match answer {
         Ok(Status::UpToDate(version)) => ApplyResult::UpToDate { version },
         Ok(Status::Updated(version)) => ApplyResult::Applied {
             from: current_version,
             to: version,
         },
-        Err(e) => ApplyResult::Error(e.to_string()),
+        Err(e) => ApplyResult::Error(e),
     }
 }
 
@@ -395,22 +418,40 @@ fn get_platform_asset_name() -> Result<String, String> {
 /// guards the cached note: something unparseable is not newer, and a silent
 /// answer beats one that invents a release.
 fn check_latest_version(current_version: &str) -> UpdateResult {
-    let update = match update_config(current_version) {
-        Ok(update) => update,
-        Err(e) => {
-            let _ = write_cache(None);
-            return UpdateResult::Error(e);
-        }
-    };
+    settle_release(current_version, latest_release(current_version))
+}
 
-    match update.get_latest_release() {
-        Ok(release) => {
-            if is_newer(&release.version, current_version) {
-                let _ = write_cache(Some(release.version.clone()));
-                return UpdateResult::UpdateAvailable {
-                    version: release.version,
-                };
-            }
+/// Which release GitHub calls the latest, as a version string.
+///
+/// The question and nothing else: no archive is downloaded and no binary is
+/// written. **Check for Updates** answers; **Apply Update** acts, and the two
+/// are different commands (#46).
+fn latest_release(current_version: &str) -> Result<String, String> {
+    let update = update_config(current_version)?;
+    update
+        .get_latest_release()
+        .map(|release| release.version)
+        .map_err(|e| e.to_string())
+}
+
+/// Fold the answer into the cache and into the result the surface prints.
+///
+/// The cache records *every* answer, including the failures: a check that
+/// could not be made is not a check that found nothing, and the note has to
+/// stop claiming an update that may have been withdrawn. Clearing it on the
+/// two negative answers is what keeps a stale `new_version` from outliving the
+/// request that produced it.
+///
+/// Whether the release is newer is `is_newer` again, the same quiet rule that
+/// guards the cached note: something unparseable is not newer, and a silent
+/// answer beats one that invents a release.
+fn settle_release(current_version: &str, answer: Result<String, String>) -> UpdateResult {
+    match answer {
+        Ok(version) if is_newer(&version, current_version) => {
+            let _ = write_cache(Some(version.clone()));
+            UpdateResult::UpdateAvailable { version }
+        }
+        Ok(_) => {
             let _ = write_cache(None);
             UpdateResult::NoUpdate
         }
@@ -419,7 +460,7 @@ fn check_latest_version(current_version: &str) -> UpdateResult {
             // The reason, unadorned: the surface that prints this supplies its
             // own framing, and "Error checking for updates: Failed to check
             // for updates: …" is what doubling it reads like.
-            UpdateResult::Error(e.to_string())
+            UpdateResult::Error(e)
         }
     }
 }
@@ -1071,6 +1112,140 @@ mod tests {
             check_for_update(),
             UpdateResult::UpdateAvailable { version } if version == "0.9.9"
         ));
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    /// The other half of the cache gate: a fresh check that found *nothing*
+    /// answers from the file too. The absence of an update is an answer, and
+    /// it is cached as one — otherwise every frame that paints would ask
+    /// GitHub again.
+    #[test]
+    #[serial]
+    fn check_for_update_answers_no_update_from_a_fresh_empty_cache() {
+        let _not_a_checkout = NotACheckout::take();
+
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        write_cache(None).unwrap();
+
+        assert!(
+            matches!(check_for_update(), UpdateResult::NoUpdate),
+            "a cached check that found nothing is `NoUpdate`, not a fresh request"
+        );
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    /// No cache file at all is not an error. A first run, or a run after the
+    /// config directory was cleared, answers `NoUpdate` and asks nothing of
+    /// the network — the note is allowed to be absent, never to be late.
+    #[test]
+    #[serial]
+    fn check_for_update_with_no_cache_at_all_is_no_update() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+
+        assert!(
+            matches!(check_for_update(), UpdateResult::NoUpdate),
+            "a missing cache is silence, not a failure"
+        );
+    }
+
+    /// The three answers the library can give, in the words **Apply Update**
+    /// reports them in. Checked offline on purpose: these are the `Status`
+    /// values the library would have produced, so the wording is proved
+    /// without downloading a binary.
+    #[test]
+    fn apply_update_reports_the_librarys_three_answers_in_words() {
+        assert_eq!(
+            report(Ok(Status::UpToDate("0.2.0".into())), "0.1.13".into()),
+            ApplyResult::UpToDate {
+                version: "0.2.0".into()
+            },
+            "already newest is a success that wrote nothing"
+        );
+        assert_eq!(
+            report(Ok(Status::Updated("0.2.0".into())), "0.1.13".into()),
+            ApplyResult::Applied {
+                from: "0.1.13".into(),
+                to: "0.2.0".into()
+            },
+            "the swap reports where it started as well as where it got to"
+        );
+        assert_eq!(
+            report(Err("no network".into()), "0.1.13".into()),
+            ApplyResult::Error("no network".into()),
+            "the reason is passed through as it arrived"
+        );
+    }
+
+    /// A newer release is cached *and* returned. Both, because the note a
+    /// later frame paints comes from the file rather than from this call's
+    /// return value: write one and not the other and the next `sshm` says
+    /// nothing about what this one learned.
+    #[test]
+    #[serial]
+    fn a_newer_release_is_cached_and_returned_so_the_next_frame_can_say_it() {
+        let _not_a_checkout = NotACheckout::take();
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+
+        assert!(matches!(
+            settle_release("0.1.0", Ok("9.9.9".into())),
+            UpdateResult::UpdateAvailable { version } if version == "9.9.9"
+        ));
+        assert_eq!(
+            read_cache().unwrap().unwrap().new_version,
+            Some("9.9.9".into()),
+            "and the answer is on disk for the next run"
+        );
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    /// Not newer — the same version, or something unparseable — is `NoUpdate`,
+    /// and the cache is cleared so a note left by an earlier check cannot
+    /// outlive the check that contradicts it.
+    #[test]
+    #[serial]
+    fn settle_release_clears_the_cache_when_nothing_is_newer() {
+        let _not_a_checkout = NotACheckout::take();
+        let cache_path = get_cache_file_path().unwrap();
+        write_cache(Some("9.9.9".into())).unwrap();
+
+        assert!(matches!(
+            settle_release("0.1.0", Ok("0.1.0".into())),
+            UpdateResult::NoUpdate
+        ));
+        assert_eq!(
+            read_cache().unwrap().unwrap().new_version,
+            None,
+            "the stale note is gone, not left to age out"
+        );
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    /// A failed check clears the cache too — a check that could not be made
+    /// must not leave an old answer looking current — and the reason is
+    /// passed through unadorned.
+    #[test]
+    #[serial]
+    fn a_failed_check_clears_the_cache_so_an_old_answer_does_not_look_current() {
+        let _not_a_checkout = NotACheckout::take();
+        let cache_path = get_cache_file_path().unwrap();
+        write_cache(Some("9.9.9".into())).unwrap();
+
+        assert!(matches!(
+            settle_release("0.1.0", Err("github is having a day".into())),
+            UpdateResult::Error(reason) if reason == "github is having a day"
+        ));
+        assert_eq!(
+            read_cache().unwrap().unwrap().new_version,
+            None,
+            "a failed check does not get to keep the previous answer"
+        );
 
         fs::remove_file(&cache_path).ok();
     }
@@ -2316,7 +2491,14 @@ mod tests {
 
         // `.update()` is the library call that downloads, extracts and
         // replaces the binary. Exactly one place in this module may reach it,
-        // and that place is Apply Update.
+        // and that place is in the Apply Update half of the file: the helper
+        // the command calls to act, never the half that only asks.
+        //
+        // The name this assertion checks moved once — `apply_update` was split
+        // and the swap came to live in `build_update`. What the gate is about
+        // is the role, not the spelling: the function that swaps is the one
+        // Apply Update calls, and only Apply Update calls it. The two
+        // assertions below are what hold that now.
         assert_eq!(
             code.matches(".update()").count(),
             1,
@@ -2325,8 +2507,24 @@ mod tests {
         let at = code.find(".update()").unwrap();
         let enclosing = code[..at].rsplit("fn ").next().unwrap();
         assert!(
-            enclosing.starts_with("apply_update"),
-            "the swap belongs in apply_update, not in {enclosing}"
+            enclosing.starts_with("build_update"),
+            "the swap belongs in the Apply Update half, not in {enclosing}"
+        );
+        // And the helper that holds it is reachable from one command and one
+        // only: `fn build_update` is the definition, so two mentions is
+        // exactly one call site — Apply Update's.
+        assert_eq!(
+            code.matches("build_update(").count(),
+            2,
+            "the swap must be reachable from Apply Update and from nowhere else"
+        );
+        let applied = code[code.find("fn apply_update").unwrap()..]
+            .split("fn ")
+            .nth(1)
+            .unwrap();
+        assert!(
+            applied.contains("build_update("),
+            "and the one command that reaches the swap is Apply Update"
         );
 
         // And the hand-rolled transport is gone, not merely unused: the
