@@ -1965,7 +1965,7 @@ fn a_tie_between_fields_highlights_the_earlier_field() {
         folder: None,
     };
     let matcher = SkimMatcherV2::default();
-    let matches = compute_matches(&[conn.clone()], &matcher, "web");
+    let matches = compute_matches(std::slice::from_ref(&conn), &matcher, "web");
     let [(_, _, indices)] = matches.as_slice() else {
         panic!("expected exactly one match");
     };
