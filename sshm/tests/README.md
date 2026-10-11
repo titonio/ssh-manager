@@ -29,17 +29,17 @@ bytes the frame emits, which a glyph snapshot cannot.
 
 | Target | Gates |
 |---|---|
-| `src/*` `#[cfg(test)]` (lib target) | Unit tests beside the code: config, the Connection manager, update checking, and the theme/ANSI serializer |
+| `src/*` `#[cfg(test)]` (lib target) | Unit tests beside the code: config, the Connection manager, update checking, the theme/ANSI serializer, and the live driver's keystroke routing — private machinery, so it is tested where it lives |
 | `src/main.rs` `#[cfg(test)]` (bin target) | CLI dispatch and the generated shell init scripts (insta **inline** snapshots) |
 | `tests/connections_test.rs` | The Connection manager seam: add, edit, delete, `~/.ssh/config` import — through the public interface only |
 | `tests/design_system_test.rs` | The deterministic design gates: palette purity, the Clack palette's shape, hint fitting, `NO_COLOR` degradation, and the settle-verb state set. Plus the frame dump (below) |
 | `tests/emit_test.rs` | The emit axis: `Emit::resolve` turning a frame outcome into an `Action`, and `frame_stream`'s stdout-vs-`/dev/tty` routing |
 | `tests/filter_test.rs` | Fuzzy filtering, `build_row_text`, and the row-text pairing: the field offsets must index the text the frame actually renders |
 | `tests/frame_test.rs` | The frame seam: the Clack grammar, rows, the hint rail and its fitting, transparency, the empty / no-match states, windowing, and column-accurate width fitting |
-| `tests/inline_test.rs` | The live half: `diff_rows`, `settle_trace`, `plan_resize`, and the driver — including that it never enters the alternate screen |
+| `tests/inline_test.rs` | The live half through the public seam: `diff_rows`, `settle_trace`, `plan_resize`, and that the frame never enters the alternate screen |
 | `tests/main_tests.rs` | `ssh` argument building and execution plumbing |
 
-Typical shape of a green run: **581 passed / 0 failed / 4 ignored**, and it is
+Typical shape of a green run: **624 passed / 0 failed / 4 ignored**, and it is
 green with the network unplugged. The four ignored tests are:
 
 | Ignored test | Why |

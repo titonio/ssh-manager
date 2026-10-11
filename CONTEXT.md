@@ -69,3 +69,11 @@ A binary running from a source checkout rather than an installed location.
 It is out of sshm's custody: it is never replaced, and it is never offered an
 Update Note.
 _Avoid_: debug build, local build, cargo build
+
+**Paint**:
+What a frame is painted for, and on: the emit mode that decides what Enter
+means, the **Update Note** frozen at the edge of the process, and the canvas
+the terminal offers. A frame is a function of the step's state and these
+three, which is why they travel as one thing rather than as three arguments,
+and why only the canvas ever changes — a resize re-reads the terminal.
+_Avoid_: config, context, params, settings
