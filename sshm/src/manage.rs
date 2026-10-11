@@ -1189,34 +1189,58 @@ pub fn step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) -
 /// This is the whole of the manage frame's key behaviour while it is just a
 /// list, so that the driver has one place to ask rather than a `match` that
 /// has to remember which of these the frame is allowed to act on.
+///
+/// Two questions, asked in order: is this one of the chords that open a
+/// sequence, and if not, what does the plain key do to the list?
 fn list_step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) -> Step {
     if is_chord(key, 'c') {
         return Step::exit(state.clone(), InlineOutcome::Cancelled);
     }
 
+    if let Some(step) = list_chord_step(state, key, selected) {
+        return step;
+    }
+
+    list_key_step(state, key, selected)
+}
+
+/// The chords that open a sequence from the list: `Ctrl+X` asks to delete,
+/// `Ctrl+E` opens the map for the row under the cursor, `Ctrl+A` opens an
+/// empty one. `None` means the key is not one of them.
+///
+/// Both `Ctrl+X` and `Ctrl+E` capture their target *here*, by value:
+/// everything the confirm or the map then does — including arrowing across
+/// six rows — is about the Connection the user was pointing at when they
+/// pressed the chord, whatever the cursor gets up to in between. With nothing
+/// under the cursor they ask for nothing, because the frame will not invent a
+/// target to change.
+fn list_chord_step(
+    state: &ManageState,
+    key: KeyEvent,
+    selected: Option<&Connection>,
+) -> Option<Step> {
+    // The sequence opens on the list's own body: the filter and the cursor
+    // come back with the user when it ends. What it replaces is the note,
+    // never the list.
+    let opened = |phase: Phase| {
+        Step::state_only(ManageState {
+            phase,
+            ..state.clone()
+        })
+    };
+
     if is_chord(key, 'x') {
-        // The target is captured *here*, by value. Everything the confirm then
-        // does — and refuses to do — is about this Connection, whatever the
-        // cursor gets up to between now and the answer.
-        if let Some(target) = selected {
-            return Step::state_only(ManageState {
-                phase: Phase::ConfirmDelete {
-                    target: target.clone(),
-                },
-                ..state.clone()
-            });
-        }
-        return Step::state_only(state.clone());
+        return Some(match selected {
+            Some(target) => opened(Phase::ConfirmDelete {
+                target: target.clone(),
+            }),
+            None => Step::state_only(state.clone()),
+        });
     }
 
     if is_chord(key, 'e') {
-        // Like `Ctrl+X`, the target is captured *here*, by value:
-        // everything the map then does — including arrowing across six
-        // rows — is about the Connection the user was pointing at when they
-        // pressed the chord. With nothing under the cursor it asks for
-        // nothing, because the frame will not invent a target to change.
-        if let Some(target) = selected {
-            return Step::state_only(ManageState {
+        return Some(match selected {
+            Some(target) => Step::state_only(ManageState {
                 phase: Phase::Form(Box::new(FormMap::from_connection(target))),
                 // The note from the last action is cleared the same way
                 // `Ctrl+A` clears it: the map is a new ask, and a
@@ -1224,22 +1248,25 @@ fn list_step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) 
                 // editing?" reads as an answer to the wrong question.
                 trace: None,
                 ..state.clone()
-            });
-        }
-        return Step::state_only(state.clone());
-    }
-
-    if is_chord(key, 'a') {
-        // The sequence opens on the list's own body: the filter and the
-        // cursor come back with the user when it ends. What it replaces is
-        // the note, never the list.
-        return Step::state_only(ManageState {
-            phase: Phase::Form(Box::new(FormMap::start())),
-            trace: None,
-            ..state.clone()
+            }),
+            None => Step::state_only(state.clone()),
         });
     }
 
+    if is_chord(key, 'a') {
+        return Some(Step::state_only(ManageState {
+            phase: Phase::Form(Box::new(FormMap::start())),
+            trace: None,
+            ..state.clone()
+        }));
+    }
+
+    None
+}
+
+/// What a plain key does to the list: filter text, movement, or one of the
+/// two ways out.
+fn list_key_step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) -> Step {
     let mut next = state.clone();
     match key.code {
         KeyCode::Esc => return Step::exit(next, InlineOutcome::Cancelled),
@@ -1428,51 +1455,13 @@ fn form_step(state: &ManageState, key: KeyEvent, map: &FormMap) -> Step {
         return Step::exit(state.clone(), InlineOutcome::Cancelled);
     }
 
-    // Every cursor move produces the same shape; `on` wraps it so no arm
-    // re-types the spread.
-    let on = |cursor: FormCursor| {
-        Step::state_only(ManageState {
-            phase: Phase::Form(Box::new(FormMap {
-                cursor,
-                ..map.clone()
-            })),
-            ..state.clone()
-        })
-    };
-
     match key.code {
-        KeyCode::Enter => {
-            if map.cursor.is_submit() {
-                return submit_form(state, map);
-            }
-            on(map.cursor.next())
-        }
-        KeyCode::Down => on(map.cursor.down()),
-        KeyCode::Up => on(map.cursor.up()),
-        KeyCode::Tab => on(map.cursor.next()),
-        KeyCode::BackTab => on(map.cursor.prev()),
-        KeyCode::Esc => {
-            // Esc is the escape hatch, not a second arrow: from any row it
-            // backs up one, and from the top row it leaves the form. Backing
-            // off the first row is backing out of the whole thing, and what
-            // the user needs answered is whether the half-typed form got
-            // saved. It did not — no `Effect` leaves this module until the
-            // `▶` row is accepted — and the note says so.
-            if map.cursor.index() == 0 {
-                let trace = if map.target().is_some() {
-                    Trace::EditAbandoned
-                } else {
-                    Trace::AddAbandoned
-                };
-                Step::state_only(ManageState {
-                    phase: Phase::List,
-                    trace: Some(trace),
-                    ..state.clone()
-                })
-            } else {
-                on(map.cursor.up())
-            }
-        }
+        KeyCode::Enter => enter_form_step(state, map),
+        KeyCode::Down => moved(state, map, map.cursor.down()),
+        KeyCode::Up => moved(state, map, map.cursor.up()),
+        KeyCode::Tab => moved(state, map, map.cursor.next()),
+        KeyCode::BackTab => moved(state, map, map.cursor.prev()),
+        KeyCode::Esc => esc_form_step(state, map),
         KeyCode::Backspace => Step::state_only(ManageState {
             phase: Phase::Form(Box::new(map.clone().deleted())),
             ..state.clone()
@@ -1485,6 +1474,50 @@ fn form_step(state: &ManageState, key: KeyEvent, map: &FormMap) -> Step {
         }
         _ => Step::state_only(state.clone()),
     }
+}
+
+/// The step that moves the cursor and changes nothing else.
+///
+/// Every cursor move produces this one shape, so no arm re-types the spread:
+/// the same map with a different row under the cursor, in the same state.
+fn moved(state: &ManageState, map: &FormMap, cursor: FormCursor) -> Step {
+    Step::state_only(ManageState {
+        phase: Phase::Form(Box::new(FormMap {
+            cursor,
+            ..map.clone()
+        })),
+        ..state.clone()
+    })
+}
+
+/// Enter on the `▶` row accepts the map; anywhere else it moves along.
+fn enter_form_step(state: &ManageState, map: &FormMap) -> Step {
+    if map.cursor.is_submit() {
+        return submit_form(state, map);
+    }
+    moved(state, map, map.cursor.next())
+}
+
+/// Esc is the escape hatch, not a second arrow: from any row it backs up one,
+/// and from the top row it leaves the form. Backing off the first row is
+/// backing out of the whole thing, and what the user needs answered is
+/// whether the half-typed form got saved. It did not — no `Effect` leaves this
+/// module until the `▶` row is accepted — and the note says so.
+fn esc_form_step(state: &ManageState, map: &FormMap) -> Step {
+    if map.cursor.index() != 0 {
+        return moved(state, map, map.cursor.up());
+    }
+
+    let trace = if map.target().is_some() {
+        Trace::EditAbandoned
+    } else {
+        Trace::AddAbandoned
+    };
+    Step::state_only(ManageState {
+        phase: Phase::List,
+        trace: Some(trace),
+        ..state.clone()
+    })
 }
 
 /// Accept or refuse the `▶` row.
