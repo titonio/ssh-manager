@@ -121,6 +121,13 @@ jobs:
     - name: Install cargo-nextest
       uses: taiki-e/install-action@cargo-nextest
 
+    # The Shell Widget tests drive real zsh and bash. The runner image ships
+    # both; this asserts it rather than letting a future image change turn a
+    # shell test into a skip, and it runs first, while there is still a
+    # confusing failure for it to prevent.
+    - name: Check the shells the suite drives are present
+      run: command -v zsh && command -v bash
+
     # The same script a laptop runs, so the two cannot drift: it builds the
     # binary, points the suite at that binary through SSHM_E2E_BIN, and uses
     # nextest when it is installed. Per-test isolation and the ten-second
@@ -128,12 +135,6 @@ jobs:
     # retries anywhere — a flake is a bug, not a hiccup.
     - name: Run the end-to-end suite
       run: ./sshm-e2e/run-e2e.sh
-
-    # The Shell Widget tests drive real zsh and bash. The runner image ships
-    # both; the step asserts it rather than letting a future image change turn
-    # a shell test into a skip.
-    - name: Check the shells the suite drives are present
-      run: command -v zsh && command -v bash
 
   design:
     needs: check

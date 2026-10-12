@@ -6,7 +6,7 @@
 //! worth testing.
 
 use sshm_e2e::fixture::{connection, sshm_binary};
-use sshm_e2e::{Fixture, Pty};
+use sshm_e2e::{Fixture, Pty, DEFAULT_TIMEOUT};
 
 /// The frame draws in a real terminal, waits, and hands the terminal back.
 ///
@@ -37,9 +37,7 @@ fn a_seeded_connection_renders_in_a_real_terminal_and_escape_hands_the_terminal_
 
     // Escape, as the keyboard sends it.
     pty.key(b"\x1b");
-    let status = pty
-        .wait_exit(std::time::Duration::from_secs(4))
-        .expect("the frame closes");
+    let status = pty.wait_exit(DEFAULT_TIMEOUT).expect("the frame closes");
     status.assert_code(130);
 
     assert!(

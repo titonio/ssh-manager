@@ -21,7 +21,7 @@
 
 use std::io::{self, Read, Write};
 use std::os::unix::io::RawFd;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -62,9 +62,13 @@ const QUIET_SLICE: Duration = Duration::from_millis(30);
 /// A child process running on a real pseudo-terminal, with its output parsed
 /// into a screen grid as it arrives.
 ///
-/// Build one with [`Pty::builder`], drive it with [`Pty::send`] and
+/// Build one with [`Pty::spawn`], drive it with [`Pty::send`] and
 /// [`Pty::wait_until`], and let it drop: the process group goes with it.
 pub struct Pty {
+    /// Held for its drop and nothing else: the moment the last handle to the
+    /// master goes away the slave sees EOF, and a test that is still waiting
+    /// for output is waiting for a terminal nobody is listening to.
+    #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
@@ -91,7 +95,7 @@ pub struct Pty {
 /// laptop. What the child gets is exactly what [`crate::Fixture::env`] says it
 /// gets, plus `TERM` and `LANG` pinned so the emulator and the program agree
 /// about what the terminal is.
-pub struct PtyBuilder {
+pub(crate) struct PtyBuilder {
     program: PathBuf,
     args: Vec<String>,
     env: Vec<(String, String)>,
@@ -99,23 +103,10 @@ pub struct PtyBuilder {
 }
 
 impl PtyBuilder {
-    /// An extra variable for the child. Later calls win, so a test can override
-    /// something a [`crate::Fixture`] set.
-    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.env.push((key.into(), value.into()));
-        self
-    }
-
-    /// The directory the child starts in.
-    pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
-        self.cwd = Some(dir.into());
-        self
-    }
-
     /// Spawn the child. Returns as soon as it is running; nothing here waits
     /// for the program to draw anything — that is what [`Pty::wait_until`] is
     /// for, so the deadline belongs to the check rather than to the spawn.
-    pub fn spawn(self) -> io::Result<Pty> {
+    fn spawn(self) -> io::Result<Pty> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -201,15 +192,22 @@ fn drain(mut reader: Box<dyn Read + Send>, tx: mpsc::Sender<Vec<u8>>) {
                     break;
                 }
             }
-            // EIO (and anything else fatal) means the terminal is gone.
+            // A signal interrupting a read is not the terminal going away, and
+            // a thread that mistakes it for EOF has just stopped listening to a
+            // live child — which every wait in this harness would then ride out
+            // to its deadline.
+            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            // EIO, and anything else, means the far end is gone: Linux does not
+            // return `Ok(0)` once the last slave fd closes.
             Err(_) => break,
         }
     }
 }
 
 impl Pty {
-    /// Start building a child running `program`.
-    pub fn builder(program: impl Into<PathBuf>) -> PtyBuilder {
+    /// Start building a child running `program`. Private on purpose:
+    /// [`Pty::spawn`] is the only shape a test has ever needed.
+    fn builder(program: impl Into<PathBuf>) -> PtyBuilder {
         PtyBuilder {
             program: program.into(),
             args: Vec::new(),
@@ -249,21 +247,6 @@ impl Pty {
         self.wait_until_settled("the frame", DEFAULT_TIMEOUT, |screen| {
             screen.contents().contains("\u{2514}")
         })
-    }
-
-    /// Wait until a file the child is expected to write has appeared.
-    ///
-    /// This is a *pumping* wait, which is the only kind that works here: the
-    /// child writes the file as a side effect of a keystroke, and it cannot
-    /// take that keystroke while its output buffer is full. A test that polled
-    /// the file without draining the terminal would be waiting for a child that
-    /// is waiting for the test.
-    pub fn wait_for_file(&mut self, path: &Path, timeout: Duration) -> io::Result<()> {
-        self.wait_until_pumping(
-            &format!("{} to be written", path.display()),
-            timeout,
-            || path.exists(),
-        )
     }
 
     /// Wait for something outside the screen, pumping the terminal meanwhile.
@@ -482,18 +465,6 @@ impl Pty {
         })
     }
 
-    /// The colour of the first cell of the first occurrence of `needle`.
-    pub fn fg_of(&mut self, needle: &str) -> Option<vt100::Color> {
-        self.locate(needle)
-            .map(|(row, col, _)| row_col_fg(self, row, col))
-    }
-
-    /// Whether the first cell of the first occurrence of `needle` is bold.
-    pub fn bold_of(&mut self, needle: &str) -> Option<bool> {
-        self.locate(needle)
-            .map(|(row, col, _)| self.cell_bold(row, col).unwrap_or(false))
-    }
-
     /// Where `needle` first appears on the grid, as `(row, column, row_text)`.
     pub fn locate(&mut self, needle: &str) -> Option<(u16, u16, String)> {
         self.drain_now();
@@ -508,14 +479,6 @@ impl Pty {
         None
     }
 
-    /// The raw byte stream the child has written, for the assertions the grid
-    /// cannot make — that a byte sequence arrived at all, or that stdout
-    /// carried exactly one thing.
-    pub fn raw(&mut self) -> Vec<u8> {
-        self.drain_now();
-        self.raw.clone()
-    }
-
     /// Whether the terminal is cooked — echoing and line-buffered — as the
     /// terminal itself reports it.
     ///
@@ -525,12 +488,6 @@ impl Pty {
     pub fn termios_is_cooked(&self) -> io::Result<bool> {
         let flags = local_flags(self.master_fd)?;
         Ok(flags & (libc::ECHO | libc::ICANON) == (libc::ECHO | libc::ICANON))
-    }
-
-    /// Whether the terminal has flow control switched on — the `IXON` bit that
-    /// turns `Ctrl+S` into a stop signal instead of a keystroke.
-    pub fn termios_ixon(&self) -> io::Result<bool> {
-        Ok(local_flags(self.master_fd)? & libc::IXON != 0)
     }
 
     /// Switch `IXON` off on the terminal.
@@ -545,20 +502,9 @@ impl Pty {
         set_termios(self.master_fd, &termios)
     }
 
-    /// The terminal's window size as the kernel has it.
-    pub fn winsize(&self) -> io::Result<(u16, u16)> {
-        let size = self.master.get_size().map_err(other)?;
-        Ok((size.rows, size.cols))
-    }
-
     /// The child's pid, for a test that needs to know it is really a process.
     pub fn pid(&self) -> Option<u32> {
         self.child.process_id()
-    }
-
-    /// Whether the reader thread has seen the terminal close.
-    pub fn terminal_closed(&self) -> bool {
-        self.eof
     }
 
     /// Take one byte chunk if one is waiting, and answer any terminal query it
@@ -653,10 +599,6 @@ impl Pty {
         let tail = &self.raw[self.raw.len().saturating_sub(400)..];
         String::from_utf8_lossy(tail).escape_debug().to_string()
     }
-}
-
-fn row_col_fg(pty: &mut Pty, row: u16, col: u16) -> vt100::Color {
-    pty.cell_fg(row, col).unwrap_or(vt100::Color::Default)
 }
 
 /// The exit code, with the message a test wants when it is not what it hoped.

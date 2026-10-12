@@ -12,10 +12,8 @@
 //! against the note the frame draws. The note is a claim about what happened;
 //! the store is what happened.
 
-use std::time::Duration;
-
 use sshm_e2e::fixture::{seeded_fixture, sshm_binary};
-use sshm_e2e::{Fixture, Pty};
+use sshm_e2e::{Fixture, Pty, DEFAULT_TIMEOUT};
 
 /// `sshm manage` over two seeded Connections, cursor on the first.
 fn manage() -> (Fixture, Pty) {
@@ -25,7 +23,7 @@ fn manage() -> (Fixture, Pty) {
     (fixture, pty)
 }
 
-/// Wait until the frame is showing the list again, not a form or a question.
+/// Wait until the frame is showing the list again, not the Form Map or a question.
 fn back_at_the_list(pty: &mut Pty) {
     pty.wait_for_text("Manage Connections")
         .expect("the frame is the list again");
@@ -136,11 +134,9 @@ fn changing_a_field_and_saving_rewrites_the_connection() {
     pty.wait_for_text("Edit web-01")
         .expect("the seeded map opens");
     pty.key(b"-old");
-    pty.wait_until(
-        "the change showing on its row",
-        Duration::from_secs(4),
-        |screen| screen.contents().contains("web-01-old"),
-    )
+    pty.wait_until("the change showing on its row", DEFAULT_TIMEOUT, |screen| {
+        screen.contents().contains("web-01-old")
+    })
     .expect("the edit shows as it is typed");
     pty.key(b"\r");
 
@@ -150,7 +146,7 @@ fn changing_a_field_and_saving_rewrites_the_connection() {
     // change are two different facts and the map never draws them alike.
     pty.wait_until(
         "the changed row marking itself",
-        Duration::from_secs(4),
+        DEFAULT_TIMEOUT,
         |screen| screen.contents().contains("\u{25cf} Alias"),
     )
     .expect("a changed field is marked as changed");
@@ -194,11 +190,9 @@ fn backing_out_of_an_edit_leaves_the_store_alone() {
     pty.wait_for_text("Edit web-01")
         .expect("the seeded map opens");
     pty.key(b"-gone");
-    pty.wait_until(
-        "the draft showing the change",
-        Duration::from_secs(4),
-        |screen| screen.contents().contains("web-01-gone"),
-    )
+    pty.wait_until("the draft showing the change", DEFAULT_TIMEOUT, |screen| {
+        screen.contents().contains("web-01-gone")
+    })
     .expect("the keystrokes landed");
 
     pty.key(b"\x1b");
@@ -227,26 +221,26 @@ fn the_map_moves_by_row_and_enter_settles_the_row_it_is_on() {
         .expect("the seeded map opens");
 
     pty.key(b"\x1b[B"); // Down: Alias -> Host
-    pty.wait_until("the focus on Host", Duration::from_secs(4), |screen| {
+    pty.wait_until("the focus on Host", DEFAULT_TIMEOUT, |screen| {
         screen.contents().contains("\u{25c6} Host")
     })
     .expect("Down moves to the next row");
 
     pty.key(b"\x1b[B"); // Down: Host -> User
-    pty.wait_until("the focus on User", Duration::from_secs(4), |screen| {
+    pty.wait_until("the focus on User", DEFAULT_TIMEOUT, |screen| {
         screen.contents().contains("\u{25c6} User")
     })
     .expect("Down moves again");
 
     pty.key(b"\x1b[A"); // Up: User -> Host
-    pty.wait_until("the focus back on Host", Duration::from_secs(4), |screen| {
+    pty.wait_until("the focus back on Host", DEFAULT_TIMEOUT, |screen| {
         screen.contents().contains("\u{25c6} Host")
     })
     .expect("Up moves back the other way");
 
     // Enter on a row the user never touched settles it unchanged and steps on.
     pty.key(b"\r");
-    pty.wait_until("the focus on User", Duration::from_secs(4), |screen| {
+    pty.wait_until("the focus on User", DEFAULT_TIMEOUT, |screen| {
         screen.contents().contains("\u{25c6} User")
     })
     .expect("Enter settles the row and moves to the next");
@@ -256,7 +250,7 @@ fn the_map_moves_by_row_and_enter_settles_the_row_it_is_on() {
 ///
 /// From a row that is not the first it backs up exactly one row, which is what
 /// "Esc back" beside "Enter next" on the hint rail has to mean — a test that
-/// assumed Escape cancelled the whole form would have been asserting a
+/// assumed Escape cancelled the whole Form Map would have been asserting a
 /// keybinding the app never claimed.
 #[test]
 fn escape_backs_the_map_up_one_row() {
@@ -267,17 +261,15 @@ fn escape_backs_the_map_up_one_row() {
         .expect("the seeded map opens");
 
     pty.key(b"\x1b[B"); // Down: Alias -> Host
-    pty.wait_until("the focus on Host", Duration::from_secs(4), |screen| {
+    pty.wait_until("the focus on Host", DEFAULT_TIMEOUT, |screen| {
         screen.contents().contains("\u{25c6} Host")
     })
     .expect("Down moves to the next row");
 
     pty.key(b"\x1b");
-    pty.wait_until(
-        "the focus back on Alias",
-        Duration::from_secs(4),
-        |screen| screen.contents().contains("\u{25c6} Alias"),
-    )
+    pty.wait_until("the focus back on Alias", DEFAULT_TIMEOUT, |screen| {
+        screen.contents().contains("\u{25c6} Alias")
+    })
     .expect("Escape backs up one row, not out of the map");
 }
 
@@ -320,11 +312,9 @@ fn declining_a_delete_leaves_the_connection_in_place() {
     pty.wait_for_text("Delete web-01? No")
         .expect("the refusal is recorded on screen");
 
-    pty.wait_until_settled(
-        "the row still in the frame",
-        Duration::from_secs(4),
-        |screen| screen.contents().contains("web-01 (deploy@10.0.0.1:22)"),
-    )
+    pty.wait_until_settled("the row still in the frame", DEFAULT_TIMEOUT, |screen| {
+        screen.contents().contains("web-01 (deploy@10.0.0.1:22)")
+    })
     .expect("the row is still in the frame");
     assert_eq!(
         fixture.read_store().expect("the store after"),
@@ -381,11 +371,9 @@ fn confirming_a_delete_removes_it_from_the_store_and_the_frame() {
     // just drew say `deleted web-01`, and they should. A row that keeps
     // rendering after the store dropped it is the failure - the next Enter
     // would run ssh against a Connection that is no longer there.
-    pty.wait_until_settled(
-        "the row leaving the frame",
-        Duration::from_secs(4),
-        |screen| !screen.contents().contains("web-01 (deploy@10.0.0.1:22)"),
-    )
+    pty.wait_until_settled("the row leaving the frame", DEFAULT_TIMEOUT, |screen| {
+        !screen.contents().contains("web-01 (deploy@10.0.0.1:22)")
+    })
     .expect("the deleted row is gone from the screen");
     assert!(
         pty.grid().contains("db-01"),

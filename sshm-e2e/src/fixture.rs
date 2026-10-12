@@ -221,7 +221,6 @@ impl Fixture {
             .collect())
     }
 
-    /// Where the shim writes, for a test that waits on the file itself.
     /// Whether every call the shim has taken is finished being recorded.
     ///
     /// The stub writes a whole call in one `write` ending in the terminator, so
@@ -237,12 +236,6 @@ impl Fixture {
             Ok(bytes) => bytes.last() == Some(&0),
             Err(_) => false,
         }
-    }
-
-    /// The path the stub records to, for a test that wants to watch the file
-    /// itself rather than read it through the fixture.
-    pub fn ssh_calls_path(&self) -> Option<&Path> {
-        self.ssh_calls.as_deref()
     }
 
     /// The stub `ssh` itself. Normally found through `PATH`, which is the
@@ -286,7 +279,6 @@ impl Fixture {
             ("PATH".to_string(), path),
             ("USER".to_string(), "e2e".to_string()),
             ("LOGNAME".to_string(), "e2e".to_string()),
-            ("SHM_E2E".to_string(), "1".to_string()),
             // The update note is read from a cache file under the config dir.
             // Pointing the API root at a port nothing listens on keeps a stray
             // check from ever reaching out, and costs nothing: no frame path

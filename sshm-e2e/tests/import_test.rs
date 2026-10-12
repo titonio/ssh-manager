@@ -11,10 +11,8 @@
 //! screen, because "declined" drawn over a store that exists is exactly the lie
 //! this file exists to catch.
 
-use std::time::Duration;
-
 use sshm_e2e::fixture::{sshm_binary, Fixture};
-use sshm_e2e::Pty;
+use sshm_e2e::{Pty, DEFAULT_TIMEOUT};
 
 /// A config with two importable stanzas in it.
 ///
@@ -75,7 +73,7 @@ fn accepting_the_offer_imports_and_renders_the_connections() {
         vec!["web-01".to_string(), "db-01".to_string()],
         "the store holds what the config held"
     );
-    pty.wait_until("both rows in the list", Duration::from_secs(4), |screen| {
+    pty.wait_until("both rows in the list", DEFAULT_TIMEOUT, |screen| {
         let text = screen.contents();
         text.contains("web-01 (deploy@10.0.0.1:22)") && text.contains("db-01 (deploy@10.0.0.2:22)")
     })
@@ -129,7 +127,7 @@ fn the_picker_never_asks_to_import() {
     );
 
     pty.key(b"\x1b");
-    pty.wait_exit(Duration::from_secs(4))
+    pty.wait_exit(DEFAULT_TIMEOUT)
         .expect("the picker closes")
         .assert_code(130);
     assert!(

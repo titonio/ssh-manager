@@ -14,10 +14,8 @@
 //! drift the moment the real one changed. What the tests assert is what the user
 //! sees on the prompt line, which is the only surface any of this machinery has.
 
-use std::time::Duration;
-
 use sshm_e2e::fixture::{seeded_fixture, sshm_binary, Fixture};
-use sshm_e2e::Pty;
+use sshm_e2e::{Pty, DEFAULT_TIMEOUT};
 
 /// The exact bytes the Shell Widget's binding waits for.
 ///
@@ -102,7 +100,7 @@ fn open_picker(shell: &Shell, text: &str) -> (Fixture, Pty) {
     let echoed = format!("{PROMPT}{text}");
     pty.wait_until(
         &format!("{} to echo {text:?}", shell.name),
-        Duration::from_secs(4),
+        DEFAULT_TIMEOUT,
         move |screen| {
             screen
                 .contents()
@@ -121,7 +119,7 @@ fn wait_for_buffer(pty: &mut Pty, text: &str) {
     let want = format!("{PROMPT}{text}");
     pty.wait_until(
         &format!("the buffer holding {text:?}"),
-        Duration::from_secs(4),
+        DEFAULT_TIMEOUT,
         move |screen| {
             screen
                 .contents()

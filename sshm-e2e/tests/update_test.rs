@@ -16,10 +16,9 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
 
 use sshm_e2e::fixture::{seeded_fixture, sshm_binary};
-use sshm_e2e::{Fixture, Pty};
+use sshm_e2e::{Fixture, Pty, DEFAULT_TIMEOUT};
 
 /// The version the stub claims is the latest.
 ///
@@ -111,14 +110,14 @@ fn a_newer_release_on_the_loopback_api_is_drawn_as_a_note() {
     // **Check for Updates** — the question, over the seam, into the cache.
     let mut check = Pty::spawn(&binary, &["check-update"], &fixture).expect("run check-update");
     check
-        .wait_until("the answer on stdout", Duration::from_secs(4), |screen| {
+        .wait_until("the answer on stdout", DEFAULT_TIMEOUT, |screen| {
             screen
                 .contents()
                 .contains(&format!("Update available: v{NEWER}"))
         })
         .expect("the check reports the release the stub served");
     check
-        .wait_exit(Duration::from_secs(4))
+        .wait_exit(DEFAULT_TIMEOUT)
         .expect("check-update exits")
         .assert_code(0);
 
@@ -173,7 +172,7 @@ fn the_note_sits_above_a_list_that_still_works() {
 
     let mut check = Pty::spawn(&binary, &["check-update"], &fixture).expect("run check-update");
     check
-        .wait_exit(Duration::from_secs(4))
+        .wait_exit(DEFAULT_TIMEOUT)
         .expect("check-update exits");
 
     let mut pty = Pty::spawn(&binary, &["manage"], &fixture).expect("spawn sshm manage");
@@ -183,13 +182,13 @@ fn the_note_sits_above_a_list_that_still_works() {
 
     // The cursor is still the cursor, and it still moves.
     pty.key(b"\x1b[B");
-    pty.wait_until("the cursor to move", Duration::from_secs(4), |screen| {
+    pty.wait_until("the cursor to move", DEFAULT_TIMEOUT, |screen| {
         screen.contents().contains("\u{276f} db-01")
     })
     .expect("the note does not take the frame's keys away");
 
     pty.key(b"\x1b");
-    pty.wait_exit(Duration::from_secs(4))
+    pty.wait_exit(DEFAULT_TIMEOUT)
         .expect("the frame closes")
         .assert_code(130);
 }

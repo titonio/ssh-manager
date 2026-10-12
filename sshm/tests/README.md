@@ -38,10 +38,10 @@ bytes the frame emits, which a glyph snapshot cannot.
 | `tests/frame_test.rs` | The frame seam: the Clack grammar, rows, the hint rail and its fitting, transparency, the empty / no-match states, windowing, and column-accurate width fitting |
 | `tests/inline_test.rs` | The live half through the public seam: `diff_rows`, `settle_trace`, `plan_resize`, and that the frame never enters the alternate screen |
 | `tests/main_tests.rs` | `ssh` argument building and execution plumbing |
-| `tests/pty_test.rs` | The frame in a real pseudo-terminal, driven by the shared `sshm-e2e` harness: it draws and waits, the terminal is raw while it does, and the terminal is cooked again afterwards. The only gate with no seam — it runs the built binary and reads the answer off the terminal |
+| `tests/pty_test.rs` | The frame in a real pseudo-terminal, driven by the shared `sshm-e2e` harness: it draws and waits, the terminal is raw while it does, and the terminal is cooked again afterwards. One of only two gates with no seam — it runs the built binary and reads the answer off the terminal |
 | `sshm-e2e/` (a separate crate) | The shipped binary in a real pseudo-terminal: keystrokes arrive as bytes, the answer is read off the parsed screen grid with its colours intact, and the things a screen cannot show are checked in the world — the store file, the exact `ssh` argv handed to a stub found on `PATH`, what lands on a real zsh's and a real bash's command line. See "The end-to-end suite" below |
 
-Typical shape of a green run: **693 passed / 0 failed / 4 ignored**, and it is
+Typical shape of a green run: **698 passed / 0 failed / 4 ignored**, and it is
 green with the network unplugged. The four ignored tests are:
 
 | Ignored test | Why |
@@ -227,9 +227,13 @@ and went.
 * **No retries.** `retries = 0` in `sshm-e2e/.config/nextest.toml`, and that is a
   policy rather than a tuning choice: a test that passes on the second attempt is
   a test that will fail in front of a user after shipping the thing it was meant
-  to guard. A flake is a bug. The budget that makes that affordable is 5 s per
-  test and 90 s for the suite; a green run is currently ~0.4 s wall clock, with
-  the slowest test at ~0.3 s, which is what leaves room for a loaded runner.
+  to guard. A flake is a bug.
+* **The budget is enforced, not hoped for.** The design budget is 5 s a test and
+  90 s for the suite. What holds it is a 4 s deadline on every wait inside the
+  harness (`DEFAULT_TIMEOUT`), and a 10 s hard deadline per test in
+  `nextest.toml` that terminates a wedged child rather than warning about it. A
+  green run is ~0.4 s wall clock with the slowest test at ~0.3 s, which is the
+  room a loaded runner spends.
 * **Expectations come from the spec.** Test names read as specifications in the
   words from `CONTEXT.md` — a Connection, the Inline Picker, the Form Map, the
   Shell Widget — and the expected text is hard-coded from the design, never
