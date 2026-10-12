@@ -37,6 +37,7 @@ bytes the frame emits, which a glyph snapshot cannot.
 | `tests/filter_test.rs` | Fuzzy filtering, `build_row_text`, and the row-text pairing: the field offsets must index the text the frame actually renders |
 | `tests/frame_test.rs` | The frame seam: the Clack grammar, rows, the hint rail and its fitting, transparency, the empty / no-match states, windowing, and column-accurate width fitting |
 | `tests/inline_test.rs` | The live half through the public seam: `diff_rows`, `settle_trace`, `plan_resize`, and that the frame never enters the alternate screen |
+| `tests/live_test.rs` | The merged list: which `~/.ssh/config` stanzas become rows (globs, collisions, repeats, junk) and where they sort, and `LiveStore`'s freshness contract — read at open, re-merged after every mutation |
 | `tests/main_tests.rs` | `ssh` argument building and execution plumbing |
 | `tests/pty_test.rs` | The frame in a real pseudo-terminal, driven by the shared `sshm-e2e` harness: it draws and waits, the terminal is raw while it does, and the terminal is cooked again afterwards. One of only two gates with no seam — it runs the built binary and reads the answer off the terminal |
 | `sshm-e2e/` (a separate crate) | The shipped binary in a real pseudo-terminal: keystrokes arrive as bytes, the answer is read off the parsed screen grid with its colours intact, and the things a screen cannot show are checked in the world — the store file, the exact `ssh` argv handed to a stub found on `PATH`, what lands on a real zsh's and a real bash's command line. See "The end-to-end suite" below |
@@ -177,11 +178,11 @@ expensive kind, and keeping them out of the sweep is what lets them stay.
 
 | Target | What it is the only witness of |
 |---|---|
-| `picker_test.rs` | The tracer bullet: the binary starts, the frame draws, the terminal is raw while it is, and the terminal is cooked again afterwards |
+| `picker_test.rs` | The tracer bullet: the binary starts, the frame draws, the terminal is raw while it is, and the terminal is cooked again afterwards — plus a `Host` stanza in `~/.ssh/config` being on the picker with no import step |
 | `navigation_test.rs` | The cursor walking and clamping at both ends, filtering as typing, the empty and no-match states, and the two ways out — Escape and Ctrl+C — each with its own status |
 | `form_test.rs` | Ctrl+A and Ctrl+E opening the Form Map, the state glyphs that make a required field differ from an optional one in monochrome, and Enter writing the store |
 | `edit_delete_test.rs` | Editing a Connection row by row, the delete question answered three ways, and every route back out of a form |
-| `import_test.rs` | The first-run import offer being a real question with a default, and a declined offer leaving no store file behind |
+| `import_test.rs` | A first run on a machine that has a `~/.ssh/config`: the config's hosts are the first screen, nothing is offered, and looking writes no store file |
 | `update_test.rs` | A newer release served on loopback appearing as a note above a list that still works |
 | `emit_test.rs` | The argv `ssh` is actually handed, and the fact that a captured pipe receives the alias and none of the frame's chrome |
 | `shell_test.rs` | The Shell Widget in a real zsh and a real bash: the chord firing, the buffer being replaced, and Escape leaving a half-typed command alone |

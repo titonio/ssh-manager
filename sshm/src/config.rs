@@ -270,6 +270,70 @@ pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
     entries
 }
 
+/// The rows a frame lists: sshm's own Connections with the usable `Host`
+/// stanzas of `~/.ssh/config` merged into one flat list.
+///
+/// Three rules, and each one protects something the user would notice:
+///
+/// * **A glob is not a target.** `Host *` is a rule about many hosts and `ssh`
+///   cannot be pointed at one of them, so a pattern containing `*` or `?`
+///   contributes nothing — the same rule [`plan_import`] applies to an import.
+/// * **A stored Connection wins.** A stanza is hidden when its target — the
+///   `HostName` if the stanza has one, otherwise the pattern — and its user
+///   match a stored Connection, or a stanza earlier in this same file. Two
+///   identical-looking rows for one machine is the failure this rule exists to
+///   prevent, and it is what makes adopting a stanza collapse its two rows into
+///   one instead of leaving the user choosing between them.
+/// * **One list, sorted by alias.** The frame keeps input order while no query
+///   is typed, so appending the config rows would park them in a block at the
+///   foot — the separate section that was rejected. The sort is on the
+///   lowercased alias and is stable, so a tie keeps stored rows first: the row
+///   the user made by hand is the one they meet first.
+///
+/// A config row's id is `ssh-config:<pattern>` — the token the user would type,
+/// not a uuid: nothing here writes `~/.ssh/config`, so there is no stored record
+/// to key a row to between one read and the next, and an id derived from the
+/// pattern is what lets a later action name the stanza it is about.
+///
+/// Lenient like the parser it follows: entries that cannot become a row are
+/// skipped in silence, because the file is the user's and one odd line must not
+/// cost them the rest of the list.
+pub fn merge_ssh_config(stored: &[Connection], entries: &[SshConfigEntry]) -> Vec<Connection> {
+    let mut config_rows: Vec<Connection> = Vec::new();
+
+    for entry in entries {
+        if entry.host.contains('*') || entry.host.contains('?') {
+            continue;
+        }
+
+        let host = entry.hostname.clone().unwrap_or_else(|| entry.host.clone());
+        let user = entry.user.clone().unwrap_or_default();
+        let already_listed = stored
+            .iter()
+            .chain(config_rows.iter())
+            .any(|c| c.host == host && c.user == user);
+        if already_listed {
+            continue;
+        }
+
+        config_rows.push(Connection {
+            id: format!("ssh-config:{}", entry.host),
+            alias: entry.host.clone(),
+            host,
+            user,
+            port: entry.port.unwrap_or(22),
+            key_path: entry.key_file.clone(),
+            folder: None,
+            source: Source::SshConfig,
+        });
+    }
+
+    let mut merged: Vec<Connection> = stored.to_vec();
+    merged.extend(config_rows);
+    merged.sort_by_key(|c| c.alias.to_lowercase());
+    merged
+}
+
 /// What an import from an ssh config actually did to the Connection set.
 ///
 /// The two numbers mean different things to the surface that reports them:

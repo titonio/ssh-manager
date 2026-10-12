@@ -3,7 +3,7 @@
 use sshm::{
     config, connections, emit,
     frame::FrameMode,
-    inline,
+    inline, live,
     manage::{ManageState, Phase},
     ssh, update,
 };
@@ -139,9 +139,11 @@ fn run_main(
 ///
 /// Bare `sshm`, `sshm pick` and `sshm manage` all open the same inline
 /// frame; they differ only in the [`Emit`] they hand it, which is what
-/// Enter then means (#35). The frame is handed the whole `Config` as a
+/// Enter then means (#35). The frame is handed a [`live::LiveStore`] as a
 /// [`Store`]: a manage delete must persist through the one implementation
-/// `connections.rs` owns, so the seam carries the live set, not a snapshot.
+/// `connections.rs` owns, and the list must hold the `Host` stanzas of
+/// `~/.ssh/config` as they stand when the frame opens — so the seam carries
+/// the live set, not a snapshot of one file.
 ///
 /// `read_note_fn` is the cache-only update-note reader (#39). Each frame
 /// path calls it exactly once, before the frame opens, and hands the result
@@ -181,14 +183,14 @@ fn dispatch(
     // the frame. The note is read from cache here, once, before the frame
     // opens (#39).
     if let Some(Commands::Pick { query }) = cli.command {
-        let mut config = config::Config::load();
-        return run_frame_fn(Emit::Insert, &mut config, query.unwrap_or_default(), note);
+        let mut store = live::LiveStore::new(config::Config::load(), config::ssh_config_path());
+        return run_frame_fn(Emit::Insert, &mut store, query.unwrap_or_default(), note);
     }
 
     // `sshm manage` — the edit emit, in the manage frame.
     if let Some(Commands::Manage) = cli.command {
-        let mut config = config::Config::load();
-        return run_frame_fn(Emit::Edit, &mut config, String::new(), note);
+        let mut store = live::LiveStore::new(config::Config::load(), config::ssh_config_path());
+        return run_frame_fn(Emit::Edit, &mut store, String::new(), note);
     }
 
     // `sshm check-update` / `-c` — purely a question (#46). It reports
@@ -218,8 +220,8 @@ fn dispatch(
     // Bare `sshm` — the execute emit. There is no fullscreen to fall
     // through to: the frame is the whole surface now. The note was read
     // once above, before the frame opens (#39).
-    let mut config = config::Config::load();
-    run_frame_fn(Emit::Execute, &mut config, String::new(), note)
+    let mut store = live::LiveStore::new(config::Config::load(), config::ssh_config_path());
+    run_frame_fn(Emit::Execute, &mut store, String::new(), note)
 }
 
 /// The commands that answer before the cached update note is read: shell

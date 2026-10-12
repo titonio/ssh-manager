@@ -45,3 +45,39 @@ fn a_seeded_connection_renders_in_a_real_terminal_and_escape_hands_the_terminal_
         "the terminal was left out of cooked mode for whatever runs next"
     );
 }
+
+/// A `Host` stanza in `~/.ssh/config` is on the picker with no import step.
+///
+/// This is the whole point of the live merge, seen from outside: the user edits
+/// their own config in their own editor, opens the picker, and the host is
+/// there — tagged so it is legible as a config row, and showing the target the
+/// stanza names. The store file is checked too, because liveness must not be a
+/// copy: looking at the list has to leave `connections.json` exactly as it was.
+#[test]
+fn a_host_in_the_ssh_config_is_on_the_picker_without_any_import() {
+    let fixture = Fixture::new()
+        .with_ssh_config("Host web-01\n  HostName 10.0.0.1\n  User deploy\n")
+        .expect("seed");
+
+    let mut pty = Pty::spawn(sshm_binary(), &["pick"], &fixture).expect("spawn sshm pick");
+
+    pty.wait_for_text("[ssh-config] web-01")
+        .expect("the stanza is listed, tagged as a config row");
+    let grid = pty.grid();
+    assert!(
+        grid.contains("(deploy@10.0.0.1:22)"),
+        "the row shows the target the stanza describes\n{grid}"
+    );
+    assert!(
+        !grid.contains("Import"),
+        "the picker is bound to a shell key, so it asks for nothing\n{grid}"
+    );
+
+    pty.key(b"\x1b");
+    pty.wait_exit(DEFAULT_TIMEOUT).expect("the frame closes");
+
+    assert!(
+        !fixture.store_exists(),
+        "listing a config host must not write it into the store"
+    );
+}

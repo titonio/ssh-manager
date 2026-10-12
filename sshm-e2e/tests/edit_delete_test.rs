@@ -16,8 +16,13 @@ use sshm_e2e::fixture::{seeded_fixture, sshm_binary};
 use sshm_e2e::{Fixture, Pty, DEFAULT_TIMEOUT};
 
 /// `sshm manage` over two seeded Connections, cursor on the first.
+///
+/// The aliases are seeded in the order the frame lists them — by alias, since
+/// the merged list is sorted — so the row every test here acts on is the one the
+/// cursor opens on. The second Connection exists only to prove an edit or a
+/// delete touches one row and no other.
 fn manage() -> (Fixture, Pty) {
-    let fixture = seeded_fixture(&["web-01", "db-01"]);
+    let fixture = seeded_fixture(&["web-01", "web-02"]);
     let mut pty = Pty::spawn(sshm_binary(), &["manage"], &fixture).expect("spawn sshm manage");
     pty.wait_for_frame().expect("the list is drawn");
     (fixture, pty)
@@ -376,7 +381,7 @@ fn confirming_a_delete_removes_it_from_the_store_and_the_frame() {
     })
     .expect("the deleted row is gone from the screen");
     assert!(
-        pty.grid().contains("db-01"),
+        pty.grid().contains("web-02"),
         "the Connection nobody deleted is still there\n{}",
         pty.grid()
     );
@@ -384,7 +389,7 @@ fn confirming_a_delete_removes_it_from_the_store_and_the_frame() {
     let aliases = fixture.stored_aliases().expect("the store after");
     assert_eq!(
         aliases,
-        vec!["db-01".to_string()],
+        vec!["web-02".to_string()],
         "the store holds what is left, and nothing else"
     );
 }
