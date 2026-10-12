@@ -28,13 +28,24 @@ jobs:
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
       with:
-        workspaces: sshm
+        workspaces: |
+          sshm
+          sshm-e2e
 
     - name: Check formatting
       run: cargo fmt --manifest-path sshm/Cargo.toml -- --check
 
     - name: Run clippy
       run: cargo clippy --manifest-path sshm/Cargo.toml --all-targets --all-features
+
+    # There is no root workspace, so nothing reaches into sshm-e2e on its own
+    # and the end-to-end crate would otherwise be the one part of the tree no
+    # job ever lints. A gate that is not itself checked is a gate that rots.
+    - name: Check the end-to-end crate's formatting
+      run: cargo fmt --manifest-path sshm-e2e/Cargo.toml -- --check
+
+    - name: Run clippy on the end-to-end crate
+      run: cargo clippy --manifest-path sshm-e2e/Cargo.toml --all-targets
 
   # install.sh is served straight from `master`, so a bad merge is live for
   # every user before anyone can release their way out of it — and until
