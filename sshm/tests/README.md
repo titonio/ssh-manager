@@ -39,6 +39,7 @@ bytes the frame emits, which a glyph snapshot cannot.
 | `tests/inline_test.rs` | The live half through the public seam: `diff_rows`, `settle_trace`, `plan_resize`, and that the frame never enters the alternate screen |
 | `tests/main_tests.rs` | `ssh` argument building and execution plumbing |
 | `tests/pty_test.rs` | The frame in a real pseudo-terminal, driven by the shared `sshm-e2e` harness: it draws and waits, the terminal is raw while it does, and the terminal is cooked again afterwards. The only gate with no seam — it runs the built binary and reads the answer off the terminal |
+| `sshm-e2e/` (a separate crate) | The shipped binary in a real pseudo-terminal: keystrokes arrive as bytes, the answer is read off the parsed screen grid with its colours intact, and the things a screen cannot show are checked in the world — the store file, the exact `ssh` argv handed to a stub found on `PATH`, what lands on a real zsh's and a real bash's command line. See "The end-to-end suite" below |
 
 Typical shape of a green run: **693 passed / 0 failed / 4 ignored**, and it is
 green with the network unplugged. The four ignored tests are:
@@ -145,6 +146,119 @@ design loop uses; it is not part of the test story and checks what the frame
 draws rather than what the terminal is. The test harness is Rust only: the
 Python one that used to drive `tests/pty_test.rs` is gone, because a second
 harness language is a second thing to keep honest.
+
+## The end-to-end suite (`sshm-e2e/`)
+
+Everything above this line tests a library through a seam. This crate tests the
+thing that ships: `./sshm-e2e/run-e2e.sh` builds the `sshm` binary, points the
+suite at that exact binary through `SSHM_E2E_BIN`, and the suite launches it in a
+real pseudo-terminal. Keystrokes are written to the terminal as the bytes a
+keyboard sends. The answer is read off a parsed screen grid — a `vt100`
+emulator, so cells keep their foreground colour and their bold, which is the
+whole reason the harness is not a `TestBackend` snapshot — and the side effects a
+screen cannot show are checked in the world: the store file on disk, the argv
+handed to a stub `ssh` found through `PATH`, the bytes a captured pipe receives,
+the command line a real shell is left holding.
+
+It is a separate crate for three reasons, and the first is the one the gates care
+about. There is no root workspace, so `cargo test`, `cargo mutants` and
+`cargo llvm-cov` run inside `sshm/` never see this directory: the mutation sweep,
+the coverage floor and the CRAP gate are exactly what they were before it
+existed, and the numbers quoted above still mean the same thing. That is not an
+accident to apologise for. The sweep runs the suite once per mutant, about 800
+times; a suite that spawns PTYs and shells is not built to be multiplied by 800,
+and pretending otherwise would have bought the sweep a flake instead of the
+sweep a second axis. The second reason is that the dependency runs both ways:
+this crate dev-depends on `sshm` so a colour assertion can name the `Theme` role
+it is checking instead of baking in a hue, and `sshm` dev-depends on this crate
+for the harness. Cargo allows a cycle through dev-dependencies and neither
+binary pulls the other. The third is honesty about cost: these tests are the
+expensive kind, and keeping them out of the sweep is what lets them stay.
+
+| Target | What it is the only witness of |
+|---|---|
+| `picker_test.rs` | The tracer bullet: the binary starts, the frame draws, the terminal is raw while it is, and the terminal is cooked again afterwards |
+| `navigation_test.rs` | The cursor walking and clamping at both ends, filtering as typing, the empty and no-match states, and the two ways out — Escape and Ctrl+C — each with its own status |
+| `form_test.rs` | Ctrl+A and Ctrl+E opening the Form Map, the state glyphs that make a required field differ from an optional one in monochrome, and Enter writing the store |
+| `edit_delete_test.rs` | Editing a Connection row by row, the delete question answered three ways, and every route back out of a form |
+| `import_test.rs` | The first-run import offer being a real question with a default, and a declined offer leaving no store file behind |
+| `update_test.rs` | A newer release served on loopback appearing as a note above a list that still works |
+| `emit_test.rs` | The argv `ssh` is actually handed, and the fact that a captured pipe receives the alias and none of the frame's chrome |
+| `shell_test.rs` | The Shell Widget in a real zsh and a real bash: the chord firing, the buffer being replaced, and Escape leaving a half-typed command alone |
+
+### What the harness promises
+
+Every one of these rules exists because breaking it produced a failure that came
+and went.
+
+* **A wait is for content, and it has a deadline.** Nothing sleeps. A test drains
+  the terminal until a predicate holds, and on expiry the failure names what it
+  was waiting for and dumps the grid that refused to show it. A check that cannot
+  fail is worse than no check, because it passes by doing nothing.
+* **A satisfied wait is a settled frame.** A frame is not painted atomically —
+  ratatui queues one write per run of changed cells — so a reader can catch the
+  middle of a repaint, where the row that lost the focus glyph has been rewritten
+  and the row gaining it has not. Any predicate that reads an *absence* ("the row
+  is gone", "no field is focused") is satisfied by that half-paint, so those waits
+  additionally require the terminal to go quiet. The frame is event-driven: it
+  paints when a key arrives and then stops, so silence is the signal that a paint
+  has finished. Where a positive signal exists it is used instead — the submit row
+  carries focus as bold, so that is what the test reads.
+* **The child is born into a world the test built.** `env_clear` first, then an
+  environment built from a list: a temporary `HOME`, `XDG_CONFIG_HOME`,
+  `XDG_CACHE_HOME` and `TMPDIR`, a `PATH` that may have the `ssh` stub at its
+  head, `TERM` and `LANG` pinned so the emulator and the program agree about what
+  they are looking at. Nothing is inherited, which is the sentence that keeps
+  someone's `SSH_AUTH_SOCK` or a runner's `NO_COLOR` out of a result. The update
+  check is pointed at `http://127.0.0.1:1`, so a check that somehow tries to
+  leave the machine fails at once instead of hanging.
+* **The terminal answers its queries.** A PTY with nothing on the other end
+  answers nothing, and a program that asks "where is the cursor?" and gets
+  silence sits there until its own timeout. The harness answers DSR, DA1 and the
+  kitty keyboard probe, so a stall is a bug in the program rather than an
+  artefact of the harness.
+* **Nothing leaves the machine.** The only network in the suite is a
+  one-request server bound to the loopback interface. The whole suite is green
+  with the network unplugged.
+* **Parallel-safe by construction, not by serialisation.** Every test gets its
+  own temporary home, its own PTY and its own child, so there is no process-global
+  state to fight over and no `serial_test` anywhere in the crate. Every core runs
+  a test at once and the whole suite still finishes in under half a second.
+* **No retries.** `retries = 0` in `sshm-e2e/.config/nextest.toml`, and that is a
+  policy rather than a tuning choice: a test that passes on the second attempt is
+  a test that will fail in front of a user after shipping the thing it was meant
+  to guard. A flake is a bug. The budget that makes that affordable is 5 s per
+  test and 90 s for the suite; a green run is currently ~0.4 s wall clock, with
+  the slowest test at ~0.3 s, which is what leaves room for a loaded runner.
+* **Expectations come from the spec.** Test names read as specifications in the
+  words from `CONTEXT.md` — a Connection, the Inline Picker, the Form Map, the
+  Shell Widget — and the expected text is hard-coded from the design, never
+  recomputed the way the code computes it. Colour is asserted against a
+  `Theme::clack()` role, never a literal hue. The four golden screens under
+  `sshm-e2e/tests/snapshots/` carry text only, never styling: styling is a
+  colour question, and colour questions are answered by role assertions.
+
+### Running it
+
+```bash
+./sshm-e2e/run-e2e.sh                    # build sshm, then run the whole suite against it
+./sshm-e2e/run-e2e.sh shell_test         # one test target
+./sshm-e2e/run-e2e.sh -- --nocapture     # past flags on to the harness
+```
+
+The script is the only place that decides which binary is under test, which is
+the only reason CI and a laptop cannot drift. It uses cargo-nextest when it is
+installed — per-test process isolation, so one wedged PTY child fails one named
+test instead of taking the run with it — and falls back to libtest so a fresh
+machine needs nothing extra.
+
+CI runs it as the `e2e` job in `.github/workflows/ci.yml`: `ubuntu-latest`,
+nextest installed, the same script, and a step that asserts `zsh` and `bash` are
+present rather than letting a future runner image turn a shell test into a skip.
+The job is a check like any other; it is not part of the mutation or coverage
+gates, and it does not need to be: the mutants in this territory that the sweep
+could never reach are already named in the table above, and this suite is the
+same evidence at a scale the sweep can afford to skip.
 
 ## The one snapshot that exists
 
