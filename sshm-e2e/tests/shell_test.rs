@@ -14,6 +14,8 @@
 //! drift the moment the real one changed. What the tests assert is what the user
 //! sees on the prompt line, which is the only surface any of this machinery has.
 
+use std::time::Duration;
+
 use sshm_e2e::fixture::{seeded_fixture, sshm_binary, Fixture};
 use sshm_e2e::{Pty, DEFAULT_TIMEOUT};
 
@@ -130,10 +132,24 @@ fn wait_for_buffer(pty: &mut Pty, text: &str) {
     .unwrap_or_else(|error| panic!("{error}"));
 }
 
+/// The chord's whole handover, given more room than any other wait here.
+///
+/// Every other wait in the suite is answered by a process that is already
+/// running. This one is answered by a process that has to be created: the
+/// binding fires, the shell forks, the binary is loaded, and only then does
+/// anything reach the terminal. On a machine running several copies of this
+/// suite at once that is the slowest thing in the room, and a deadline sized
+/// for the steady state fails on the setup rather than on the program. The
+/// allowance for a test is 5 s, so this is the most one wait can ask for
+/// without spending the whole test on itself.
+const PICKER_TIMEOUT: Duration = Duration::from_millis(4500);
+
 /// Wait for the picker to be drawn, and hand back what it shows.
 fn wait_for_picker(pty: &mut Pty) -> String {
-    pty.wait_for_text("Select a Connection")
-        .expect("the binding opened the Inline Picker");
+    pty.wait_until("the Inline Picker", PICKER_TIMEOUT, |screen| {
+        screen.contents().contains("Select a Connection")
+    })
+    .expect("the binding opened the Inline Picker");
     pty.wait_for_frame().expect("the picker is drawn");
     pty.grid()
 }
