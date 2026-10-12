@@ -131,7 +131,9 @@ pub struct SshConfigEntry {
 /// The slots are per-stanza, not per-line, because ssh_config keywords belong
 /// to the `Host` line above them — which is also why a keyword written before
 /// any `Host` line rides along to the next stanza instead of becoming an
-/// entry of its own: there is no entry without a host to name.
+/// entry of its own: there is no entry without a host to name. The `host` slot
+/// holds the whole pattern list the `Host` line named; [`Stanza::take`] is
+/// where it fans out into one entry per pattern.
 #[derive(Default)]
 struct Stanza {
     host: Option<String>,
@@ -158,19 +160,32 @@ impl Stanza {
         }
     }
 
-    /// Take the stanza as an entry, leaving the slots empty for the next one.
+    /// Take the stanza as its entries, leaving the slots empty for the next one.
     ///
-    /// `None` when no `Host` line started a stanza — which is what lets the
-    /// reader flush the stanza it has finished reading at the start of the
-    /// next one and again at the end of the file through the same call.
-    fn take(&mut self) -> Option<SshConfigEntry> {
-        Some(SshConfigEntry {
-            host: self.host.take()?,
-            user: self.user.take(),
-            port: self.port.take(),
-            key_file: self.key_file.take(),
-            hostname: self.hostname.take(),
-        })
+    /// One entry per pattern on the `Host` line: `Host web db` is two machines
+    /// sharing the stanza's User/Port/IdentityFile, and an entry per pattern is
+    /// the only reading that loses nothing. Empty when no `Host` line started a
+    /// stanza — which is what lets the reader flush the stanza it has finished
+    /// reading at the start of the next one and again at the end of the file
+    /// through the same call.
+    fn take(&mut self) -> Vec<SshConfigEntry> {
+        let Some(patterns) = self.host.take() else {
+            return Vec::new();
+        };
+        let user = self.user.take();
+        let port = self.port.take();
+        let key_file = self.key_file.take();
+        let hostname = self.hostname.take();
+        patterns
+            .split_whitespace()
+            .map(|pattern| SshConfigEntry {
+                host: pattern.to_string(),
+                user: user.clone(),
+                port,
+                key_file: key_file.clone(),
+                hostname: hostname.clone(),
+            })
+            .collect()
     }
 }
 
@@ -185,14 +200,35 @@ impl Stanza {
 ///
 /// The keyword is lowercased because ssh_config is spelled however the user
 /// likes and the importer matches on meaning, not on case.
+///
+/// The value is the **rest of the line**, not just its first word, because a
+/// `Host` line names every pattern it lists: keeping only the first token
+/// silently dropped `db` from `Host web db`, and a dropped host is a host the
+/// user cannot reach from the list even though `ssh db` works. The split into
+/// patterns belongs to [`Stanza::take`], which is where a `Host` value is
+/// known to be a pattern list; here every keyword's value is simply "what the
+/// line said after the keyword", which also lets values that legitimately
+/// contain spaces — an `IdentityFile` path, say — survive intact.
 fn directive(line: &str) -> Option<(String, String)> {
     let line = line.trim();
     let mut parts = line.split_whitespace();
     let keyword = parts.next()?.to_lowercase();
-    let value = parts.next()?.to_string();
+    let mut value = parts.next()?.to_string();
+    for part in parts {
+        value.push(' ');
+        value.push_str(part);
+    }
     Some((keyword, value))
 }
 
+/// Parse an ssh_config file into one entry per Host pattern it names.
+///
+/// Lenient by design: a file that cannot be read parses as no entries, and a
+/// line that names no known keyword is skipped — the importer reports what
+/// the file said, not what it wishes the file had said. A `Host web db` line
+/// yields two entries sharing the stanza's fields, because both hosts are
+/// real and dropping either is a silent loss. Wildcard patterns are returned
+/// as-is; deciding what is importable is the caller's job.
 pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
     let Ok(content) = fs::read_to_string(path) else {
         return Vec::new();
@@ -208,16 +244,12 @@ pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
         // A `Host` line closes the stanza before it: the entry the user was
         // reading is complete the moment the next one starts.
         if keyword == "host" {
-            if let Some(entry) = stanza.take() {
-                entries.push(entry);
-            }
+            entries.extend(stanza.take());
         }
         stanza.set(&keyword, &value);
     }
 
-    if let Some(entry) = stanza.take() {
-        entries.push(entry);
-    }
+    entries.extend(stanza.take());
 
     entries
 }
@@ -1099,6 +1131,56 @@ Host *
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].host, "*.example.com");
         assert_eq!(entries[1].host, "*");
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// A `Host` line yields one entry per pattern it names, not just its first.
+    ///
+    /// `Host web db` is two machines sharing one stanza's User/Port/
+    /// IdentityFile; keeping only `web` silently drops `db`, and a host the
+    /// user cannot see in the list is a host they will conclude the parser
+    /// is broken about. Each pattern becomes its own entry carrying the
+    /// stanza's fields, in reading order. Wildcard patterns stay in the
+    /// result — deciding what is importable is the merge's job, not the
+    /// parser's, and a parser that filters is a parser the merge cannot
+    /// count on.
+    #[test]
+    fn test_parse_ssh_config_expands_multi_pattern_host_line() {
+        let temp_dir = std::env::temp_dir().join("ssh-manager-multi-pattern-test");
+        let config_path = temp_dir.join("ssh_config");
+
+        let content = r#"Host web db
+    User deploy
+    Port 2222
+
+Host *
+    User default
+
+Host site
+    HostName site.example.com
+"#;
+
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(&config_path, content).unwrap();
+
+        let entries = parse_ssh_config(config_path.to_str().unwrap());
+
+        assert_eq!(entries.len(), 4, "one entry per pattern, in reading order");
+
+        assert_eq!(entries[0].host, "web");
+        assert_eq!(entries[0].user, Some("deploy".to_string()));
+        assert_eq!(entries[0].port, Some(2222));
+
+        assert_eq!(entries[1].host, "db");
+        assert_eq!(entries[1].user, Some("deploy".to_string()));
+        assert_eq!(entries[1].port, Some(2222));
+
+        assert_eq!(entries[2].host, "*");
+        assert_eq!(entries[2].user, Some("default".to_string()));
+
+        assert_eq!(entries[3].host, "site");
+        assert_eq!(entries[3].hostname, Some("site.example.com".to_string()));
 
         fs::remove_dir_all(&temp_dir).ok();
     }
