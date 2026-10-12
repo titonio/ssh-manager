@@ -76,6 +76,32 @@ fn execute_resolves_a_pick_to_the_ssh_argv() {
     assert_eq!(action, Action::Execute(expected));
 }
 
+/// The same host as [`loaded`], arrived at through `~/.ssh/config` instead of
+/// the store.
+///
+/// It keeps the stanza's key and non-default port on purpose: a `Host` block may
+/// declare `IdentityFile` and `Port` and the parser does read them, so this row
+/// carries the very flags that must *not* reach the argv.
+fn build_box_from_config() -> Connection {
+    Connection {
+        id: "ssh-config:build-box".into(),
+        source: Source::SshConfig,
+        ..loaded()
+    }
+}
+
+#[test]
+fn execute_resolves_a_config_pick_to_the_bare_alias() {
+    // A config row connects as bare `ssh build-box`. ssh re-reads the stanza
+    // from the same file the row came from — identity file, port, user, and the
+    // keywords sshm never parses — so any flag sshm re-sent would double-apply
+    // or fight a `Match` block. The alias token is the whole argv.
+    let action = Emit::Execute.resolve(InlineOutcome::Picked(build_box_from_config()));
+
+    let expected: Vec<OsString> = ["build-box"].iter().map(OsString::from).collect();
+    assert_eq!(action, Action::Execute(expected));
+}
+
 #[test]
 fn insert_resolves_a_pick_to_exactly_the_alias() {
     // The whole clean-stdout contract rests on this: the payload is the
