@@ -192,11 +192,12 @@ impl Stanza {
 /// One ssh_config line as its lowercased keyword and its value.
 ///
 /// `None` when the line names no keyword or gives it nothing: a blank line, a
-/// line of spaces, a bare `Host` with no value. A comment needs no special
-/// case here — its first word is `#something`, and `Stanza::set` ignores every
-/// keyword it does not know, which is the same reason an unknown ssh_config
-/// keyword is skipped. Guarding on `#` as well would be a second place that
-/// decides what a comment means, and the two could disagree.
+/// line of spaces, a bare `Host` with no value. A whole-line comment needs no
+/// special case here — its first word is `#something`, and `Stanza::set`
+/// ignores every keyword it does not know, which is the same reason an unknown
+/// ssh_config keyword is skipped. Guarding on `#` as a keyword would be a
+/// second place that decides what a whole-line comment means, and the two
+/// could disagree.
 ///
 /// The keyword is lowercased because ssh_config is spelled however the user
 /// likes and the importer matches on meaning, not on case.
@@ -207,16 +208,31 @@ impl Stanza {
 /// user cannot reach from the list even though `ssh db` works. The split into
 /// patterns belongs to [`Stanza::take`], which is where a `Host` value is
 /// known to be a pattern list; here every keyword's value is simply "what the
-/// line said after the keyword", which also lets values that legitimately
-/// contain spaces — an `IdentityFile` path, say — survive intact.
+/// line said after the keyword".
+///
+/// Collecting stops at the first token beginning with `#`, because that is
+/// where OpenSSH's `argv_split` ends the argument stream: after an unquoted
+/// `#` the rest of the line is the reader's note, not the line's value.
+/// Without the stop, `Host web db # staging` names four patterns and
+/// `Port 2222 # ssh` stops being a number. A `#` inside a token is not a
+/// comment for the same reason `argv_split` does not treat it as one, so only
+/// a token's first character is checked.
 fn directive(line: &str) -> Option<(String, String)> {
     let line = line.trim();
     let mut parts = line.split_whitespace();
     let keyword = parts.next()?.to_lowercase();
-    let mut value = parts.next()?.to_string();
+    let mut value = String::new();
     for part in parts {
-        value.push(' ');
+        if part.starts_with('#') {
+            break;
+        }
+        if !value.is_empty() {
+            value.push(' ');
+        }
         value.push_str(part);
+    }
+    if value.is_empty() {
+        return None;
     }
     Some((keyword, value))
 }
@@ -1153,6 +1169,8 @@ Host *
         let content = r#"Host web db
     User deploy
     Port 2222
+    HostName shared.example.com
+    IdentityFile ~/.ssh/id_deploy
 
 Host *
     User default
@@ -1171,16 +1189,60 @@ Host site
         assert_eq!(entries[0].host, "web");
         assert_eq!(entries[0].user, Some("deploy".to_string()));
         assert_eq!(entries[0].port, Some(2222));
+        assert_eq!(entries[0].hostname, Some("shared.example.com".to_string()));
+        assert_eq!(entries[0].key_file, Some("~/.ssh/id_deploy".to_string()));
 
         assert_eq!(entries[1].host, "db");
         assert_eq!(entries[1].user, Some("deploy".to_string()));
         assert_eq!(entries[1].port, Some(2222));
+        assert_eq!(entries[1].hostname, Some("shared.example.com".to_string()));
+        assert_eq!(entries[1].key_file, Some("~/.ssh/id_deploy".to_string()));
 
         assert_eq!(entries[2].host, "*");
         assert_eq!(entries[2].user, Some("default".to_string()));
 
         assert_eq!(entries[3].host, "site");
         assert_eq!(entries[3].hostname, Some("site.example.com".to_string()));
+
+        fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    /// An unquoted `#` ends the value: OpenSSH's argv_split terminates the
+    /// argument stream there, so a trailing note belongs to whoever reads the
+    /// file and never becomes part of what the line says.
+    ///
+    /// Taking the rest of the line as the value is right for a pattern list
+    /// and wrong for a note at its end: without the truncation `#` and
+    /// `staging` become two more patterns, `User deploy # note` stores a user
+    /// named `deploy # note`, and `Port 2222 # ssh` stops parsing as a number
+    /// at all. The comment is the human's, not the value's.
+    #[test]
+    fn test_parse_ssh_config_truncates_values_at_inline_comments() {
+        let temp_dir = std::env::temp_dir().join("ssh-manager-inline-comment-test");
+        let config_path = temp_dir.join("ssh_config");
+
+        let content = r#"Host web db # staging
+    User deploy # note
+    Port 2222 # ssh
+    IdentityFile ~/.ssh/id_rsa # work
+"#;
+
+        fs::create_dir_all(&temp_dir).unwrap();
+        fs::write(&config_path, content).unwrap();
+
+        let entries = parse_ssh_config(config_path.to_str().unwrap());
+
+        assert_eq!(entries.len(), 2, "the comment names no patterns");
+
+        assert_eq!(entries[0].host, "web");
+        assert_eq!(entries[0].user, Some("deploy".to_string()));
+        assert_eq!(entries[0].port, Some(2222));
+        assert_eq!(entries[0].key_file, Some("~/.ssh/id_rsa".to_string()));
+
+        assert_eq!(entries[1].host, "db");
+        assert_eq!(entries[1].user, Some("deploy".to_string()));
+        assert_eq!(entries[1].port, Some(2222));
+        assert_eq!(entries[1].key_file, Some("~/.ssh/id_rsa".to_string()));
 
         fs::remove_dir_all(&temp_dir).ok();
     }
