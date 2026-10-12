@@ -114,7 +114,7 @@ fn pagedown_arrives_as_bytes_and_moves_nothing() {
 fn typing_filters_the_list_and_a_capital_letter_is_still_a_letter() {
     let fixture = seeded_fixture(&["web-01", "DB-01"]);
     let mut pty = Pty::spawn(sshm_binary(), &["manage"], &fixture).expect("spawn sshm manage");
-    pty.wait_for_text("web-01").expect("the list draws");
+    pty.wait_for_frame().expect("both rows are drawn");
     assert!(pty.grid().contains("DB-01"), "both rows before typing");
 
     pty.key(b"DB");

@@ -43,6 +43,22 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(4);
 /// loop gets control back to re-check its predicate.
 const PUMP_SLICE: Duration = Duration::from_millis(20);
 
+/// How long the terminal has to stay quiet before a screen is believed.
+///
+/// A frame is not painted atomically. ratatui queues one write per changed run
+/// of cells, so a repaint arrives as a handful of small writes and a reader
+/// can catch the middle of one: the row that just lost its focus glyph has
+/// been rewritten, the row that is gaining it has not been yet. A predicate
+/// that reads that screen is reading a screen nobody ever saw.
+///
+/// The frame is event-driven — it paints when a key arrives and then stops —
+/// so silence is the signal that a paint has finished. This is the only place
+/// the suite waits on time rather than on content, and it is not a substitute
+/// for a content wait: the content still has to be there, and the deadline
+/// still applies. It is the difference between "the screen said it" and "the
+/// screen said it and meant it".
+const QUIET_SLICE: Duration = Duration::from_millis(30);
+
 /// A child process running on a real pseudo-terminal, with its output parsed
 /// into a screen grid as it arrives.
 ///
@@ -220,14 +236,19 @@ impl Pty {
 
     /// Wait until the frame has finished drawing.
     ///
-    /// A frame is emitted as one burst, top row first and the closing corner of
-    /// the rail last, so the corner is the only marker that means "everything
-    /// above it is here too". A test that waits for a row it recognises in the
-    /// middle of the frame can read the grid while the hint rail is still in
-    /// flight — which under a loaded runner is a failure that comes and goes,
-    /// and a suite with one of those has no right to forbid retries.
+    /// Two things have to be true. The closing corner of the rail has to be on
+    /// the screen, because it is the last thing a frame emits and therefore the
+    /// only marker that means "everything above it is here too". And the
+    /// terminal has to have gone quiet, because a repaint of an already-drawn
+    /// frame leaves the old corner in place: waiting for the corner alone
+    /// returns the instant a previous frame is on screen, which under a loaded
+    /// runner means reading the grid while the repaint is still in flight — a
+    /// failure that comes and goes, and a suite with one of those has no right
+    /// to forbid retries.
     pub fn wait_for_frame(&mut self) -> io::Result<()> {
-        self.wait_for_text("\u{2514}")
+        self.wait_until_settled("the frame", DEFAULT_TIMEOUT, |screen| {
+            screen.contents().contains("\u{2514}")
+        })
     }
 
     /// Wait until a file the child is expected to write has appeared.
@@ -309,6 +330,47 @@ impl Pty {
             if Instant::now() >= deadline {
                 return Err(io_other(&format!(
                     "timed out after {} ms waiting for {what}\n--- screen ---\n{}--- raw tail ---\n{}",
+                    timeout.as_millis(),
+                    self.grid(),
+                    self.raw_tail()
+                )));
+            }
+            self.pump_slice();
+        }
+    }
+
+    /// Wait until `check` holds on a screen the program has stopped painting.
+    ///
+    /// Same contract as [`Pty::wait_until`] with one addition: after the
+    /// predicate holds, the terminal must produce nothing for [`QUIET_SLICE`].
+    /// Use it wherever a predicate could be satisfied by the middle of a
+    /// repaint — any check that something is *not* on the screen, or that
+    /// counts rows, is exactly that — because the absence a half-painted frame
+    /// shows is not the absence the test means.
+    pub fn wait_until_settled<F>(
+        &mut self,
+        what: &str,
+        timeout: Duration,
+        check: F,
+    ) -> io::Result<()>
+    where
+        F: Fn(&vt100::Screen) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if check(self.parser.screen()) {
+                match self.bytes.recv_timeout(QUIET_SLICE) {
+                    Ok(chunk) => self.ingest(chunk),
+                    Err(RecvTimeoutError::Timeout) => return Ok(()),
+                    Err(RecvTimeoutError::Disconnected) => {
+                        self.eof = true;
+                        return Ok(());
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(io_other(&format!(
+                    "timed out after {} ms waiting for {what} to settle\n--- screen ---\n{}--- raw tail ---\n{}",
                     timeout.as_millis(),
                     self.grid(),
                     self.raw_tail()

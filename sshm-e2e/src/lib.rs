@@ -28,3 +28,8 @@ pub mod pty;
 pub use colour::token;
 pub use fixture::Fixture;
 pub use pty::{Pty, DEFAULT_TIMEOUT};
+
+/// Re-exported so a test can name the screen it is handed without pinning a
+/// second copy of the emulator: the screen a predicate receives and the screen
+/// the test inspects are then the same type by construction, not by coincidence.
+pub use vt100;

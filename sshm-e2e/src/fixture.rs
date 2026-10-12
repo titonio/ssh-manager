@@ -170,14 +170,16 @@ impl Fixture {
         // reordering the argv it is meant to be recording.
         let script = [
             "#!/bin/sh",
+            // One `printf` per call, so one call is one `write` to the log. A
+            // loop of `printf`s per argument is the obvious version and it is
+            // wrong: the reader then sees an argv in the middle of being
+            // appended, which is a test that passes or fails on how the
+            // scheduler felt. `"$*"` joins the arguments with the first
+            // character of `IFS`, so setting `IFS` to the separator is what
+            // makes the whole record one string.
+            "IFS=$(printf '\\037')",
             "{",
-            "  first=t",
-            "  for arg in \"$@\"; do",
-            "    if [ -z \"$first\" ]; then printf '\\037'; fi",
-            "    printf '%s' \"$arg\"",
-            "    first=",
-            "  done",
-            "  printf '\\000'",
+            "  printf '%s\\000' \"$*\"",
             &format!("}} >> '{}'", log.display()),
             "exit 0",
         ]
@@ -220,6 +222,25 @@ impl Fixture {
     }
 
     /// Where the shim writes, for a test that waits on the file itself.
+    /// Whether every call the shim has taken is finished being recorded.
+    ///
+    /// The stub writes a whole call in one `write` ending in the terminator, so
+    /// a log whose last byte is the terminator holds nothing half-written. A
+    /// test that waited for the file to *exist* would be reading an argv while
+    /// the stub is still appending it, and would then be asserting against a
+    /// truncated one — a failure with nothing wrong in the program.
+    pub fn ssh_calls_are_complete(&self) -> bool {
+        let Some(path) = self.ssh_calls.as_deref() else {
+            return false;
+        };
+        match fs::read(path) {
+            Ok(bytes) => bytes.last() == Some(&0),
+            Err(_) => false,
+        }
+    }
+
+    /// The path the stub records to, for a test that wants to watch the file
+    /// itself rather than read it through the fixture.
     pub fn ssh_calls_path(&self) -> Option<&Path> {
         self.ssh_calls.as_deref()
     }

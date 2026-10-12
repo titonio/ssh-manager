@@ -214,18 +214,13 @@ fn backing_out_of_an_edit_leaves_the_store_alone() {
 
 /// The map's own movement keys, on a map that starts full.
 ///
-/// Arrows move a focus that began as bytes from the terminal, Enter settles the
-/// row it is on and steps to the next, and Escape backs up one row - out of the
-/// map only once it is on the top one. That last clause is the interesting one:
-/// "Esc back" beside "Enter next" is a pair of row movements, not a cancel, and
-/// a test that assumed otherwise would have been asserting a keybinding the app
-/// never claimed.
-/// rows already hold values, so a focus that lands on the wrong row and gets
-/// Enter'd edits a real Connection.
+/// Arrows move a focus that began as bytes from the terminal, and Enter settles
+/// the row it is on and steps to the next. Rows already hold values here, so a
+/// focus that lands on the wrong row and gets Enter'd edits a real Connection:
+/// which is why every move below is waited for rather than assumed.
 #[test]
-fn the_map_moves_by_row_and_walks_back_out() {
-    let (fixture, mut pty) = manage();
-    let before = fixture.read_store().expect("the store before");
+fn the_map_moves_by_row_and_enter_settles_the_row_it_is_on() {
+    let (_fixture, mut pty) = manage();
 
     pty.key(b"\x05"); // Ctrl+E
     pty.wait_for_text("Edit web-01")
@@ -255,30 +250,54 @@ fn the_map_moves_by_row_and_walks_back_out() {
         screen.contents().contains("\u{25c6} User")
     })
     .expect("Enter settles the row and moves to the next");
+}
 
-    // Escape is the escape hatch, not a second arrow: from any row it backs up
-    // one, and only backs *out* from the top row. Two presses to climb back to
-    // Alias, one more to leave — which is what "Esc back" beside "Enter next"
-    // has to mean, and what the note on leaving then confirms.
-    pty.key(b"\x1b");
-    pty.wait_until("the focus back on Host", Duration::from_secs(4), |screen| {
+/// Escape inside the map is the escape hatch, not a second arrow.
+///
+/// From a row that is not the first it backs up exactly one row, which is what
+/// "Esc back" beside "Enter next" on the hint rail has to mean — a test that
+/// assumed Escape cancelled the whole form would have been asserting a
+/// keybinding the app never claimed.
+#[test]
+fn escape_backs_the_map_up_one_row() {
+    let (_fixture, mut pty) = manage();
+
+    pty.key(b"\x05"); // Ctrl+E
+    pty.wait_for_text("Edit web-01")
+        .expect("the seeded map opens");
+
+    pty.key(b"\x1b[B"); // Down: Alias -> Host
+    pty.wait_until("the focus on Host", Duration::from_secs(4), |screen| {
         screen.contents().contains("\u{25c6} Host")
     })
-    .expect("Escape backs up one row");
+    .expect("Down moves to the next row");
+
     pty.key(b"\x1b");
     pty.wait_until(
-        "the focus on the top row",
+        "the focus back on Alias",
         Duration::from_secs(4),
         |screen| screen.contents().contains("\u{25c6} Alias"),
     )
-    .expect("Escape backs up again");
+    .expect("Escape backs up one row, not out of the map");
+}
+
+/// Escape on the top row has nowhere left to back up to, and says so by
+/// leaving: back at the list, with the store exactly as it was found.
+#[test]
+fn escape_from_the_top_row_walks_back_out_to_the_list() {
+    let (fixture, mut pty) = manage();
+    let before = fixture.read_store().expect("the store before");
+
+    pty.key(b"\x05"); // Ctrl+E
+    pty.wait_for_text("Edit web-01")
+        .expect("the seeded map opens");
 
     pty.key(b"\x1b");
     back_at_the_list(&mut pty);
     assert_eq!(
         fixture.read_store().expect("the store after"),
         before,
-        "walking the map and leaving it changes nothing"
+        "opening the map and walking back out changes nothing"
     );
 }
 
@@ -301,11 +320,12 @@ fn declining_a_delete_leaves_the_connection_in_place() {
     pty.wait_for_text("Delete web-01? No")
         .expect("the refusal is recorded on screen");
 
-    assert!(
-        pty.grid().contains("web-01 (deploy@10.0.0.1:22)"),
-        "the row is still in the frame\n{}",
-        pty.grid()
-    );
+    pty.wait_until_settled(
+        "the row still in the frame",
+        Duration::from_secs(4),
+        |screen| screen.contents().contains("web-01 (deploy@10.0.0.1:22)"),
+    )
+    .expect("the row is still in the frame");
     assert_eq!(
         fixture.read_store().expect("the store after"),
         before,
@@ -361,7 +381,7 @@ fn confirming_a_delete_removes_it_from_the_store_and_the_frame() {
     // just drew say `deleted web-01`, and they should. A row that keeps
     // rendering after the store dropped it is the failure - the next Enter
     // would run ssh against a Connection that is no longer there.
-    pty.wait_until(
+    pty.wait_until_settled(
         "the row leaving the frame",
         Duration::from_secs(4),
         |screen| !screen.contents().contains("web-01 (deploy@10.0.0.1:22)"),

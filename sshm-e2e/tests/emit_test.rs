@@ -38,17 +38,16 @@ fn selecting_a_connection_runs_ssh_with_exactly_the_connection_s_fields() {
         )])
         .and_then(|f| f.with_ssh_shim())
         .expect("seed");
-    let calls = fixture
-        .ssh_calls_path()
-        .expect("the shim records")
-        .to_path_buf();
-
     let mut pty = Pty::spawn(sshm_binary(), &[], &fixture).expect("spawn sshm");
     pty.wait_for_text("build-01").expect("the picker draws");
     pty.key(b"\r");
 
-    pty.wait_for_file(&calls, Duration::from_secs(4))
-        .expect("ssh was invoked");
+    pty.wait_until_pumping(
+        "ssh to be invoked and recorded",
+        Duration::from_secs(4),
+        || fixture.ssh_calls_are_complete(),
+    )
+    .expect("ssh was invoked");
     let recorded = fixture.ssh_calls().expect("the log reads");
     assert_eq!(
         recorded.len(),
@@ -85,17 +84,16 @@ fn a_connection_on_the_default_port_with_no_key_sends_only_the_target() {
         .with_connections(&[connection("web-01", "10.0.0.7", "deploy")])
         .and_then(|f| f.with_ssh_shim())
         .expect("seed");
-    let calls = fixture
-        .ssh_calls_path()
-        .expect("the shim records")
-        .to_path_buf();
-
     let mut pty = Pty::spawn(sshm_binary(), &[], &fixture).expect("spawn sshm");
     pty.wait_for_text("web-01").expect("the picker draws");
     pty.key(b"\r");
 
-    pty.wait_for_file(&calls, Duration::from_secs(4))
-        .expect("ssh was invoked");
+    pty.wait_until_pumping(
+        "ssh to be invoked and recorded",
+        Duration::from_secs(4),
+        || fixture.ssh_calls_are_complete(),
+    )
+    .expect("ssh was invoked");
     let recorded = fixture.ssh_calls().expect("the log reads");
     assert_eq!(
         recorded,
@@ -167,7 +165,7 @@ fn a_seeded_query_opens_the_picker_already_filtered() {
         .expect("seed");
 
     let mut pty = spawn_capture(&fixture, "pick --query db");
-    pty.wait_for_text("db-01").expect("the match is drawn");
+    pty.wait_for_frame().expect("the match is drawn");
     assert!(
         !pty.grid().contains("web-01"),
         "the seeded query left the non-matching Connection on the grid:\n{}",
