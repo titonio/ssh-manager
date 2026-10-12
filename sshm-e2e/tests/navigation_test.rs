@@ -13,11 +13,9 @@
 //! binding, the test says so rather than inventing one: the frame's documented
 //! behaviour for a key it has no use for is to leave the screen alone.
 
-use std::time::Duration;
-
 use sshm::theme::Theme;
 use sshm_e2e::fixture::{seeded_fixture, sshm_binary};
-use sshm_e2e::{token, Fixture, Pty};
+use sshm_e2e::{token, Fixture, Pty, DEFAULT_TIMEOUT};
 
 /// Wait until the `❯` cursor sits on `row`.
 ///
@@ -30,7 +28,7 @@ use sshm_e2e::{token, Fixture, Pty};
 fn cursor_is_on(pty: &mut Pty, row: u16) {
     pty.wait_until(
         &format!("the cursor on row {row}"),
-        Duration::from_secs(4),
+        DEFAULT_TIMEOUT,
         move |screen| {
             screen
                 .contents()
@@ -40,11 +38,6 @@ fn cursor_is_on(pty: &mut Pty, row: u16) {
         },
     )
     .expect("the cursor is where the keystroke should have put it");
-}
-
-/// The rows the frame is using, as one document.
-fn screen(pty: &mut Pty) -> String {
-    pty.screen_document()
 }
 
 /// The cursor walks the list and stops at both ends.
@@ -118,14 +111,10 @@ fn typing_filters_the_list_and_a_capital_letter_is_still_a_letter() {
     assert!(pty.grid().contains("DB-01"), "both rows before typing");
 
     pty.key(b"DB");
-    pty.wait_until(
-        "the list narrowing to DB-01",
-        Duration::from_secs(4),
-        |screen| {
-            let text = screen.contents();
-            text.contains("DB-01") && !text.contains("web-01")
-        },
-    )
+    pty.wait_until("the list narrowing to DB-01", DEFAULT_TIMEOUT, |screen| {
+        let text = screen.contents();
+        text.contains("DB-01") && !text.contains("web-01")
+    })
     .expect("a capital letter filters the list like any other printable");
 }
 
@@ -141,27 +130,19 @@ fn backspace_takes_the_query_back_one_character_at_a_time() {
     pty.wait_for_text("web-01").expect("the list draws");
 
     pty.key(b"web");
-    pty.wait_until(
-        "the list narrowing to web-01",
-        Duration::from_secs(4),
-        |screen| {
-            let text = screen.contents();
-            text.contains("web-01") && !text.contains("db-01")
-        },
-    )
+    pty.wait_until("the list narrowing to web-01", DEFAULT_TIMEOUT, |screen| {
+        let text = screen.contents();
+        text.contains("web-01") && !text.contains("db-01")
+    })
     .expect("the query hides the row it does not match");
 
     pty.key(b"\x7f");
     pty.key(b"\x7f");
     pty.key(b"\x7f");
-    pty.wait_until(
-        "the full list returning",
-        Duration::from_secs(4),
-        |screen| {
-            let text = screen.contents();
-            text.contains("web-01") && text.contains("db-01")
-        },
-    )
+    pty.wait_until("the full list returning", DEFAULT_TIMEOUT, |screen| {
+        let text = screen.contents();
+        text.contains("web-01") && text.contains("db-01")
+    })
     .expect("three backspaces undo three characters");
 }
 
@@ -177,7 +158,7 @@ fn escape_leaves_with_the_cancel_status() {
     pty.wait_for_text("web-01").expect("the list draws");
 
     pty.key(b"\x1b");
-    pty.wait_exit(Duration::from_secs(4))
+    pty.wait_exit(DEFAULT_TIMEOUT)
         .expect("the frame closes")
         .assert_code(130);
 }
@@ -199,9 +180,18 @@ fn ctrl_c_leaves_with_the_cancel_status() {
     );
 
     pty.key(b"\x03");
-    pty.wait_exit(Duration::from_secs(4))
+    pty.wait_exit(DEFAULT_TIMEOUT)
         .expect("the frame closes")
         .assert_code(130);
+
+    // Every way out of a frame owes the terminal back cooked, not just the one
+    // the design names: Ctrl+C leaves through the signal path rather than the
+    // Escape path, and a guard that only runs on one of them is a guard that
+    // leaves the user's shell echoing weird characters afterwards.
+    assert!(
+        pty.termios_is_cooked().expect("termios"),
+        "Ctrl+C closed the frame and left the terminal raw for whatever runs next"
+    );
 }
 
 /// The empty state tells a new user what to do next, and leaves on Escape.
@@ -217,10 +207,10 @@ fn the_empty_state_names_the_next_action_and_leaves_on_escape() {
         .expect("the empty state names the way to add one");
     pty.wait_for_frame().expect("the whole frame is drawn");
 
-    insta::assert_snapshot!("manage-empty", screen(&mut pty));
+    insta::assert_snapshot!("manage-empty", pty.screen_document());
 
     pty.key(b"\x1b");
-    pty.wait_exit(Duration::from_secs(4))
+    pty.wait_exit(DEFAULT_TIMEOUT)
         .expect("the frame closes")
         .assert_code(130);
 }
@@ -241,10 +231,10 @@ fn the_no_match_state_shows_what_was_typed_and_leaves_on_escape() {
         .expect("the no-match state names the query");
     pty.wait_for_frame().expect("the whole frame is drawn");
 
-    insta::assert_snapshot!("manage-no-match", screen(&mut pty));
+    insta::assert_snapshot!("manage-no-match", pty.screen_document());
 
     pty.key(b"\x1b");
-    pty.wait_exit(Duration::from_secs(4))
+    pty.wait_exit(DEFAULT_TIMEOUT)
         .expect("the frame closes")
         .assert_code(130);
 }
@@ -262,7 +252,7 @@ fn the_picker_with_connections_is_a_committed_screen() {
     pty.wait_for_text("cache-01").expect("all three draw");
     pty.wait_for_frame().expect("the whole frame is drawn");
 
-    insta::assert_snapshot!("picker-with-data", screen(&mut pty));
+    insta::assert_snapshot!("picker-with-data", pty.screen_document());
 }
 
 /// Which row is selected is carried by a theme role, not by a colour literal.

@@ -14,10 +14,9 @@
 //! the pipe.
 
 use std::path::Path;
-use std::time::Duration;
 
 use sshm_e2e::fixture::{connection, connection_full, sshm_binary};
-use sshm_e2e::{Fixture, Pty};
+use sshm_e2e::{Fixture, Pty, DEFAULT_TIMEOUT};
 
 /// Selecting a Connection runs `ssh` with exactly that Connection's fields.
 ///
@@ -42,11 +41,9 @@ fn selecting_a_connection_runs_ssh_with_exactly_the_connection_s_fields() {
     pty.wait_for_text("build-01").expect("the picker draws");
     pty.key(b"\r");
 
-    pty.wait_until_pumping(
-        "ssh to be invoked and recorded",
-        Duration::from_secs(4),
-        || fixture.ssh_calls_are_complete(),
-    )
+    pty.wait_until_pumping("ssh to be invoked and recorded", DEFAULT_TIMEOUT, || {
+        fixture.ssh_calls_are_complete()
+    })
     .expect("ssh was invoked");
     let recorded = fixture.ssh_calls().expect("the log reads");
     assert_eq!(
@@ -67,9 +64,55 @@ fn selecting_a_connection_runs_ssh_with_exactly_the_connection_s_fields() {
         "the argv handed to ssh is the Connection's fields, in the order ssh expects"
     );
 
-    pty.wait_exit(Duration::from_secs(4))
+    pty.wait_exit(DEFAULT_TIMEOUT)
         .expect("sshm leaves with ssh's status")
         .assert_code(0);
+
+    // The handover to a real `ssh` is a third way out of a frame, and it owes
+    // the terminal back cooked like the other two: whatever that command was,
+    // the user's shell is the next thing reading this terminal.
+    assert!(
+        pty.termios_is_cooked().expect("termios of the pty"),
+        "handing over to ssh left the terminal out of cooked mode"
+    );
+}
+
+/// Escape from bare `sshm` runs nothing at all.
+///
+/// The mirror image of the test above, and the half that matters more: a cancel
+/// that still exec'd would open a connection the user just said no to. The stub
+/// is on `PATH` for exactly this — an empty log is the proof, where the screen
+/// could only ever show an absence.
+#[test]
+fn escape_from_bare_sshm_executes_nothing() {
+    let fixture = Fixture::new()
+        .with_connections(&[connection_full(
+            "build-01",
+            "10.0.0.42",
+            "ci",
+            2222,
+            "/keys/id_build",
+        )])
+        .and_then(|f| f.with_ssh_shim())
+        .expect("seed");
+
+    let mut pty = Pty::spawn(sshm_binary(), &[], &fixture).expect("spawn sshm");
+    pty.wait_for_text("build-01").expect("the picker draws");
+
+    pty.key(b"\x1b");
+    pty.wait_exit(DEFAULT_TIMEOUT)
+        .expect("the frame closes")
+        .assert_code(130);
+
+    assert!(
+        !fixture.ssh_calls_are_complete(),
+        "a cancelled picker ran ssh anyway: {:?}",
+        fixture.ssh_calls().expect("the log reads")
+    );
+    assert!(
+        fixture.ssh_calls().expect("the log reads").is_empty(),
+        "nothing was executed on the way out"
+    );
 }
 
 /// A Connection on the default port with no key sends only the target.
@@ -88,11 +131,9 @@ fn a_connection_on_the_default_port_with_no_key_sends_only_the_target() {
     pty.wait_for_text("web-01").expect("the picker draws");
     pty.key(b"\r");
 
-    pty.wait_until_pumping(
-        "ssh to be invoked and recorded",
-        Duration::from_secs(4),
-        || fixture.ssh_calls_are_complete(),
-    )
+    pty.wait_until_pumping("ssh to be invoked and recorded", DEFAULT_TIMEOUT, || {
+        fixture.ssh_calls_are_complete()
+    })
     .expect("ssh was invoked");
     let recorded = fixture.ssh_calls().expect("the log reads");
     assert_eq!(

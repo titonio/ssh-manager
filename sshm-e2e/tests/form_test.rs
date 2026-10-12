@@ -11,10 +11,8 @@
 //! from disk rather than trusted from the frame's own note: the note is a claim
 //! about the write, and the file is the write.
 
-use std::time::Duration;
-
 use sshm_e2e::fixture::{seeded_fixture, sshm_binary};
-use sshm_e2e::{vt100, Pty};
+use sshm_e2e::{vt100, Pty, DEFAULT_TIMEOUT};
 
 /// Open `sshm manage` on one seeded Connection and press Ctrl+A.
 ///
@@ -31,7 +29,7 @@ fn open_form() -> (sshm_e2e::Fixture, Pty) {
                       // for the corner, can return in the middle of the handover - list erased,
                       // fields not yet drawn. Wait for the map's own last row, and for the
                       // terminal to go quiet behind it.
-    pty.wait_until_settled("the whole form map", Duration::from_secs(4), |screen| {
+    pty.wait_until_settled("the whole form map", DEFAULT_TIMEOUT, |screen| {
         let grid = screen.contents();
         grid.contains("New connection") && grid.contains("\u{25b6}") && grid.contains("\u{2514}")
     })
@@ -73,17 +71,16 @@ fn step_down(pty: &mut Pty) {
         return;
     };
     pty.key(b"\x1b[B");
-    pty.wait_until_settled(
-        "the focus one row lower",
-        Duration::from_secs(4),
-        |screen| match (Some(from), focus_row(&screen.contents())) {
-            (Some(from), Some(to)) => to == from + 1,
-            // Onto the submit row from the last field row, where there is no
-            // glyph to look for: ask the row itself.
-            (Some(_), None) => submit_row_is_focused(screen),
-            _ => false,
-        },
-    )
+    pty.wait_until_settled("the focus one row lower", DEFAULT_TIMEOUT, |screen| match (
+        Some(from),
+        focus_row(&screen.contents()),
+    ) {
+        (Some(from), Some(to)) => to == from + 1,
+        // Onto the submit row from the last field row, where there is no
+        // glyph to look for: ask the row itself.
+        (Some(_), None) => submit_row_is_focused(screen),
+        _ => false,
+    })
     .expect("Down moves the focus exactly one row");
 }
 
@@ -115,7 +112,7 @@ fn submit_row_is_focused(screen: &vt100::Screen) -> bool {
 fn cursor_is_on_the_submit_row(pty: &mut Pty) {
     pty.wait_until_settled(
         "the cursor on the submit row",
-        Duration::from_secs(4),
+        DEFAULT_TIMEOUT,
         submit_row_is_focused,
     )
     .expect("the cursor reached the submit row");
@@ -127,18 +124,108 @@ fn fill_alias_and_host(pty: &mut Pty, alias: &str, host: &str) {
     pty.key(b"\r");
     pty.wait_until(
         "Alias settled and Host focused",
-        Duration::from_secs(4),
+        DEFAULT_TIMEOUT,
         |screen| screen.contents().contains("\u{25c6} Host"),
     )
     .expect("Enter settles a field and moves to the next");
     pty.key(host.as_bytes());
     pty.key(b"\r");
-    pty.wait_until("Host settled", Duration::from_secs(4), |screen| {
+    pty.wait_until("Host settled", DEFAULT_TIMEOUT, |screen| {
         screen
             .contents()
             .contains(&format!("\u{2713} Host   {host}"))
     })
     .expect("the typed host is what settled");
+}
+
+/// Every field keeps what is typed into it, and shows it before it settles.
+///
+/// The Form Map has no staged value: the row the cursor is on *is* the draft,
+/// caret and all, so what a test sees mid-keystroke is what the program means
+/// to persist. Filling all six rows is the only way to prove the four optional
+/// ones are not decoration — a Key field that swallowed its typing would still
+/// leave a submittable form, and a green test about Alias and Host would never
+/// notice. The store is read back off disk rather than trusted from the note,
+/// because the note is a claim about the write and the file is the write.
+#[test]
+fn every_field_keeps_what_is_typed_into_it() {
+    let (fixture, mut pty) = open_form();
+
+    // Live Draft, proven before any Enter: three letters on a row that is
+    // still being typed, wearing the focus glyph and the caret.
+    pty.key(b"web");
+    pty.wait_until(
+        "Alias showing what has been typed into it",
+        DEFAULT_TIMEOUT,
+        |screen| screen.contents().contains("\u{25c6} Alias  web"),
+    )
+    .expect("the row being typed is the value, before anything settles");
+
+    let fields = [
+        ("Host", "10.0.0.7"),
+        ("User", "deploy"),
+        ("Port", "2222"),
+        ("Key", "/keys/id_web"),
+        ("Folder", "~/work"),
+    ];
+    // Enter settles Alias and hands the cursor to the next row, which is what
+    // the rail says it does: `Enter next` while a field is focused.
+    pty.key(b"\r");
+    for (label, value) in fields {
+        pty.wait_until(
+            &format!("{label} focused and ready"),
+            DEFAULT_TIMEOUT,
+            |screen| screen.contents().contains(&format!("\u{25c6} {label:<6}")),
+        )
+        .unwrap_or_else(|error| panic!("{label} never took the cursor: {error}"));
+        pty.key(value.as_bytes());
+        pty.key(b"\r");
+        pty.wait_until(
+            &format!("{label} holding {value:?}"),
+            DEFAULT_TIMEOUT,
+            |screen| {
+                screen
+                    .contents()
+                    .contains(&format!("\u{2713} {label:<6} {value}"))
+            },
+        )
+        .unwrap_or_else(|error| panic!("{label} did not keep what was typed: {error}"));
+    }
+
+    // Settling the last field moves the cursor off the fields altogether, onto
+    // the Submit Row — which is where the rail changes its mind and says
+    // `Enter save`.
+    cursor_is_on_the_submit_row(&mut pty);
+    pty.key(b"\r");
+    // The note names the folder it filed the Connection under, because that is
+    // what the user just typed into the Folder field.
+    pty.wait_for_text("\u{25c7} added [~/work] web")
+        .expect("the frame reports the write it made");
+    // And the list row carries the port the Port field was given, which is the
+    // same value the ssh target is built from.
+    pty.wait_for_text("\u{276f} [~/work] web (deploy@10.0.0.7:2222)")
+        .expect("the new row is selected in the list, with the typed port");
+
+    let store = fixture.read_store().expect("the store is readable");
+    let added = store["connections"]
+        .as_array()
+        .expect("the store holds a list")
+        .iter()
+        .find(|c| c["alias"] == serde_json::json!("web"))
+        .expect("the Connection the map was given is in the store");
+    for (field, value) in [
+        ("host", "10.0.0.7"),
+        ("user", "deploy"),
+        ("port", "2222"),
+        ("key_path", "/keys/id_web"),
+        ("folder", "~/work"),
+    ] {
+        assert_eq!(
+            added[field].as_str().unwrap_or(&added[field].to_string()),
+            value,
+            "the {field} field persisted what was typed into it, not what the frame said"
+        );
+    }
 }
 
 /// Ctrl+A opens the map with every field it has, and says which matter.
@@ -195,11 +282,9 @@ fn a_typed_field_shows_the_text_as_it_is_typed() {
     let (_fixture, mut pty) = open_form();
 
     pty.key(b"prod");
-    pty.wait_until(
-        "the typed alias on its row",
-        Duration::from_secs(4),
-        |screen| screen.contents().contains("prod"),
-    )
+    pty.wait_until("the typed alias on its row", DEFAULT_TIMEOUT, |screen| {
+        screen.contents().contains("prod")
+    })
     .expect("the keystrokes land on the focused row");
 
     let (row, _, line) = pty.locate("prod").expect("the text is on the grid");
@@ -216,7 +301,7 @@ fn a_typed_field_shows_the_text_as_it_is_typed() {
 
     // Settling keeps the text and hands the row its done-glyph.
     pty.key(b"\r");
-    pty.wait_until("the row settling", Duration::from_secs(4), |screen| {
+    pty.wait_until("the row settling", DEFAULT_TIMEOUT, |screen| {
         screen.contents().contains("\u{2713} Alias  prod")
     })
     .expect("Enter settles the row and marks it valid");
@@ -275,7 +360,7 @@ fn a_new_connection_renders_in_the_picker() {
         .expect("the write happened");
 
     pty.key(b"\x1b");
-    pty.wait_exit(Duration::from_secs(4))
+    pty.wait_exit(DEFAULT_TIMEOUT)
         .expect("manage closes")
         .assert_code(130);
 
