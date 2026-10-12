@@ -13,7 +13,7 @@
 //! and the manage paths that will are #36/#37. The seam is exercised by
 //! `tests/connections_test.rs` until they land.
 
-use crate::config::{Config, Connection, ImportReport};
+use crate::config::{Config, Connection, ImportReport, Source};
 
 /// The field values a Connection is built from while the user adds or edits one.
 ///
@@ -49,6 +49,12 @@ impl ConnectionDraft {
 ///
 /// A blank optional field is *absent*, not an empty string: a Connection with
 /// `key_path: Some("")` would hand ssh `-i ""`.
+///
+/// The provenance is `Stored` and not carried from the draft, because a draft
+/// is what the user typed into sshm's own form: whatever it describes is about
+/// to become part of sshm's store, and only the code that merges a
+/// `~/.ssh/config` stanza sets [`Source::SshConfig`]. A draft that could carry
+/// provenance would let a form write a row that claims to be read-only.
 fn connection_from(draft: &ConnectionDraft) -> Connection {
     Connection {
         id: uuid::Uuid::new_v4().to_string(),
@@ -58,6 +64,7 @@ fn connection_from(draft: &ConnectionDraft) -> Connection {
         port: draft.port.parse().unwrap_or(22),
         key_path: none_if_blank(&draft.key_path),
         folder: none_if_blank(&draft.folder),
+        source: Source::Stored,
     }
 }
 

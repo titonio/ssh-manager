@@ -26,7 +26,7 @@
 //! wrong, and the only gate in the whole form is the `▶` row.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sshm::config::{Connection, ImportReport};
+use sshm::config::{Connection, ImportReport, Source};
 use sshm::connections::ConnectionDraft;
 use sshm::inline::InlineOutcome;
 use sshm::manage::{
@@ -56,6 +56,7 @@ fn web01() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("prod".into()),
+        source: Source::Stored,
     }
 }
 
@@ -69,6 +70,7 @@ fn web02() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("prod".into()),
+        source: Source::Stored,
     }
 }
 
@@ -2664,6 +2666,7 @@ fn clearing_an_optional_field_makes_it_absent() {
         port: 22,
         key_path: Some("~/.ssh/id_ed25519".into()),
         folder: Some("prod".into()),
+        source: Source::Stored,
     };
 
     let on_key = goto(&edit_state(&with_key), FormCursor::Field(FormField::Key));

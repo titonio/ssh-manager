@@ -1289,7 +1289,7 @@ impl Drop for RawModeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ImportReport;
+    use crate::config::{ImportReport, Source};
     use crate::theme::ColorSupport;
     use std::collections::VecDeque;
 
@@ -1313,6 +1313,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: Some("prod".into()),
+            source: Source::Stored,
         }
     }
 
@@ -1380,6 +1381,7 @@ mod tests {
                 port: draft.port.parse().unwrap_or(22),
                 key_path: none_if_blank(&draft.key_path).map(str::to_string),
                 folder: none_if_blank(&draft.folder).map(str::to_string),
+                source: Source::Stored,
             };
             self.connections.push(conn.clone());
             Ok(conn)

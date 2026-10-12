@@ -44,7 +44,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
-use sshm::config::Connection;
+use sshm::config::{Connection, Source};
 use sshm::frame::{
     build_frame, build_frame_with_flow, build_frame_with_note, Canvas, Frame, FrameFlow, FrameMode,
     FRAME_LINES, VISIBLE_ROWS,
@@ -67,6 +67,7 @@ fn prod_server() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("production".into()),
+        source: Source::Stored,
     }
 }
 
@@ -79,6 +80,7 @@ fn dev_box() -> Connection {
         port: 2222,
         key_path: None,
         folder: None,
+        source: Source::Stored,
     }
 }
 

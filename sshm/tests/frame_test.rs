@@ -11,11 +11,12 @@
 use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use sshm::config::Connection;
+use sshm::config::{Connection, Source};
 use sshm::frame::{
     build_frame, build_frame_with_flow, build_frame_with_note, build_row_text,
-    compute_field_offsets, compute_matches, display_import_path, fit, fit_hints_with,
-    visible_window, Canvas, FrameFlow, FrameMode, FrameState, FRAME_LINES, VISIBLE_ROWS,
+    compute_field_offsets, compute_matches, display_import_path, fit, fit_hints_with, row_prefix,
+    visible_window, Canvas, FrameFlow, FrameMode, FrameState, FRAME_LINES, SSH_CONFIG_TAG,
+    VISIBLE_ROWS,
 };
 use sshm::theme::{ColorSupport, Theme};
 
@@ -48,6 +49,7 @@ fn conns() -> Vec<Connection> {
             port: 22,
             key_path: None,
             folder: Some("prod".into()),
+            source: Source::Stored,
         },
         Connection {
             id: "2".into(),
@@ -57,6 +59,7 @@ fn conns() -> Vec<Connection> {
             port: 5432,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         },
     ]
 }
@@ -427,6 +430,101 @@ fn the_highlighted_columns_are_the_row_text_offsets_the_matcher_reports() {
              offsets compute_matches reports into build_row_text"
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Provenance — the `[ssh-config]` tag
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A Connection that came from `~/.ssh/config` instead of from sshm's store.
+///
+/// Provenance is a property of the row, never a folder stuffed with a magic
+/// string: a config row has no folder, and the tag is rendered from
+/// [`Source::SshConfig`] alone.
+fn config_conn(alias: &str, host: &str, user: &str, port: u16) -> Connection {
+    Connection {
+        id: "cfg-1".into(),
+        alias: alias.into(),
+        host: host.into(),
+        user: user.into(),
+        port,
+        key_path: None,
+        folder: None,
+        source: Source::SshConfig,
+    }
+}
+
+/// A config row says so where a folder would be, in the one text every row is
+/// drawn from.
+#[test]
+fn a_config_row_is_tagged_ssh_config() {
+    let conn = config_conn("build-box", "build.internal", "me", 2222);
+    assert_eq!(
+        build_row_text(&conn),
+        "[ssh-config] build-box (me@build.internal:2222)"
+    );
+}
+
+/// The tag is the row's prefix, not its folder.
+///
+/// Both a tag and a folder on one row is a state the merged list never
+/// produces — a config row has no folder, and a stored row is not config — but
+/// the rule still has one answer, and it is the tag: provenance is the fact the
+/// row is being shown for, and a folder could only impersonate it.
+#[test]
+fn the_tag_outranks_a_folder() {
+    let mut conn = config_conn("build-box", "build.internal", "me", 2222);
+    conn.folder = Some("prod".into());
+    assert_eq!(row_prefix(&conn), Some(SSH_CONFIG_TAG));
+    assert_eq!(
+        build_row_text(&conn),
+        "[ssh-config] build-box (me@build.internal:2222)"
+    );
+}
+
+/// A stored row keeps showing its folder and nothing else — the tag is earned
+/// by provenance, so no stored row can pick it up by accident.
+#[test]
+fn a_stored_row_keeps_its_folder_and_gains_no_tag() {
+    let stored = Connection {
+        folder: Some("prod".into()),
+        source: Source::Stored,
+        ..config_conn("web-01", "10.0.0.4", "deploy", 22)
+    };
+    assert_eq!(row_prefix(&stored), Some("prod"));
+    assert_eq!(
+        build_row_text(&stored),
+        "[prod] web-01 (deploy@10.0.0.4:22)"
+    );
+
+    let bare = Connection {
+        source: Source::Stored,
+        ..config_conn("web-01", "10.0.0.4", "deploy", 22)
+    };
+    assert_eq!(row_prefix(&bare), None);
+    assert_eq!(build_row_text(&bare), "web-01 (deploy@10.0.0.4:22)");
+}
+
+/// The tag is drawn, and indexed, exactly where a folder would be.
+///
+/// The frame's row is `build_row_text` and its highlight offsets index that
+/// same text, so a tag that only appeared in the drawn row — or only in the
+/// offsets — would put the matcher's coordinates a whole `[tag] ` prefix away
+/// from the characters the user reads. This pins both halves for a config row.
+#[test]
+fn the_tag_is_drawn_and_indexed_like_a_folder() {
+    let conn = config_conn("build-box", "build.internal", "me", 2222);
+    let frame = build_frame(std::slice::from_ref(&conn), "", 0, FrameMode::Pick, wide());
+    let rendered = line_text(&frame.lines()[1]);
+    let row = build_row_text(&conn);
+
+    assert_eq!(rendered, format!("│ ❯ {row}"));
+
+    let (tag, start, end) = compute_field_offsets(&conn)
+        .into_iter()
+        .find(|(name, _, _)| *name == "folder")
+        .expect("the tag must be a searchable field, the way a folder is");
+    assert_eq!((&row[start..end], tag), (SSH_CONFIG_TAG, "folder"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1366,6 +1464,7 @@ fn many_conns(n: usize) -> Vec<Connection> {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         })
         .collect()
 }
@@ -1390,6 +1489,7 @@ fn bloated() -> Vec<Connection> {
         port: 2222,
         key_path: None,
         folder: Some("a-folder-name-for-completeness".into()),
+        source: Source::Stored,
     }]
 }
 
@@ -1423,6 +1523,7 @@ fn wide_glyphs() -> Vec<Connection> {
         port: 22,
         key_path: None,
         folder: Some("生产".into()),
+        source: Source::Stored,
     }]
 }
 
@@ -1963,6 +2064,7 @@ fn a_tie_between_fields_highlights_the_earlier_field() {
         port: 22,
         key_path: None,
         folder: None,
+        source: Source::Stored,
     };
     let matcher = SkimMatcherV2::default();
     let matches = compute_matches(std::slice::from_ref(&conn), &matcher, "web");
@@ -2002,6 +2104,7 @@ fn a_note_costs_a_row_the_terminal_has_rather_than_a_row_it_never_had() {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         })
         .collect();
     let short = Canvas::new(80, 12, ColorSupport::Truecolor);

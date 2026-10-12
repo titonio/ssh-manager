@@ -12,7 +12,7 @@
 use crossterm::event::KeyCode;
 use ratatui::style::Modifier;
 use ratatui::text::Line;
-use sshm::config::Connection;
+use sshm::config::{Connection, Source};
 use sshm::frame::{
     build_frame_with_flow, Canvas, FormFlow, FrameFlow, FrameMode, ImportOfferFlow, FRAME_LINES,
 };
@@ -32,6 +32,7 @@ fn web01() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("prod".into()),
+        source: Source::Stored,
     }
 }
 
@@ -44,6 +45,7 @@ fn web02() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("prod".into()),
+        source: Source::Stored,
     }
 }
 

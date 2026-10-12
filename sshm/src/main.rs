@@ -573,6 +573,7 @@ fn build_add_connection(
         port,
         key_path,
         folder,
+        source: config::Source::Stored,
     })
 }
 
@@ -1344,6 +1345,7 @@ pub mod tests {
             port: 22,
             key_path: None,
             folder: Some("prod".into()),
+            source: config::Source::Stored,
         }
     }
 
@@ -1640,6 +1642,7 @@ pub mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: config::Source::Stored,
         });
         assert_eq!(
             first_run_import_offer(&store, path.to_str().unwrap()),
@@ -2491,6 +2494,7 @@ pub mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: config::Source::Stored,
         }
     }
 

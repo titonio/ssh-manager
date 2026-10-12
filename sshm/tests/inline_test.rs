@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 use ratatui::style::Modifier;
 use ratatui::text::Line;
-use sshm::config::Connection;
+use sshm::config::{Connection, Source};
 use sshm::frame::{
     build_frame, fit_visible_rows, physical_rows, Canvas, FrameMode, FRAME_LINES, VISIBLE_ROWS,
 };
@@ -48,6 +48,7 @@ fn web01() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("prod".into()),
+        source: Source::Stored,
     }
 }
 
@@ -72,6 +73,7 @@ fn many(n: usize) -> Vec<Connection> {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         })
         .collect()
 }

@@ -9,9 +9,10 @@
 
 use fuzzy_matcher::skim::SkimMatcherV2;
 use ratatui::text::Line;
-use sshm::config::Connection;
+use sshm::config::{Connection, Source};
 use sshm::frame::{
-    build_frame, build_row_text, compute_field_offsets, compute_matches, Canvas, FrameMode,
+    build_frame, build_row_text, compute_field_offsets, compute_matches, row_prefix, Canvas,
+    FrameMode, MatchResult,
 };
 use sshm::theme::ColorSupport;
 
@@ -24,6 +25,16 @@ fn make_conn(alias: &str, host: &str, user: &str, port: u16, folder: Option<&str
         port,
         key_path: None,
         folder: folder.map(|s| s.to_string()),
+        source: Source::Stored,
+    }
+}
+
+/// A row merged in from `~/.ssh/config`: no folder, and its provenance is the
+/// only thing that makes it say `[ssh-config]`.
+fn make_config_conn(alias: &str, host: &str, user: &str, port: u16) -> Connection {
+    Connection {
+        source: Source::SshConfig,
+        ..make_conn(alias, host, user, port, None)
     }
 }
 
@@ -124,6 +135,65 @@ fn host_field_is_searched() {
     assert_eq!(results[0].0, 1);
 }
 
+// ── the `[ssh-config]` tag in the haystack ───────────────────────────────────
+
+/// The original indices a `compute_matches` run returned, lowest first.
+fn matched_indices(results: &[MatchResult]) -> Vec<usize> {
+    let mut out: Vec<usize> = results.iter().map(|(i, _, _)| *i).collect();
+    out.sort_unstable();
+    out
+}
+
+/// Searching `ssh-config` lists the config hosts — and only them.
+///
+/// The tag is not decoration: it is the one thing a config row says about
+/// itself, so it belongs in the fuzzy haystack exactly where `folder` already
+/// is. The highlight offsets have to land on the tag inside the row's display
+/// text too, or the frame lights up the wrong characters while still listing
+/// the right rows.
+#[test]
+fn ssh_config_query_matches_only_config_rows() {
+    let conns = vec![
+        make_conn("web", "web.com", "www", 22, Some("production")),
+        make_config_conn("build-box", "build.internal", "me", 2222),
+        make_config_conn("db", "db.internal", "dba", 22),
+    ];
+    let matcher = SkimMatcherV2::default();
+    let results = compute_matches(&conns, &matcher, "ssh-config");
+
+    assert_eq!(matched_indices(&results), vec![1, 2]);
+
+    // The hit is the tag itself, in the text the frame draws.
+    let (_, _, hits) = &results[0];
+    let row = build_row_text(&conns[results[0].0]);
+    let lit: String = row
+        .char_indices()
+        .filter(|(i, _)| hits.contains(i))
+        .map(|(_, c)| c)
+        .collect();
+    assert_eq!(
+        lit, "ssh-config",
+        "the hit offsets do not light up the tag: {row:?}"
+    );
+}
+
+/// A folder query still means the folder, and does not reach a config row.
+///
+/// The tag shares the folder's slot in the haystack, so this is the other half
+/// of the pairing: a stored row's folder keeps matching, and a config row's tag
+/// is not something a folder query can pick up.
+#[test]
+fn folder_query_still_matches_by_folder() {
+    let conns = vec![
+        make_conn("web", "web.com", "www", 22, Some("production")),
+        make_config_conn("build-box", "build.internal", "me", 2222),
+    ];
+    let matcher = SkimMatcherV2::default();
+    let results = compute_matches(&conns, &matcher, "prod");
+
+    assert_eq!(matched_indices(&results), vec![0]);
+}
+
 // ── build_row_text ───────────────────────────────────────────────────────────
 
 #[test]
@@ -178,6 +248,10 @@ fn field_offsets_with_folder() {
 }
 
 /// The Connections every row-layout case runs over.
+///
+/// The last one is config-sourced: its bracketed prefix is the `[ssh-config]`
+/// tag rather than a folder, and the layout has to agree about it in exactly the
+/// same places it agrees about a folder.
 fn cases() -> Vec<Connection> {
     vec![
         make_conn("web", "example.com", "www", 22, None),
@@ -189,13 +263,16 @@ fn cases() -> Vec<Connection> {
             Some("production"),
         ),
         make_conn("dev", "localhost", "dev", 2222, Some("staging")),
+        make_config_conn("build-box", "build.internal", "me", 2222),
     ]
 }
 
 /// The value a searchable field name refers to on this Connection.
 fn field_value(conn: &Connection, name: &str) -> String {
     match name {
-        "folder" => conn.folder.as_deref().unwrap_or("").to_string(),
+        // The bracketed segment holds the folder, or the tag on a config row —
+        // whichever [`row_prefix`] says the row carries.
+        "folder" => row_prefix(conn).unwrap_or("").to_string(),
         "alias" => conn.alias.clone(),
         "user" => conn.user.clone(),
         "host" => conn.host.clone(),

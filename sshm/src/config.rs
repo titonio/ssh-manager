@@ -3,6 +3,29 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+/// Where a Connection came from.
+///
+/// The merged list shows hosts that live in `~/.ssh/config` next to the ones
+/// sshm stores itself, and a row has to be able to say which it is: a config row
+/// is read-only inside sshm, and it is tagged `[ssh-config]` so that is legible
+/// before the keystroke. Provenance is therefore a real property of the row,
+/// never a folder stuffed with a magic string — a folder is the user's own data,
+/// and a reserved name in it could only impersonate the tag.
+///
+/// `Stored` is the default because it is the answer for every Connection that
+/// came out of `connections.json`, including every file written before this
+/// enum existed: provenance is not persisted (see [`Connection::source`]), so
+/// the store's shape does not change and a stored row is simply a row nobody
+/// merged in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Source {
+    /// sshm's own store — `~/.ssh/connections.json`.
+    #[default]
+    Stored,
+    /// A `Host` stanza in `~/.ssh/config`, merged into the list live.
+    SshConfig,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Connection {
     pub id: String,
@@ -14,6 +37,15 @@ pub struct Connection {
     pub key_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub folder: Option<String>,
+    /// Which list this Connection came from, and so what may be done to it.
+    ///
+    /// Skipped in both directions: it is a fact about the frame being drawn,
+    /// not about the store. Writing it would freeze a live fact into
+    /// `connections.json`, and reading it back would let a hand-edited file
+    /// claim a provenance nothing can verify — so the only way a Connection
+    /// becomes [`Source::SshConfig`] is by being merged from the config.
+    #[serde(skip, default)]
+    pub source: Source,
 }
 
 impl Connection {
@@ -26,6 +58,7 @@ impl Connection {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         }
     }
 }
@@ -347,6 +380,7 @@ mod tests {
             port: 2222,
             key_path: Some("/path/to/key".to_string()),
             folder: Some("production".to_string()),
+            source: Source::Stored,
         };
         assert_eq!(conn.id, "id1");
         assert_eq!(conn.alias, "prod");
@@ -355,6 +389,61 @@ mod tests {
         assert_eq!(conn.port, 2222);
         assert_eq!(conn.key_path, Some("/path/to/key".to_string()));
         assert_eq!(conn.folder, Some("production".to_string()));
+    }
+
+    /// Provenance is a fact about the row a frame is showing, not a fact about
+    /// the store.
+    ///
+    /// `connections.json` keeps its current shape: a config-sourced Connection
+    /// written out carries no `source` key at all, and reading it back answers
+    /// `Stored` — the only honest answer for something that came out of the
+    /// store. Persisting provenance would freeze a live fact into a file, and
+    /// would change the format for a property nothing on disk can be trusted
+    /// about.
+    #[test]
+    fn test_source_is_never_persisted() {
+        let conn = Connection {
+            id: "id1".to_string(),
+            alias: "build-box".to_string(),
+            host: "build.internal".to_string(),
+            user: "me".to_string(),
+            port: 2222,
+            key_path: None,
+            folder: None,
+            source: Source::SshConfig,
+        };
+
+        let json = serde_json::to_string(&conn).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            value.get("source").is_none(),
+            "provenance leaked into the persisted shape: {json}"
+        );
+
+        let back: Connection = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.source, Source::Stored);
+        assert_eq!(back.alias, "build-box");
+        assert_eq!(back.port, 2222);
+    }
+
+    /// A hand-written `source` in `connections.json` changes nothing.
+    ///
+    /// The field is skipped in both directions, so a file cannot claim a
+    /// connection came from the config: provenance is only ever set by the code
+    /// that merged the stanza into the list, never by the data.
+    #[test]
+    fn test_source_cannot_be_forged_from_disk() {
+        let json = r#"{
+            "id": "id1",
+            "alias": "build-box",
+            "host": "build.internal",
+            "user": "me",
+            "port": 2222,
+            "source": "SshConfig"
+        }"#;
+
+        let conn: Connection = serde_json::from_str(json).unwrap();
+        assert_eq!(conn.source, Source::Stored);
     }
 
     #[test]
@@ -374,6 +463,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
         config.add_connection(Connection {
             id: "2".to_string(),
@@ -383,6 +473,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
         assert_eq!(config.connections.len(), 2);
     }
@@ -410,6 +501,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
         assert_eq!(config.connections.len(), 1);
 
@@ -428,6 +520,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         config.remove_connection("non-existent-id");
@@ -445,6 +538,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         config.update_connection(Connection {
@@ -455,6 +549,7 @@ mod tests {
             port: 2222,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         assert_eq!(config.connections.len(), 1);
@@ -473,6 +568,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         config.update_connection(Connection {
@@ -483,6 +579,7 @@ mod tests {
             port: 2222,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         assert_eq!(config.connections.len(), 1);
@@ -518,6 +615,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: Some("zebra".to_string()),
+            source: Source::Stored,
         });
         config.add_connection(Connection {
             id: "2".to_string(),
@@ -527,6 +625,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: Some("apple".to_string()),
+            source: Source::Stored,
         });
         config.add_connection(Connection {
             id: "3".to_string(),
@@ -536,6 +635,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: Some("banana".to_string()),
+            source: Source::Stored,
         });
 
         // Test that we can access folder information directly from connections
@@ -593,6 +693,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
         config.add_connection(Connection {
             id: "2".to_string(),
@@ -602,6 +703,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         let json = serde_json::to_string(&config).unwrap();
@@ -659,6 +761,7 @@ mod tests {
             port: 22,
             key_path: Some("/key".to_string()),
             folder: None,
+            source: Source::Stored,
         };
 
         let json = serde_json::to_string(&conn).unwrap();
@@ -680,6 +783,7 @@ mod tests {
             port: 2222,
             key_path: Some("/home/user/.ssh/id_rsa".to_string()),
             folder: Some("production".to_string()),
+            source: Source::Stored,
         });
 
         fs::create_dir_all(&temp_dir).unwrap();
@@ -743,6 +847,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
         config.add_connection(Connection {
             id: "conn-2".to_string(),
@@ -752,6 +857,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         config.update_connection(Connection {
@@ -762,6 +868,7 @@ mod tests {
             port: 2222,
             key_path: Some("/new/key".to_string()),
             folder: Some("new-folder".to_string()),
+            source: Source::Stored,
         });
 
         assert_eq!(config.connections.len(), 2);
@@ -789,6 +896,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
         config.add_connection(Connection {
             id: "conn-2".to_string(),
@@ -798,6 +906,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         config.update_connection(Connection {
@@ -808,6 +917,7 @@ mod tests {
             port: 2222,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         let other = config
@@ -830,6 +940,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
         config.add_connection(Connection {
             id: "conn-2".to_string(),
@@ -839,6 +950,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
         config.add_connection(Connection {
             id: "conn-3".to_string(),
@@ -848,6 +960,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         config.remove_connection("conn-2");
@@ -877,6 +990,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         config.remove_connection("last-conn");
@@ -1114,6 +1228,7 @@ Host db-01
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         let report = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());
@@ -1170,6 +1285,7 @@ Host web-02
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         let offered = count_importable(&config.connections, config_path.to_str().unwrap());
@@ -1337,6 +1453,7 @@ Host new
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         });
 
         let report = import_from_ssh_config_with_path(&mut config, config_path.to_str().unwrap());

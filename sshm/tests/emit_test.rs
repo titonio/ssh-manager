@@ -13,7 +13,7 @@
 
 use std::ffi::OsString;
 
-use sshm::config::Connection;
+use sshm::config::{Connection, Source};
 use sshm::emit::{Action, Emit};
 use sshm::frame::FrameMode;
 use sshm::inline::InlineOutcome;
@@ -29,6 +29,7 @@ fn web01() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("prod".into()),
+        source: Source::Stored,
     }
 }
 
@@ -43,6 +44,7 @@ fn loaded() -> Connection {
         port: 2222,
         key_path: Some("/keys/ci.pem".into()),
         folder: None,
+        source: Source::Stored,
     }
 }
 

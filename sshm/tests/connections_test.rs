@@ -9,7 +9,7 @@
 
 use std::ffi::OsString;
 
-use sshm::config::{Config, Connection};
+use sshm::config::{Config, Connection, Source};
 use sshm::connections::{self, ConnectionDraft, Ephemeral, Store};
 
 /// Point `HOME` at a throwaway directory so a test never touches the real
@@ -915,5 +915,6 @@ fn connection(id: &str, alias: &str) -> sshm::config::Connection {
         port: 22,
         key_path: None,
         folder: Some("prod".to_string()),
+        source: Source::Stored,
     }
 }

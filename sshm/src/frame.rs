@@ -38,7 +38,7 @@
 //! 3. **Glyphs and modifiers carry meaning, not hue.** Every state the frame can
 //!    be in says the same thing with the colour turned off.
 
-use crate::config::Connection;
+use crate::config::{Connection, Source};
 use crate::theme::{ColorSupport, Theme};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -969,8 +969,9 @@ pub type MatchResult = (usize, i64, Vec<usize>);
 
 /// Pure fuzzy filter over `&[Connection]` + `SkimMatcherV2` + query.
 ///
-/// Searches alias, host, user, and **folder** fields. For each connection, the
-/// field yielding the highest `fuzzy_match` score is used for the highlight
+/// Searches alias, host, user, and the bracketed prefix — the **folder** for a
+/// stored row, the `[ssh-config]` tag for a config row. For each connection,
+/// the field yielding the highest `fuzzy_match` score is used for the highlight
 /// indices. Results are sorted by score descending (best match first), with
 /// original index as tiebreaker.
 ///
@@ -1000,7 +1001,7 @@ pub fn compute_matches(
             ("alias", &conn.alias),
             ("host", &conn.host),
             ("user", &conn.user),
-            ("folder", conn.folder.as_deref().unwrap_or("")),
+            ("folder", row_prefix(conn).unwrap_or("")),
         ];
 
         let offsets = compute_field_offsets(conn);
@@ -1032,6 +1033,35 @@ pub fn compute_matches(
     results
 }
 
+/// The word a row carries in its bracketed prefix when it came from
+/// `~/.ssh/config` rather than from sshm's store.
+///
+/// One constant because two things have to agree on it: the frame draws it, and
+/// the user types it — searching `ssh-config` is how the config hosts are listed
+/// on their own. It is a constant and not a string a user could type into the
+/// Folder field, because a stored row wearing this word would claim to be
+/// something sshm must not let it edit.
+pub const SSH_CONFIG_TAG: &str = "ssh-config";
+
+/// The bracketed prefix a row carries, if it carries one: the `[ssh-config]`
+/// tag for a config row, otherwise its folder.
+///
+/// Provenance outranks the folder rather than sitting next to it. A config row
+/// has no folder to show — folders are sshm's own data, and a stanza has nothing
+/// to fill one in from — and the tag is the fact the row is being shown for, so
+/// a row that is both would have to draw one of them anyway. The rule is written
+/// once here so the drawn row, the row's geometry and the matcher's haystack
+/// cannot disagree about which word a row leads with.
+///
+/// `None` means no brackets at all: a stored row with no folder, which is the
+/// common case and stays compact.
+pub fn row_prefix(conn: &Connection) -> Option<&str> {
+    if conn.source == Source::SshConfig {
+        return Some(SSH_CONFIG_TAG);
+    }
+    conn.folder.as_deref().filter(|f| !f.is_empty())
+}
+
 /// The display text of a frame row (without the rail or cursor) — the single
 /// source of truth for what a row says.
 ///
@@ -1039,18 +1069,22 @@ pub fn compute_matches(
 ///   `[folder] alias (user@host:port)` when folder is present,
 ///   `alias (user@host:port)` when it is not.
 ///
+/// The brackets hold [`row_prefix`], so a row merged from `~/.ssh/config` reads
+/// `[ssh-config] alias (user@host:port)` — the same slot a folder occupies,
+/// filled from provenance instead.
+///
 /// [`compute_field_offsets`] indexes into this string and [`row_line`] draws
 /// its content spans as slices of it, so the text the matcher scores and the
 /// text the user reads are the same bytes. A row is not formatted anywhere
 /// else.
 pub fn build_row_text(conn: &Connection) -> String {
-    let folder = conn.folder.as_deref().unwrap_or("");
-    if folder.is_empty() {
+    let prefix = row_prefix(conn).unwrap_or("");
+    if prefix.is_empty() {
         format!("{} ({}@{}:{})", conn.alias, conn.user, conn.host, conn.port)
     } else {
         format!(
             "[{}] {} ({}@{}:{})",
-            folder, conn.alias, conn.user, conn.host, conn.port
+            prefix, conn.alias, conn.user, conn.host, conn.port
         )
     }
 }
@@ -1063,7 +1097,8 @@ pub fn build_row_text(conn: &Connection) -> String {
 /// drawn as a raw span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RowSegments {
-    /// `[folder]` — absent when the Connection has no folder.
+    /// `[folder]`, or `[ssh-config]` on a config row — absent when the row
+    /// carries neither ([`row_prefix`]).
     folder: Option<Range<usize>>,
     /// The alias.
     alias: Range<usize>,
@@ -1074,14 +1109,14 @@ struct RowSegments {
 /// The row's geometry: where each drawn segment sits inside
 /// [`build_row_text`]'s output.
 ///
-/// One function owns the `[folder] alias (user@host:port)` layout.
+/// One function owns the `[prefix] alias (user@host:port)` layout.
 /// [`compute_field_offsets`] derives the matcher's field offsets from these
 /// ranges and [`row_line`] cuts its spans out of the row text at them, so the
 /// text the highlight indices count into and the text the frame draws are the
 /// same bytes. Before this, `row_line` formatted the row a second time by
 /// hand and nothing joined the two — see the note on [`row_line`].
 fn row_segments(conn: &Connection) -> RowSegments {
-    let folder = conn.folder.as_deref().filter(|f| !f.is_empty());
+    let folder = row_prefix(conn);
     let port = conn.port.to_string();
 
     // `[folder] ` is the folder name wrapped in brackets plus a space; a row
@@ -1107,9 +1142,13 @@ fn row_segments(conn: &Connection) -> RowSegments {
 /// The boundaries come from [`row_segments`], the one place the row's layout
 /// is written down, so these offsets cannot land on a different row than the
 /// one [`row_line`] draws.
+///
+/// The `"folder"` field is the bracketed prefix, so on a config row it indexes
+/// the `[ssh-config]` tag: the tag is searchable exactly the way a folder is,
+/// which is what makes typing `ssh-config` list the config hosts.
 pub fn compute_field_offsets(conn: &Connection) -> Vec<(&str, usize, usize)> {
     let segs = row_segments(conn);
-    let folder = conn.folder.as_deref().unwrap_or("");
+    let folder = row_prefix(conn).unwrap_or("");
     let port = conn.port.to_string();
     let mut offsets: Vec<(&str, usize, usize)> = Vec::new();
 

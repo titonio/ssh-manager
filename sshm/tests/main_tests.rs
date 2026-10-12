@@ -1,9 +1,9 @@
-use sshm::config::Connection;
+use sshm::config::{Connection, Source};
 use sshm::{build_ssh_args, execute_ssh};
 
 mod test_main {
     use sshm::build_ssh_args;
-    use sshm::config::Connection;
+    use sshm::config::{Connection, Source};
 
     #[test]
     fn test_main_should_connect_false_branch() {
@@ -15,6 +15,7 @@ mod test_main {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -31,6 +32,7 @@ mod test_main {
             port: 22,
             key_path: Some("/path/to/key".to_string()),
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -47,6 +49,7 @@ mod test_main {
             port: 2222,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -63,6 +66,7 @@ mod test_main {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -79,6 +83,7 @@ mod test_main {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -95,6 +100,7 @@ mod test_main {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -117,6 +123,7 @@ mod tests {
             port: 22,
             key_path: Some("/path/to/key".to_string()),
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -137,6 +144,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -155,6 +163,7 @@ mod tests {
             port: 2222,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -175,6 +184,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -193,6 +203,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -211,6 +222,7 @@ mod tests {
             port: 2222,
             key_path: Some("/home/user/.ssh/id_rsa".to_string()),
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -233,6 +245,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -251,6 +264,7 @@ mod tests {
             port: 65535,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -271,6 +285,7 @@ mod tests {
             port: 23,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -291,6 +306,7 @@ mod tests {
             port: 21,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -311,6 +327,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -329,6 +346,7 @@ mod tests {
             port: 2222,
             key_path: Some("/path/to/key".to_string()),
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -351,6 +369,7 @@ mod tests {
             port: 22,
             key_path: Some("/path/to/my key".to_string()),
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -371,6 +390,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -400,6 +420,7 @@ mod tests {
             port: 22,
             key_path: Some("".to_string()),
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
@@ -420,6 +441,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: Source::Stored,
         };
 
         let args = build_ssh_args(&conn);
