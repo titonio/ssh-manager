@@ -132,10 +132,15 @@ jobs:
     - name: Install cargo-nextest
       uses: taiki-e/install-action@cargo-nextest
 
-    # The Shell Widget tests drive real zsh and bash. The runner image ships
-    # both; this asserts it rather than letting a future image change turn a
-    # shell test into a skip, and it runs first, while there is still a
-    # confusing failure for it to prevent.
+    # The Shell Widget tests drive a real zsh and a real bash. bash is what the
+    # runner is already running; zsh is not in the ubuntu-latest image, so the
+    # job installs it. The first CI run of this suite is what found that out,
+    # and it found it in four seconds rather than as a shell test timing out
+    # three minutes later, which is the whole point of asserting the shells are
+    # there instead of letting a missing one turn into a skip or a mystery.
+    - name: Install the shells the suite drives
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+
     - name: Check the shells the suite drives are present
       run: command -v zsh && command -v bash
 

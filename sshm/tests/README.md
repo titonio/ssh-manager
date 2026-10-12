@@ -257,8 +257,10 @@ test instead of taking the run with it — and falls back to libtest so a fresh
 machine needs nothing extra.
 
 CI runs it as the `e2e` job in `.github/workflows/ci.yml`: `ubuntu-latest`,
-nextest installed, the same script, and a step that asserts `zsh` and `bash` are
-present rather than letting a future runner image turn a shell test into a skip.
+nextest installed, the same script, and a step that installs `zsh` — it is not
+in the `ubuntu-latest` image — and then asserts both shells are there, so a
+missing one is one clear line rather than a shell test timing out three minutes
+later or quietly becoming a skip.
 The job is a check like any other; it is not part of the mutation or coverage
 gates, and it does not need to be: the mutants in this territory that the sweep
 could never reach are already named in the table above, and this suite is the
