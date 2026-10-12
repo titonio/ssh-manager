@@ -17,7 +17,7 @@ use sshm::frame::{
     build_frame_with_flow, Canvas, FormFlow, FrameFlow, FrameMode, ImportOfferFlow, FRAME_LINES,
 };
 use sshm::manage::{self, step, DeleteOutcome, FormCursor, ManageState};
-use sshm::theme::ColorSupport;
+use sshm::theme::{ColorSupport, Theme};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -104,6 +104,19 @@ fn deleted_state() -> ManageState {
     let answered = step(&armed.state, plain('y'), Some(&web01()));
     manage::settle_delete(&answered.state, &web01(), DeleteOutcome::Removed(web01()))
         .expect("a Connection that was really removed settles back onto the list")
+}
+
+/// The frame's `◇` note line, with the rail taken off the front: what the
+/// note says, and nothing else.
+fn note(frame: &sshm::frame::Frame) -> String {
+    let lines = frame_text(frame);
+    lines
+        .iter()
+        .find(|line| line.contains('◇'))
+        .unwrap_or_else(|| panic!("no ◇ note in {lines:?}"))
+        .trim_start_matches('│')
+        .trim()
+        .to_string()
 }
 
 /// The line of the frame that carries `glyph`, if any.
@@ -294,6 +307,96 @@ fn the_flow_glyphs_survive_monochrome() {
     assert!(
         joined.contains("deleted"),
         "the note word vanished: {joined}"
+    );
+}
+
+/// The write family's notes are the frame's only claim that a write happened,
+/// and each one is earned through `settle_add` / `settle_edit` rather than set
+/// by a keystroke — so all three are rendered here the way the driver builds
+/// them: `◇ added`, `◇ edited`, and the wording that replaces the claim when
+/// the store had no such Connection to change.
+#[test]
+fn every_write_the_store_answered_for_gets_its_own_note() {
+    let added = manage::settle_add(&ManageState::new(), &conns(), Ok(web02()))
+        .expect("a Connection the store really wrote");
+    assert_eq!(
+        note(&render(&added)),
+        "◇ added [prod] web-02",
+        "the add note names the Connection the store made"
+    );
+
+    let renamed = Connection {
+        alias: "web-99".into(),
+        ..web01()
+    };
+    let edited = manage::settle_edit(
+        &ManageState::new(),
+        &conns(),
+        &web01(),
+        manage::EditOutcome::Updated(renamed),
+    )
+    .expect("a Connection the store really changed");
+    assert_eq!(
+        note(&render(&edited)),
+        "◇ edited [prod] web-99",
+        "the note reports the alias the store ended up with"
+    );
+
+    let absent = manage::settle_edit(
+        &ManageState::new(),
+        &conns(),
+        &web01(),
+        manage::EditOutcome::Absent,
+    )
+    .expect("an edit that landed on nothing still settles");
+    assert_eq!(
+        note(&render(&absent)),
+        "◇ edit failed — no such Connection: [prod] web-01",
+        "no edit happened, so no edit is claimed"
+    );
+}
+
+/// Backing out of a half-filled add answers the one question the user has —
+/// *did any of it get saved?* — and the answer is the frame's to give: the
+/// dim note sits where every other note sits, and it names no Connection
+/// because none was ever written.
+#[test]
+fn the_abandoned_add_notes_that_nothing_was_saved() {
+    let opened = step(&ManageState::new(), ctrl('a'), None);
+    let abandoned = step(&opened.state, key(KeyCode::Esc), None);
+
+    let text = frame_text(&render(&abandoned.state));
+    let note = text
+        .iter()
+        .find(|l| l.contains('◇'))
+        .unwrap_or_else(|| panic!("no ◇ note in {text:?}"));
+
+    assert_eq!(
+        note.trim_start_matches('│').trim(),
+        "◇ add abandoned — nothing saved",
+        "the note is the ticket's string, and it is about the add, not about a row"
+    );
+}
+
+/// The edit half of the same answer. The map was opened from a real row, so
+/// the temptation is to word this like `◇ edited [prod] web-01` — but
+/// nothing was edited, and a note that read as a write over a list still
+/// showing the old value would be the frame lying.
+#[test]
+fn the_abandoned_edit_notes_that_nothing_was_saved() {
+    let opened = step(&ManageState::new(), ctrl('e'), Some(&web01()));
+    let abandoned = step(&opened.state, key(KeyCode::Esc), Some(&web01()));
+
+    let text = frame_text(&render(&abandoned.state));
+    let note = text
+        .iter()
+        .find(|l| l.contains('◇'))
+        .unwrap_or_else(|| panic!("no ◇ note in {text:?}"));
+
+    assert_eq!(
+        note.trim_start_matches('│').trim(),
+        "◇ edit abandoned — nothing saved",
+        "the edit's abandonment says the same thing as the add's, about the edit"
     );
 }
 
@@ -1544,5 +1647,169 @@ fn the_empty_cta_shows_in_both_modes_while_the_offer_is_open() {
     assert!(
         !joined.contains("Import"),
         "the pick frame asks no questions: {joined}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The glyph colours of a map row
+//
+// The glyph says whether a field is filled, changed, or blocking the save, and
+// it says it in colour first — the character is the fallback for a terminal
+// that will not render it. A glyph whose colour is wrong is a state that reads
+// wrong, so these assert the role each one wears, and that focus and validity
+// are two facts the frame can state separately.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The map row as drawn, spans and all — for the assertions about colour, which
+/// `map_row` flattens away.
+fn map_row_drawn<'a>(frame: &'a sshm::frame::Frame, label: &str) -> &'a Line<'static> {
+    let padded = format!("{label:<6}");
+    frame
+        .lines()
+        .iter()
+        .find(|l| line_text(l).contains(&padded))
+        .unwrap_or_else(|| panic!("no map row for {label:?} in {:?}", frame_text(frame)))
+}
+
+/// The glyph span of a row: `"<glyph> "`, after the rail and the gutter pad.
+fn glyph_span<'a>(line: &'a Line<'static>, glyph: char) -> &'a ratatui::text::Span<'static> {
+    let want = format!("{glyph} ");
+    line.spans
+        .iter()
+        .find(|s| s.content == want)
+        .unwrap_or_else(|| panic!("no {want:?} glyph span in {:?}", line_text(line)))
+}
+
+/// A field whose content will not validate wears the warning role, and keeps
+/// wearing it after the cursor moves on. The problem does not go away when the
+/// reader looks elsewhere, and a `!` that recedes to the dim of an untouched
+/// row is a blocked save that looks ready.
+#[test]
+fn an_invalid_field_keeps_the_warning_role_after_the_cursor_moves_on() {
+    let filled = type_into(&goto_row(&edit_open(), "Port"), "abc");
+    let moved_on = step(&filled, key(KeyCode::Down), Some(&web01())).state;
+
+    let frame = render(&moved_on);
+    let glyph = glyph_span(map_row_drawn(&frame, "Port"), '!');
+
+    assert_eq!(
+        glyph.style.fg,
+        Some(Theme::clack().warning),
+        "the ! must wear the warning role, not the dim of an untouched row"
+    );
+    assert!(
+        glyph.style.add_modifier.contains(Modifier::BOLD),
+        "the ! is bold so it reads without colour: {:?}",
+        glyph.style
+    );
+}
+
+/// A field that differs from the stored Connection is marked in the accent —
+/// but without the bold the focused row owns. "Changed" and "the cursor is
+/// here" are two facts, and a frame that can only say them together cannot say
+/// either.
+#[test]
+fn a_changed_field_is_marked_in_accent_without_the_focus_bold() {
+    let filled = type_into(&edit_open(), "x");
+    let moved_on = step(&filled, key(KeyCode::Down), Some(&web01())).state;
+
+    let frame = render(&moved_on);
+    let glyph = glyph_span(map_row_drawn(&frame, "Alias"), '●');
+
+    assert_eq!(glyph.style.fg, Some(Theme::clack().accent));
+    assert!(
+        !glyph.style.add_modifier.contains(Modifier::BOLD),
+        "the changed glyph must not borrow the focus row's bold: {:?}",
+        glyph.style
+    );
+}
+
+/// The row the cursor is on is unmistakable whatever its own state says: the
+/// `◆` in accent bold, in place of the `✓` the field would draw for itself.
+/// Focus has to win, because every key the user presses next acts on this row.
+#[test]
+fn the_focused_row_wears_the_accent_glyph_whatever_its_own_state() {
+    let frame = render(&edit_open());
+    let glyph = glyph_span(map_row_drawn(&frame, "Alias"), '◆');
+
+    assert_eq!(glyph.style.fg, Some(Theme::clack().accent));
+    assert!(
+        glyph.style.add_modifier.contains(Modifier::BOLD),
+        "focus is the one state that must be obvious: {:?}",
+        glyph.style
+    );
+}
+
+/// A row that is neither focused nor a problem recedes to `fg_muted`. Six rows
+/// all emphasised is six rows saying nothing, and the two rows that do need
+/// shouting at — the focused one and the broken one — lose their edge.
+#[test]
+fn an_untouched_field_recedes_behind_the_focus_and_the_problems() {
+    let frame = render(&edit_open());
+    let glyph = glyph_span(map_row_drawn(&frame, "Host"), '✓');
+
+    assert_eq!(
+        glyph.style.fg,
+        Some(Theme::clack().fg_muted),
+        "an untouched row must recede so the focused and invalid rows stand out"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Where the caret is, and where it is not
+//
+// The caret is the only thing on the glass that says which row takes the next
+// keystroke. Two ways to get that wrong, and each has to be pinned separately:
+// painting a caret on every row that holds text, and painting one nowhere.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The row the cursor is on shows its text bold and ends in the caret: the text
+/// is the fact and the caret is chrome, so the caret is dim and the text is
+/// not. Drop the focus from this row's rendering and the reader is typing into
+/// a field they have to find by counting.
+#[test]
+fn the_focused_row_shows_its_text_bold_and_ends_with_the_caret() {
+    let frame = render(&edit_open());
+    let alias = map_row_drawn(&frame, "Alias");
+
+    let value = alias
+        .spans
+        .iter()
+        .find(|s| s.content == "web-01")
+        .unwrap_or_else(|| panic!("no alias value span in {:?}", line_text(alias)));
+    assert!(
+        value.style.add_modifier.contains(Modifier::BOLD),
+        "the text being edited is the fact on the row: {:?}",
+        value.style
+    );
+    assert!(
+        alias.spans.iter().any(|s| s.content == "_"),
+        "the row that takes the next keystroke has to say so: {:?}",
+        line_text(alias)
+    );
+}
+
+/// A row the cursor has left shows its text plain and carries no caret, however
+/// much text it holds. A caret on every filled row is a caret that says nothing,
+/// and the reader types into the wrong field believing the glass.
+#[test]
+fn a_row_the_cursor_has_left_shows_its_text_plain_and_carries_no_caret() {
+    let frame = render(&edit_open());
+    let host = map_row_drawn(&frame, "Host");
+
+    let value = host
+        .spans
+        .iter()
+        .find(|s| s.content == "10.0.0.4")
+        .unwrap_or_else(|| panic!("no host value span in {:?}", line_text(host)));
+    assert!(
+        !value.style.add_modifier.contains(Modifier::BOLD),
+        "a row that is not focused must not dress its text as if it were: {:?}",
+        value.style
+    );
+    assert!(
+        !host.spans.iter().any(|s| s.content == "_"),
+        "one caret per frame, on the row the cursor is on: {:?}",
+        line_text(host)
     );
 }

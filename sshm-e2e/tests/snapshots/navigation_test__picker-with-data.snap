@@ -1,0 +1,16 @@
+---
+source: tests/navigation_test.rs
+expression: screen(&mut pty)
+---
+
+◆ Select a Connection
+│ ❯ web-01 (deploy@10.0.0.1:22)
+│   db-01 (deploy@10.0.0.2:22)
+│   cache-01 (deploy@10.0.0.3:22)
+│
+│
+│
+│
+│
+│   Esc cancel · Enter select · ↑↓ navigate · sshm manage to add or edit
+└

@@ -36,6 +36,7 @@
 
 use std::io::{self, Write};
 
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -677,230 +678,487 @@ pub fn run_inline_with_state<W: Write>(
     mode: FrameMode,
     note: Option<String>,
 ) -> io::Result<InlineOutcome> {
-    use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-
     let (width, height) = crossterm::terminal::size()?;
-    let mut canvas = Canvas::detect(width as usize, height as usize);
+    let paint = Paint {
+        mode,
+        note: note.as_deref(),
+        canvas: Canvas::detect(width as usize, height as usize),
+    };
+    open_and_drive(
+        &mut CrosstermEvents,
+        &mut CrosstermRawMode,
+        out,
+        store,
+        paint,
+        initial,
+    )
+}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// The driver
+//
+// Everything below the entry point is the part of the command that does not
+// need a terminal to be worth proving: which keystroke means which step, which
+// step asks the store for which write, and what the frame leaves on the glass
+// when it closes. The two things it cannot do without a terminal — reading keys
+// and switching the terminal's own input mode — arrive as the [`Events`] and
+// [`RawMode`] seams, so the driver proper is driven from a script.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// What the frame is painted for, and on what: the emit mode that decides
+/// which keys it has, the update note frozen at the edge (#39), and the canvas
+/// the terminal offers.
+///
+/// They travel together because they are one fact about the frame — the frame
+/// is a function of these three and of the state — and only the canvas ever
+/// changes, when a resize re-reads the terminal.
+struct Paint<'a> {
+    mode: FrameMode,
+    note: Option<&'a str>,
+    canvas: Canvas,
+}
+
+/// The keystroke stream, as the driver sees it.
+///
+/// The driver's only source of keystrokes, and the seam that lets a test hand
+/// it a script instead of a terminal. Everything above it — the routing of a
+/// key to a step, the performing of a step's effects — is then assertable
+/// without a pty, which is the difference between a driver whose complexity is
+/// tested and one whose complexity is only hoped for.
+pub(crate) trait Events {
+    /// The next event the terminal sent.
+    fn event(&mut self) -> io::Result<Event>;
+}
+
+/// The switch that puts the terminal into raw mode for the life of the frame.
+///
+/// Separate from [`Events`] so a test can drive a whole frame without putting
+/// its own stdin into raw mode and losing the ability to report a failure.
+///
+/// Only *entering* is a seam. Leaving stays the [`RawModeGuard`]'s job on the
+/// real terminal, because the order is load-bearing and belongs fixed in one
+/// place: the cursor is restored before raw mode goes off, which is what the
+/// guard's declaration order buys every exit path — including the ones that
+/// leave by `?`, where an explicit `leave()` would be skipped.
+pub(crate) trait RawMode {
+    /// Enter raw mode. The caller leaves it again with the [`RawModeGuard`] it
+    /// keeps for the life of the frame.
+    fn enter(&mut self) -> io::Result<()>;
+}
+
+/// The terminal's own keystroke stream.
+pub(crate) struct CrosstermEvents;
+
+impl Events for CrosstermEvents {
+    fn event(&mut self) -> io::Result<Event> {
+        crossterm::event::read()
+    }
+}
+
+/// The terminal's own raw-mode switch.
+pub(crate) struct CrosstermRawMode;
+
+impl RawMode for CrosstermRawMode {
+    fn enter(&mut self) -> io::Result<()> {
+        crossterm::terminal::enable_raw_mode()
+    }
+}
+
+/// Paint the frame and drive it to its settle: keystrokes from `events`, raw
+/// mode entered through `raw`.
+///
+/// Both are injected because everything past here is the part of the command a
+/// test can prove. What stays here is the ordering no test should get to
+/// re-decide: a terminal too short for a frame never gets one, and never gets
+/// raw mode or a hidden cursor either.
+fn open_and_drive<W: Write, E: Events, R: RawMode>(
+    events: &mut E,
+    raw: &mut R,
+    out: &mut W,
+    store: &mut dyn Store,
+    mut paint: Paint<'_>,
+    initial: ManageState,
+) -> io::Result<InlineOutcome> {
     // A terminal too short to host the frame never gets one. This is the
     // same cancel-and-restore the resize path falls back to, applied at open:
     // without it `build_frame` emits three lines of chrome wrapped around a
     // list area that fitted zero rows, which is a degenerate frame rather
     // than a clean refusal.
-    if canvas.visible_rows().is_none() {
+    if paint.canvas.visible_rows().is_none() {
         let mut live = LiveFrame::new(out);
-        live.open_settled(&settle_trace(&Settle::Cancelled, canvas))?;
-        return Ok(InlineOutcome::Cancelled);
+        return settle_before_open(&mut live, paint.canvas);
     }
 
+    // The frame is assembled before the terminal is touched, in this order
+    // because it has always been in this order: a build that cannot be done
+    // must not leave the terminal in raw mode with a hidden cursor to explain.
     let mut state = initial;
+    let mut frame = build(store, &mut state, &paint);
 
-    // One place assembles the inputs a manage frame is built from, and one
-    // place re-syncs the selection to whatever the frame clamped it to.
-    // Without it every call site re-typed the quintuple and had to remember
-    // that the selection it passed in is not necessarily the one it gets.
-    // The update note rides along unchanged on every build — it is read once
-    // at the edge and never re-read here, so the paint path touches no cache
-    // file and no network (#39).
-    let build = |store: &dyn Store, state: &ManageState, canvas: Canvas| {
-        let frame = build_frame_with_note(
-            store.all(),
-            &state.query,
-            state.selection,
-            mode,
-            canvas,
-            &FrameFlow::from(state),
-            note.as_deref(),
-        );
-        let selection = frame.selection();
-        (frame, selection)
-    };
-
-    let (mut frame, synced) = build(store, &state, canvas);
-    state.selection = synced;
-
-    crossterm::terminal::enable_raw_mode()?;
+    raw.enter()?;
     let _raw = RawModeGuard;
     let mut cursor = CursorGuard::new(out);
-
     let mut live = LiveFrame::new(cursor.writer());
     live.open(&frame)?;
 
+    drive(events, &mut live, store, &mut state, &mut frame, &mut paint)
+}
+
+/// Read events until one of them ends the frame, repainting after every one
+/// that does not.
+///
+/// The loop is the whole of the driver's own behaviour, and deliberately
+/// nothing more: an event arrives, one of the handlers below decides what it
+/// means, and `Some` is the frame's answer. Every path out of here goes
+/// through a settle, so the glass is never left mid-frame.
+fn drive<W: Write, E: Events>(
+    events: &mut E,
+    live: &mut LiveFrame<'_, W>,
+    store: &mut dyn Store,
+    state: &mut ManageState,
+    frame: &mut Frame,
+    paint: &mut Paint<'_>,
+) -> io::Result<InlineOutcome> {
     loop {
-        match event::read()? {
+        let answer = match events.event()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                if mode == FrameMode::Manage {
-                    let selected = frame
-                        .selected_connection_index()
-                        .map(|i| store.all()[i].clone());
-                    let step = manage::step(&state, key, selected.as_ref());
-                    state = step.state;
-
-                    for effect in step.effects {
-                        match effect {
-                            Effect::Delete { target } => {
-                                // The delete is performed here and its
-                                // result folded straight back through
-                                // [`manage::settle_delete`], so the note
-                                // the frame paints reports what the store
-                                // did rather than what was asked for.
-                                // `Ok(None)` in particular means nothing
-                                // was removed, and the frame says so.
-                                let outcome =
-                                    manage::DeleteOutcome::from_remove(store.remove(&target.id));
-                                match manage::settle_delete(&state, &target, outcome) {
-                                    Ok(next) => state = next,
-                                    // The store refused the delete. The
-                                    // frame collapses to `◆ error …` and
-                                    // the process exits non-zero: a
-                                    // painted frame the user cannot read
-                                    // the failure in, over a list the
-                                    // store just proved unreliable, is
-                                    // the state this replaces.
-                                    Err(message) => {
-                                        return settle_error(&mut live, canvas, &target, message)
-                                    }
-                                }
-                            }
-                            // The write happens here and its result folds
-                            // straight back through `settle_add`, so the
-                            // `◇ added` note reports what the store did
-                            // rather than what the sequence finished
-                            // doing. `connections::add` is the only
-                            // implementation of "add a Connection"; the
-                            // frame does not get its own.
-                            Effect::Add { draft } => {
-                                let added = store.add(&draft);
-                                match manage::settle_add(&state, store.all(), added) {
-                                    Ok(next) => state = next,
-                                    // The store refused the add. Same
-                                    // contract as a refused delete:
-                                    // collapse, report, exit non-zero.
-                                    Err(message) => {
-                                        return settle_add_error(&mut live, canvas, &draft, message)
-                                    }
-                                }
-                            }
-                            Effect::Exit(outcome) => {
-                                return settle(&mut live, canvas, outcome);
-                            }
-                            // The edit is performed here and its result
-                            // folded straight back through `settle_edit`,
-                            // so the `◇ edited` note reports what the
-                            // store did rather than what the editor
-                            // finished typing. `Ok(None)` in particular
-                            // means the Connection was not there to
-                            // change, and the frame says so instead of
-                            // claiming an edit that never landed.
-                            Effect::Update { target, draft } => {
-                                let outcome = manage::EditOutcome::from_update(
-                                    store.update(&target.id, &draft),
-                                );
-                                match manage::settle_edit(&state, store.all(), &target, outcome) {
-                                    Ok(next) => state = next,
-                                    // The store refused the edit. Same
-                                    // contract as a refused add and a
-                                    // refused delete: collapse, report,
-                                    // exit non-zero.
-                                    Err(message) => {
-                                        return settle_error(&mut live, canvas, &target, message)
-                                    }
-                                }
-                            }
-                            // The import is performed here and its
-                            // result folded straight back through
-                            // `settle_import`, so the `◇ imported` note
-                            // reports what the store wrote rather than
-                            // what the scan promised — the same
-                            // discipline the delete and add arms keep.
-                            Effect::Import { path } => {
-                                let outcome = manage::ImportOutcome::from_report(
-                                    store.import_ssh_config(&path),
-                                );
-                                match manage::settle_import(&state, outcome) {
-                                    Ok(next) => state = next,
-                                    // The store refused the write. Same
-                                    // contract as a refused add, delete
-                                    // or edit: collapse, report, exit
-                                    // non-zero — never keep painting a
-                                    // list the store cannot vouch for.
-                                    Err(message) => {
-                                        return settle_import_error(&mut live, canvas, message)
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    let (next, synced) = build(store, &state, canvas);
-                    frame = next;
-                    state.selection = synced;
-                    live.redraw(&frame)?;
-                    continue;
-                }
-
-                match key.code {
-                    KeyCode::Esc => return settle(&mut live, canvas, InlineOutcome::Cancelled),
-                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        return settle(&mut live, canvas, InlineOutcome::Cancelled);
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        state.selection = state.selection.saturating_sub(1);
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        state.selection = state.selection.saturating_add(1);
-                    }
-                    KeyCode::Enter => {
-                        if let Some(index) = frame.selected_connection_index() {
-                            let conn = store.all()[index].clone();
-                            live.collapse(&settle_trace(&Settle::Picked(conn.clone()), canvas))?;
-                            return Ok(InlineOutcome::Picked(conn));
-                        }
-                    }
-                    KeyCode::Backspace => {
-                        state.query.pop();
-                    }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        state.query.push(c);
-                    }
-                    _ => continue,
-                }
-
-                let (next, synced) = build(store, &state, canvas);
-                frame = next;
-                state.selection = synced;
-                live.redraw(&frame)?;
+                keystroke(live, store, state, frame, &*paint, key)
             }
-            Event::Resize(width, height) => {
-                let (width, height) = (usize::from(width), usize::from(height));
+            Event::Resize(width, height) => resize(
+                live,
+                store,
+                state,
+                frame,
+                paint,
+                usize::from(width),
+                usize::from(height),
+            ),
+            // A release, a repeat, a mouse: nothing the frame has a use for,
+            // and nothing that repaints.
+            _ => Ok(None),
+        }?;
 
-                // The terminal re-wrapped the rows on the glass before it
-                // told us. Recount before anything acts on the plan, so a
-                // collapse that follows erases the rows that are really
-                // there rather than the ones we remember drawing.
-                live.note_width(width);
-
-                match plan_resize(live.geometry(), width, height) {
-                    ResizePlan::Reopen { .. } => {
-                        canvas = Canvas::detect(width, height);
-                        let (next, synced) = build(store, &state, canvas);
-                        frame = next;
-                        state.selection = synced;
-                        live.reopen(&frame)?;
-                    }
-                    ResizePlan::CancelAndRestore => {
-                        // A cancel is a cancel: it leaves the same trace the
-                        // `Esc` path leaves, so the user is never left
-                        // wondering why the frame disappeared.
-                        return settle(&mut live, canvas, InlineOutcome::Cancelled);
-                    }
-                }
-            }
-            _ => {}
+        if let Some(outcome) = answer {
+            return Ok(outcome);
         }
     }
 }
 
+/// One keystroke, routed by the frame's mode: manage asks [`manage::step`]
+/// what it means, the pick frame decides for itself.
+fn keystroke<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &mut dyn Store,
+    state: &mut ManageState,
+    frame: &mut Frame,
+    paint: &Paint<'_>,
+    key: KeyEvent,
+) -> io::Result<Option<InlineOutcome>> {
+    match paint.mode {
+        FrameMode::Manage => manage_key(live, store, state, frame, paint, key),
+        FrameMode::Pick => pick_key(live, store, state, frame, paint, key),
+    }
+}
+
+/// One keystroke in the manage frame: ask [`manage::step`] what it means,
+/// perform what it asks for through the store, fold every answer straight
+/// back into the state, and repaint.
+///
+/// `Some` is the frame's final answer, already collapsed; `None` means the
+/// frame is still open and freshly painted. The keystrokes are not decided
+/// here — that is [`manage::step`], which is a pure function and therefore
+/// testable — only performed.
+fn manage_key<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &mut dyn Store,
+    state: &mut ManageState,
+    frame: &mut Frame,
+    paint: &Paint<'_>,
+    key: KeyEvent,
+) -> io::Result<Option<InlineOutcome>> {
+    let selected = frame
+        .selected_connection_index()
+        .map(|index| store.all()[index].clone());
+    let step = manage::step(state, key, selected.as_ref());
+    *state = step.state;
+
+    for effect in step.effects {
+        if let Some(outcome) = perform(live, store, state, effect, paint)? {
+            return Ok(Some(outcome));
+        }
+    }
+
+    repaint(live, store, state, frame, paint)
+}
+
+/// Perform one effect the manage step asked for, through the store, and fold
+/// the store's answer straight back into the state.
+///
+/// Every arm keeps the same discipline, and it is stated once here rather than
+/// in each of them: the effect is performed here, its result is folded back
+/// through the matching `manage::settle_*`, and so the note the frame paints
+/// reports what the store did rather than what was asked for. A store that
+/// refuses collapses the frame to `◆ error …` and the process leaves non-zero
+/// — a painted frame the user cannot read the failure in, over a list the
+/// store just proved unreliable, is the state this replaces.
+///
+/// `Some` is the frame's final answer.
+fn perform<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &mut dyn Store,
+    state: &mut ManageState,
+    effect: Effect,
+    paint: &Paint<'_>,
+) -> io::Result<Option<InlineOutcome>> {
+    match effect {
+        Effect::Exit(outcome) => settle(live, paint.canvas, outcome).map(Some),
+        Effect::Delete { target } => perform_delete(live, store, state, target, paint),
+        Effect::Add { draft } => perform_add(live, store, state, draft, paint),
+        Effect::Update { target, draft } => {
+            perform_update(live, store, state, target, draft, paint)
+        }
+        Effect::Import { path } => perform_import(live, store, state, path, paint),
+    }
+}
+
+/// The settled line records the answer the user gave; whether anything was
+/// removed is the store's to tell. `Ok(None)` in particular means nothing was,
+/// and the frame says so.
+fn perform_delete<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &mut dyn Store,
+    state: &mut ManageState,
+    target: Connection,
+    paint: &Paint<'_>,
+) -> io::Result<Option<InlineOutcome>> {
+    let outcome = manage::DeleteOutcome::from_remove(store.remove(&target.id));
+    match manage::settle_delete(state, &target, outcome) {
+        Ok(next) => {
+            *state = next;
+            Ok(None)
+        }
+        Err(message) => settle_error(live, paint.canvas, &target, message).map(Some),
+    }
+}
+
+/// [`Store::add`] is the only implementation of "add a Connection": the frame
+/// does not get its own, so the `◇ added` note can only ever report what the
+/// store answered.
+fn perform_add<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &mut dyn Store,
+    state: &mut ManageState,
+    draft: ConnectionDraft,
+    paint: &Paint<'_>,
+) -> io::Result<Option<InlineOutcome>> {
+    let added = store.add(&draft);
+    match manage::settle_add(state, store.all(), added) {
+        Ok(next) => {
+            *state = next;
+            Ok(None)
+        }
+        Err(message) => settle_add_error(live, paint.canvas, &draft, message).map(Some),
+    }
+}
+
+/// `Ok(None)` means the Connection was not there to change, and the frame says
+/// so instead of claiming an edit the editor never landed.
+fn perform_update<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &mut dyn Store,
+    state: &mut ManageState,
+    target: Connection,
+    draft: ConnectionDraft,
+    paint: &Paint<'_>,
+) -> io::Result<Option<InlineOutcome>> {
+    let outcome = manage::EditOutcome::from_update(store.update(&target.id, &draft));
+    match manage::settle_edit(state, store.all(), &target, outcome) {
+        Ok(next) => {
+            *state = next;
+            Ok(None)
+        }
+        Err(message) => settle_error(live, paint.canvas, &target, message).map(Some),
+    }
+}
+
+/// An import is about a file, not a row: the `◇ imported` note reports how
+/// many stanzas the store wrote, not how many the scan promised.
+fn perform_import<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &mut dyn Store,
+    state: &mut ManageState,
+    path: String,
+    paint: &Paint<'_>,
+) -> io::Result<Option<InlineOutcome>> {
+    let outcome = manage::ImportOutcome::from_report(store.import_ssh_config(&path));
+    match manage::settle_import(state, outcome) {
+        Ok(next) => {
+            *state = next;
+            Ok(None)
+        }
+        Err(message) => settle_import_error(live, paint.canvas, message).map(Some),
+    }
+}
+
+/// One keystroke in the pick frame: the arrows and `j`/`k` move, typing
+/// filters, Enter takes the row under the cursor, and `Esc` or `Ctrl+C`
+/// leaves.
+fn pick_key<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &dyn Store,
+    state: &mut ManageState,
+    frame: &mut Frame,
+    paint: &Paint<'_>,
+    key: KeyEvent,
+) -> io::Result<Option<InlineOutcome>> {
+    if is_cancel(key) {
+        return settle(live, paint.canvas, InlineOutcome::Cancelled).map(Some);
+    }
+
+    if let Some(outcome) = pick_enter(live, store, frame, paint.canvas, key)? {
+        return Ok(Some(outcome));
+    }
+
+    // A key the frame has no use for leaves the glass alone: no rebuild, no
+    // redraw, exactly as it always did.
+    if !pick_motion(state, key) {
+        return Ok(None);
+    }
+
+    repaint(live, store, state, frame, paint)
+}
+
+/// The two keystrokes that mean "not today": `Esc`, and the `Ctrl+C` every
+/// terminal user reaches for when `Esc` is not within reach.
+fn is_cancel(key: KeyEvent) -> bool {
+    key.code == KeyCode::Esc
+        || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+}
+
+/// Enter in the pick frame takes the row under the cursor and leaves with it.
+/// Over nothing there is nothing to take: the frame stays open and repaints,
+/// which is what it did before.
+fn pick_enter<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &dyn Store,
+    frame: &Frame,
+    canvas: Canvas,
+    key: KeyEvent,
+) -> io::Result<Option<InlineOutcome>> {
+    if key.code != KeyCode::Enter {
+        return Ok(None);
+    }
+
+    let Some(index) = frame.selected_connection_index() else {
+        return Ok(None);
+    };
+
+    settle(
+        live,
+        canvas,
+        InlineOutcome::Picked(store.all()[index].clone()),
+    )
+    .map(Some)
+}
+
+/// The pick frame's own keystrokes: the arrows and `j`/`k` move the cursor,
+/// typing filters the list, Backspace shortens the filter. `false` means the
+/// key was not the frame's, and nothing repaints.
+fn pick_motion(state: &mut ManageState, key: KeyEvent) -> bool {
+    match key.code {
+        KeyCode::Up | KeyCode::Char('k') => state.selection = state.selection.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => state.selection = state.selection.saturating_add(1),
+        // Enter over nothing: the frame stays open and repaints unchanged.
+        KeyCode::Enter => {}
+        KeyCode::Backspace => {
+            state.query.pop();
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            state.query.push(c);
+        }
+        _ => return false,
+    }
+
+    true
+}
+
+/// The terminal changed size: recount what fits, then either rebuild the frame
+/// at the new size or collapse it the way a cancel does.
+fn resize<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &dyn Store,
+    state: &mut ManageState,
+    frame: &mut Frame,
+    paint: &mut Paint<'_>,
+    width: usize,
+    height: usize,
+) -> io::Result<Option<InlineOutcome>> {
+    // The terminal re-wrapped the rows on the glass before it told us.
+    // Recount before anything acts on the plan, so a collapse that follows
+    // erases the rows that are really there rather than the ones we remember
+    // drawing.
+    live.note_width(width);
+
+    match plan_resize(live.geometry(), width, height) {
+        ResizePlan::Reopen { .. } => {
+            paint.canvas = Canvas::detect(width, height);
+            *frame = build(store, state, paint);
+            live.reopen(frame)?;
+            Ok(None)
+        }
+        ResizePlan::CancelAndRestore => {
+            // A cancel is a cancel: it leaves the same trace the `Esc` path
+            // leaves, so the user is never left wondering why the frame
+            // disappeared.
+            settle(live, paint.canvas, InlineOutcome::Cancelled).map(Some)
+        }
+    }
+}
+
+/// One place assembles the inputs a manage frame is built from, and one place
+/// re-syncs the selection to whatever the frame clamped it to. Without it
+/// every call site re-typed the quintuple and had to remember that the
+/// selection it passed in is not necessarily the one it gets. The update note
+/// rides along unchanged on every build — it is read once at the edge and
+/// never re-read here, so the paint path touches no cache file and no network
+/// (#39).
+fn build(store: &dyn Store, state: &mut ManageState, paint: &Paint<'_>) -> Frame {
+    let frame = build_frame_with_note(
+        store.all(),
+        &state.query,
+        state.selection,
+        paint.mode,
+        paint.canvas,
+        &FrameFlow::from(&*state),
+        paint.note,
+    );
+    state.selection = frame.selection();
+    frame
+}
+
+/// Rebuild and repaint: what the user sees is always the frame [`build`] just
+/// made, never a remembered one.
+fn repaint<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &dyn Store,
+    state: &mut ManageState,
+    frame: &mut Frame,
+    paint: &Paint<'_>,
+) -> io::Result<Option<InlineOutcome>> {
+    *frame = build(store, state, paint);
+    live.redraw(frame)?;
+    Ok(None)
+}
+
+/// The answer a terminal too short for a frame gets: the cancel trace, drawn
+/// once below the prompt, with no live frame ever painted.
+fn settle_before_open<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    canvas: Canvas,
+) -> io::Result<InlineOutcome> {
+    live.open_settled(&settle_trace(&Settle::Cancelled, canvas))?;
+    Ok(InlineOutcome::Cancelled)
+}
 /// Collapse the frame to the trace this outcome leaves and hand the shell back.
 fn settle<W: Write>(
     live: &mut LiveFrame<'_, W>,
@@ -1025,5 +1283,910 @@ struct RawModeGuard;
 impl Drop for RawModeGuard {
     fn drop(&mut self) {
         let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ImportReport;
+    use crate::theme::ColorSupport;
+    use std::collections::VecDeque;
+
+    // The driver reads its keystrokes and switches the terminal's input mode
+    // through two seams, so a test can hand it a script and a lie instead of a
+    // pty. Everything asserted below is what the frame *did*: what it wrote,
+    // what it asked the store to do, and what it answered with.
+
+    // ── The fakes the two seams accept ─────────────────────────────────────
+
+    fn canvas() -> Canvas {
+        Canvas::new(80, 24, ColorSupport::Truecolor)
+    }
+
+    fn web01() -> Connection {
+        Connection {
+            id: "1".into(),
+            alias: "web-01".into(),
+            host: "10.0.0.4".into(),
+            user: "deploy".into(),
+            port: 22,
+            key_path: None,
+            folder: Some("prod".into()),
+        }
+    }
+
+    fn web02() -> Connection {
+        Connection {
+            alias: "web-02".into(),
+            ..web01()
+        }
+    }
+
+    fn draft() -> ConnectionDraft {
+        ConnectionDraft {
+            alias: "db-01".into(),
+            host: "10.0.0.9".into(),
+            user: "postgres".into(),
+            port: "5432".into(),
+            key_path: String::new(),
+            folder: "prod".into(),
+        }
+    }
+
+    /// A store that answers from a Vec and remembers what it was asked to do.
+    /// `refuse` turns every write into a failure, which is how the collapse
+    /// paths get tested without a disk that misbehaves.
+    struct Ledger {
+        connections: Vec<Connection>,
+        asked: Vec<String>,
+        refuse: Option<String>,
+        imported: usize,
+    }
+
+    fn ledger(connections: Vec<Connection>) -> Ledger {
+        Ledger {
+            connections,
+            asked: Vec::new(),
+            refuse: None,
+            imported: 0,
+        }
+    }
+
+    impl Store for Ledger {
+        fn all(&self) -> &[Connection] {
+            &self.connections
+        }
+
+        fn remove(&mut self, id: &str) -> Result<Option<Connection>, String> {
+            self.asked.push(format!("remove {id}"));
+            if let Some(reason) = &self.refuse {
+                return Err(reason.clone());
+            }
+            let at = self.connections.iter().position(|c| c.id == id);
+            Ok(at.map(|i| self.connections.remove(i)))
+        }
+
+        fn add(&mut self, draft: &ConnectionDraft) -> Result<Connection, String> {
+            self.asked.push(format!("add {}", draft.alias));
+            if let Some(reason) = &self.refuse {
+                return Err(reason.clone());
+            }
+            let conn = Connection {
+                id: format!("minted-{}", self.connections.len()),
+                alias: draft.alias.clone(),
+                host: draft.host.clone(),
+                user: draft.user.clone(),
+                port: draft.port.parse().unwrap_or(22),
+                key_path: none_if_blank(&draft.key_path).map(str::to_string),
+                folder: none_if_blank(&draft.folder).map(str::to_string),
+            };
+            self.connections.push(conn.clone());
+            Ok(conn)
+        }
+
+        fn update(
+            &mut self,
+            existing_id: &str,
+            draft: &ConnectionDraft,
+        ) -> Result<Option<Connection>, String> {
+            self.asked.push(format!("update {existing_id}"));
+            if let Some(reason) = &self.refuse {
+                return Err(reason.clone());
+            }
+            let Some(at) = self.connections.iter().position(|c| c.id == existing_id) else {
+                return Ok(None);
+            };
+            self.connections[at].alias = draft.alias.clone();
+            self.connections[at].host = draft.host.clone();
+            Ok(Some(self.connections[at].clone()))
+        }
+
+        fn import_ssh_config(&mut self, path: &str) -> Result<ImportReport, String> {
+            self.asked.push(format!("import {path}"));
+            if let Some(reason) = &self.refuse {
+                return Err(reason.clone());
+            }
+            Ok(ImportReport {
+                imported: self.imported,
+                failures: Vec::new(),
+            })
+        }
+    }
+
+    /// The events a test drives the frame with, in order. Running out is a
+    /// failure rather than a hang: every script ends with a key that closes
+    /// the frame.
+    struct Scripted {
+        events: VecDeque<Event>,
+    }
+
+    impl Events for Scripted {
+        fn event(&mut self) -> io::Result<Event> {
+            self.events
+                .pop_front()
+                .ok_or_else(|| io::Error::other("the script ran out"))
+        }
+    }
+
+    /// Records that the frame asked for raw mode, without putting the test
+    /// process's own terminal into it.
+    #[derive(Default)]
+    struct RawSwitch {
+        entered: bool,
+    }
+
+    impl RawMode for RawSwitch {
+        fn enter(&mut self) -> io::Result<()> {
+            self.entered = true;
+            Ok(())
+        }
+    }
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ctrl(ch: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL))
+    }
+
+    /// What a driven frame left behind: its answer, everything it wrote, and
+    /// whether it asked for raw mode.
+    struct Driven {
+        outcome: io::Result<InlineOutcome>,
+        glass: String,
+        raw: bool,
+    }
+
+    impl Driven {
+        /// The answer, expecting the frame to have closed cleanly.
+        fn settled(&self) -> &InlineOutcome {
+            self.outcome
+                .as_ref()
+                .expect("the frame closed the way a frame closes")
+        }
+    }
+
+    fn drive_script(
+        events: Vec<Event>,
+        store: &mut Ledger,
+        canvas: Canvas,
+        initial: ManageState,
+        mode: FrameMode,
+    ) -> Driven {
+        let mut out: Vec<u8> = Vec::new();
+        let mut scripted = Scripted {
+            events: events.into(),
+        };
+        let mut raw = RawSwitch::default();
+        let paint = Paint {
+            mode,
+            note: None,
+            canvas,
+        };
+        let outcome = open_and_drive(&mut scripted, &mut raw, &mut out, store, paint, initial);
+        Driven {
+            outcome,
+            glass: String::from_utf8(out).expect("the frame writes text"),
+            raw: raw.entered,
+        }
+    }
+
+    /// The glass with the control sequences taken out: what the user reads.
+    fn plain(glass: &str) -> String {
+        let mut out = String::new();
+        let mut chars = glass.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c != '\x1b' {
+                out.push(c);
+                continue;
+            }
+            // A CSI sequence is its introducer, its parameter bytes, and a
+            // final byte in `@`..`~`. Skipping to the final byte is what
+            // leaves the text the user reads.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+            }
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    // ── Opening ────────────────────────────────────────────────────────────
+
+    /// A terminal too short to host a frame never gets one, and never gets raw
+    /// mode or a hidden cursor either: it gets the cancel trace and its prompt
+    /// back, which is the whole difference between a refusal and a degenerate
+    /// frame.
+    #[test]
+    fn a_terminal_too_short_for_a_frame_never_gets_one() {
+        let mut store = ledger(vec![web01()]);
+        let short = Canvas::new(80, 4, ColorSupport::Monochrome);
+        let driven = drive_script(
+            vec![],
+            &mut store,
+            short,
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(driven.settled(), &InlineOutcome::Cancelled);
+        assert!(
+            !driven.raw,
+            "a terminal that never got a frame never got raw mode either"
+        );
+        let glass = plain(&driven.glass);
+        assert!(
+            glass.contains("cancelled"),
+            "the settle line is still the whole answer: {glass}"
+        );
+        assert!(
+            !glass.contains('│'),
+            "no frame chrome was ever drawn: {glass}"
+        );
+    }
+
+    // ── The pick frame ─────────────────────────────────────────────────────
+
+    #[test]
+    fn escape_in_the_pick_frame_collapses_it_and_leaves_cancelled() {
+        let mut store = ledger(vec![web01()]);
+        let driven = drive_script(
+            vec![key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(driven.settled(), &InlineOutcome::Cancelled);
+        assert!(driven.raw, "a live frame does ask for raw mode");
+        let glass = plain(&driven.glass);
+        assert!(
+            glass.trim_end().ends_with("◆ cancelled"),
+            "the settle line is the last thing the frame wrote: {glass}"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_in_the_pick_frame_leaves_the_way_escape_does() {
+        let mut store = ledger(vec![web01()]);
+        let escape = drive_script(
+            vec![key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+        let mut store = ledger(vec![web01()]);
+        let interrupted = drive_script(
+            vec![ctrl('c')],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(interrupted.settled(), &InlineOutcome::Cancelled);
+        assert_eq!(
+            plain(&escape.glass),
+            plain(&interrupted.glass),
+            "one cancel, however it was typed, leaves one trace"
+        );
+    }
+
+    #[test]
+    fn typing_filters_and_enter_takes_the_row_under_the_cursor() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let driven = drive_script(
+            vec![key(KeyCode::Char('w')), key(KeyCode::Enter)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(web01()),
+            "Enter takes the row under the cursor"
+        );
+        let glass = plain(&driven.glass);
+        assert!(glass.contains("picked"), "got: {glass}");
+        assert!(store.asked.is_empty(), "picking writes nothing");
+    }
+
+    #[test]
+    fn enter_over_nothing_keeps_the_frame_open() {
+        let mut store = ledger(Vec::new());
+        let driven = drive_script(
+            vec![key(KeyCode::Enter), key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Cancelled,
+            "Enter over an empty list is not a pick"
+        );
+    }
+
+    #[test]
+    fn an_unbound_key_in_the_pick_frame_writes_nothing() {
+        let mut store = ledger(vec![web01()]);
+        let alone = drive_script(
+            vec![key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+        let mut store = ledger(vec![web01()]);
+        let paged = drive_script(
+            vec![key(KeyCode::PageDown), key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            plain(&alone.glass),
+            plain(&paged.glass),
+            "a key the frame has no use for leaves the glass alone"
+        );
+    }
+
+    #[test]
+    fn a_key_that_is_not_a_press_is_not_a_keystroke() {
+        let mut store = ledger(vec![web01()]);
+        let release = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Char('w'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+        let driven = drive_script(
+            vec![release, key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(driven.settled(), &InlineOutcome::Cancelled);
+    }
+
+    // ── The manage frame ───────────────────────────────────────────────────
+
+    #[test]
+    fn escape_in_the_manage_frame_leaves_the_frame_cancelled() {
+        let mut store = ledger(vec![web01()]);
+        let driven = drive_script(
+            vec![key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Manage,
+        );
+
+        assert_eq!(driven.settled(), &InlineOutcome::Cancelled);
+        assert!(plain(&driven.glass).contains("cancelled"));
+    }
+
+    /// The delete travels as an effect, is performed through the store, and
+    /// the note the frame paints afterwards reports what the store did.
+    #[test]
+    fn a_confirmed_delete_is_performed_and_the_frame_says_so() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let driven = drive_script(
+            vec![ctrl('x'), key(KeyCode::Char('y')), key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Manage,
+        );
+
+        assert_eq!(driven.settled(), &InlineOutcome::Cancelled);
+        assert_eq!(store.asked, vec!["remove 1".to_string()]);
+        assert_eq!(store.connections.len(), 1, "the store really lost the row");
+        let glass = plain(&driven.glass);
+        assert!(glass.contains("deleted"), "the note names the act: {glass}");
+    }
+
+    /// A store that refuses the delete does not keep the frame painting a
+    /// list it cannot vouch for: the frame collapses and the command leaves
+    /// non-zero.
+    #[test]
+    fn a_refused_delete_collapses_the_frame_and_leaves_an_error() {
+        let mut store = ledger(vec![web01()]);
+        store.refuse = Some("disk on fire".into());
+        let driven = drive_script(
+            vec![ctrl('x'), key(KeyCode::Char('y'))],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Manage,
+        );
+
+        let err = driven
+            .outcome
+            .expect_err("a refused write is a failed command");
+        assert!(format!("{err}").contains("disk on fire"), "got: {err}");
+        assert!(
+            plain(&driven.glass).contains("error"),
+            "the glass says so too"
+        );
+    }
+
+    // ── The effects, one at a time ──────────────────────────────────────────
+
+    /// Perform one effect against a store and hand back what the frame
+    /// answered, the state it settled into, and what it wrote.
+    fn perform_effect(
+        effect: Effect,
+        store: &mut Ledger,
+    ) -> (io::Result<Option<InlineOutcome>>, ManageState, String) {
+        let mut out: Vec<u8> = Vec::new();
+        let mut live = LiveFrame::new(&mut out);
+        let mut state = ManageState::new();
+        let paint = Paint {
+            mode: FrameMode::Manage,
+            note: None,
+            canvas: canvas(),
+        };
+        let answer = perform(&mut live, store, &mut state, effect, &paint);
+        (
+            answer,
+            state,
+            String::from_utf8(out).expect("the frame writes text"),
+        )
+    }
+
+    #[test]
+    fn an_add_effect_writes_through_the_store_and_names_the_new_row() {
+        let mut store = ledger(vec![web01()]);
+        let (answer, state, glass) = perform_effect(Effect::Add { draft: draft() }, &mut store);
+
+        assert!(answer.expect("the store took the add").is_none());
+        assert_eq!(store.asked, vec!["add db-01".to_string()]);
+        assert!(plain(&glass).is_empty(), "an add repaints nothing here");
+        let _ = state;
+    }
+
+    #[test]
+    fn a_refused_add_collapses_the_frame_and_leaves_an_error() {
+        let mut store = ledger(vec![web01()]);
+        store.refuse = Some("read-only file system".into());
+        let (answer, _, glass) = perform_effect(Effect::Add { draft: draft() }, &mut store);
+
+        let err = answer.expect_err("a refused add is a failed command");
+        assert!(format!("{err}").contains("read-only file system"));
+        assert!(plain(&glass).contains("error"), "the glass says so too");
+    }
+
+    #[test]
+    fn an_update_effect_keeps_the_id_and_reports_the_change() {
+        let mut store = ledger(vec![web01()]);
+        let (answer, _, glass) = perform_effect(
+            Effect::Update {
+                target: web01(),
+                draft: ConnectionDraft {
+                    alias: "web-99".into(),
+                    ..ConnectionDraft::from_connection(&web01())
+                },
+            },
+            &mut store,
+        );
+
+        assert!(answer.expect("the store took the edit").is_none());
+        assert_eq!(store.asked, vec!["update 1".to_string()]);
+        assert_eq!(store.connections[0].alias, "web-99");
+        assert!(plain(&glass).is_empty());
+    }
+
+    #[test]
+    fn a_refused_update_collapses_the_frame_and_leaves_an_error() {
+        let mut store = ledger(vec![web01()]);
+        store.refuse = Some("no space left".into());
+        let (answer, _, glass) = perform_effect(
+            Effect::Update {
+                target: web01(),
+                draft: ConnectionDraft::from_connection(&web01()),
+            },
+            &mut store,
+        );
+
+        let err = answer.expect_err("a refused edit is a failed command");
+        assert!(format!("{err}").contains("no space left"));
+        assert!(plain(&glass).contains("error"));
+    }
+
+    #[test]
+    fn an_import_effect_writes_the_stanzas_and_reports_the_count() {
+        let mut store = ledger(Vec::new());
+        store.imported = 3;
+        let (answer, state, _) = perform_effect(
+            Effect::Import {
+                path: "/home/dev/.ssh/config".into(),
+            },
+            &mut store,
+        );
+
+        assert!(answer.expect("the store took the import").is_none());
+        assert_eq!(
+            store.asked,
+            vec!["import /home/dev/.ssh/config".to_string()]
+        );
+        assert!(
+            matches!(
+                state.trace,
+                Some(manage::Trace::Imported { imported: 3, .. })
+            ),
+            "the note reports what the store wrote"
+        );
+    }
+
+    #[test]
+    fn a_refused_import_collapses_the_frame_and_leaves_an_error() {
+        let mut store = ledger(Vec::new());
+        store.refuse = Some("permission denied".into());
+        let (answer, _, glass) = perform_effect(
+            Effect::Import {
+                path: "/home/dev/.ssh/config".into(),
+            },
+            &mut store,
+        );
+
+        let err = answer.expect_err("a refused import is a failed command");
+        assert!(format!("{err}").contains("permission denied"));
+        assert!(
+            plain(&glass).contains("import failed"),
+            "the glass says what failed: {glass}"
+        );
+    }
+
+    #[test]
+    fn an_exit_effect_settles_the_frame_with_its_outcome() {
+        let mut store = ledger(vec![web01()]);
+        let (answer, _, glass) =
+            perform_effect(Effect::Exit(InlineOutcome::Picked(web01())), &mut store);
+
+        assert_eq!(
+            answer.expect("an exit is not a failure"),
+            Some(InlineOutcome::Picked(web01()))
+        );
+        assert!(plain(&glass).contains("picked"));
+    }
+
+    // ── Resize ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn a_narrower_terminal_rebuilds_the_frame_where_it_stood() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let driven = drive_script(
+            vec![
+                Event::Resize(60, 24),
+                key(KeyCode::Char('w')),
+                key(KeyCode::Esc),
+            ],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(driven.settled(), &InlineOutcome::Cancelled);
+        assert!(plain(&driven.glass).contains("cancelled"));
+    }
+
+    /// A terminal that shrinks past what a frame needs is a cancel, and it
+    /// leaves the same trace `Esc` leaves: the user is never left wondering
+    /// why the frame disappeared.
+    #[test]
+    fn a_terminal_too_short_after_a_resize_cancels_the_frame() {
+        let mut store = ledger(vec![web01()]);
+        let driven = drive_script(
+            vec![Event::Resize(80, 2)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(driven.settled(), &InlineOutcome::Cancelled);
+        assert!(plain(&driven.glass).contains("cancelled"));
+    }
+
+    // ── The pick frame's own keystrokes ────────────────────────────────────
+    //
+    // The pick frame decides its keys for itself rather than asking
+    // `manage::step`, so nothing above this line proves they work. Each one is
+    // asserted by what the frame *does* with the key: which row the cursor
+    // ends on, what the filter holds, and whether the frame is still open.
+
+    /// Typing narrows the list, which is the whole reason the frame is open.
+    /// Asserted by what `Enter` takes: if the keystroke never reached the
+    /// filter, `Enter` picks the first row of the *unfiltered* list and looks
+    /// exactly like success.
+    #[test]
+    fn typing_narrows_the_list_to_what_matches() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let driven = drive_script(
+            vec![key(KeyCode::Char('2')), key(KeyCode::Enter)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(web02()),
+            "`2` matches only web-02, so that is the row Enter takes"
+        );
+    }
+
+    /// A chord is not a letter. `Ctrl+A` means *add* in the manage frame and
+    /// nothing in the pick frame, but it must never mean *type an `a`*: a chord
+    /// swallowed as text filters the list to something the user never typed,
+    /// and the frame is now lying about the query.
+    #[test]
+    fn a_chord_is_not_a_letter() {
+        let mut store = ledger(vec![web01()]);
+        let alone = drive_script(
+            vec![key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+        let mut store = ledger(vec![web01()]);
+        let chorded = drive_script(
+            vec![ctrl('a'), key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            plain(&chorded.glass),
+            plain(&alone.glass),
+            "Ctrl+A is not the letter a: the frame must not repaint as if it were"
+        );
+    }
+
+    /// The cursor moves with the arrows and with `j`/`k`, and both ways: a
+    /// frame that could only go down would strand the first row, and one that
+    /// could only go up would strand the last.
+    #[test]
+    fn the_cursor_walks_both_ways_with_arrows_and_with_j_k() {
+        let picked = |keys: Vec<Event>| {
+            let mut store = ledger(vec![web01(), web02()]);
+            let mut script = keys;
+            script.push(key(KeyCode::Enter));
+            let driven = drive_script(
+                script,
+                &mut store,
+                canvas(),
+                ManageState::new(),
+                FrameMode::Pick,
+            );
+            driven.settled().clone()
+        };
+
+        assert_eq!(
+            picked(vec![key(KeyCode::Down)]),
+            InlineOutcome::Picked(web02()),
+            "Down moves the cursor to the next row"
+        );
+        assert_eq!(
+            picked(vec![key(KeyCode::Char('j'))]),
+            InlineOutcome::Picked(web02()),
+            "`j` is Down"
+        );
+        assert_eq!(
+            picked(vec![key(KeyCode::Down), key(KeyCode::Up)]),
+            InlineOutcome::Picked(web01()),
+            "Up moves the cursor back"
+        );
+        assert_eq!(
+            picked(vec![key(KeyCode::Char('j')), key(KeyCode::Char('k'))]),
+            InlineOutcome::Picked(web01()),
+            "`k` is Up"
+        );
+    }
+
+    /// Backspace shortens the filter, so the rows that were filtered away come
+    /// back. Asserted by what is under the cursor afterwards, because a
+    /// Backspace that did nothing would still leave a frame that looks fine.
+    #[test]
+    fn backspace_shortens_the_filter_and_brings_the_rows_back() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let driven = drive_script(
+            vec![
+                key(KeyCode::Char('2')),
+                key(KeyCode::Backspace),
+                key(KeyCode::Enter),
+            ],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(web01()),
+            "the filter is empty again, so the first row of the whole list is under the cursor"
+        );
+    }
+
+    /// `Ctrl+C` is the cancel chord; not every chord is. `Ctrl+Backspace` is
+    /// still a Backspace, and a frame that read every chord as *give up* would
+    /// throw away the work of a filter every time a user reaches for the
+    /// word-delete they use everywhere else.
+    #[test]
+    fn a_chord_over_the_filter_is_not_a_cancel() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let driven = drive_script(
+            vec![
+                key(KeyCode::Char('2')),
+                Event::Key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+                key(KeyCode::Enter),
+            ],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(web01()),
+            "Ctrl+Backspace shortens the filter; only Ctrl+C leaves the frame"
+        );
+    }
+
+    /// Enter with nothing to take leaves the frame open and repainted: the key
+    /// was the frame's, it just had nothing to act on. A frame that swallowed
+    /// it silently would look frozen, which is how a user decides the program
+    /// has hung.
+    #[test]
+    fn enter_over_nothing_answers_with_a_repaint() {
+        let mut store = ledger(Vec::new());
+        let alone = drive_script(
+            vec![key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+        let mut store = ledger(Vec::new());
+        let pressed = drive_script(
+            vec![key(KeyCode::Enter), key(KeyCode::Esc)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(pressed.settled(), &InlineOutcome::Cancelled);
+        assert!(
+            plain(&pressed.glass).len() > plain(&alone.glass).len(),
+            "Enter over nothing still answers: the frame repaints rather than ignoring the key"
+        );
+    }
+
+    /// A key *released* is not a key pressed. Terminals in kitty-keyboard mode
+    /// report releases, and a release read as a press would move the cursor
+    /// twice for one keystroke.
+    #[test]
+    fn a_released_key_is_not_a_keystroke() {
+        let mut store = ledger(vec![web01(), web02()]);
+        let release = Event::Key(KeyEvent::new_with_kind(
+            KeyCode::Down,
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        ));
+        let driven = drive_script(
+            vec![release, key(KeyCode::Enter)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(web01()),
+            "the cursor never moved, so Enter still takes the first row"
+        );
+    }
+
+    /// A refusal writes a refusal and nothing else. There are no live rows to
+    /// delete on this path, and asking for zero of them is not harmless:
+    /// `ESC [ 0 M` means *one line* to a terminal that reads a zero parameter
+    /// as the ECMA-48 default, so the frame could eat the user's prompt on its
+    /// way out of a terminal it never drew in.
+    #[test]
+    fn a_refusal_deletes_no_rows_it_never_drew() {
+        let mut store = ledger(vec![web01()]);
+        let short = Canvas::new(80, 4, ColorSupport::Monochrome);
+        let driven = drive_script(
+            vec![],
+            &mut store,
+            short,
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(driven.settled(), &InlineOutcome::Cancelled);
+        assert!(
+            !driven.glass.contains("\u{1b}[0M"),
+            "the refusal must not ask to delete rows it never drew: {:?}",
+            driven.glass
+        );
+    }
+
+    // ── The two small helpers the settle lines are built from ──────────────
+
+    /// A blank is not a value: `key_path: ""` must not be written to the file
+    /// as an empty path, and a path of any length must survive untouched.
+    #[test]
+    fn a_blank_field_holds_no_value_at_all() {
+        assert_eq!(none_if_blank(""), None, "empty is not a value");
+        assert_eq!(
+            none_if_blank("web-01"),
+            Some("web-01"),
+            "a value comes back as it was given"
+        );
+    }
+
+    /// A reason that fits is the reason; one that does not is cut with the
+    /// ellipsis that tells the reader there was more; one with no room at all
+    /// is dropped, because `◆ error  web-01` already says what happened and
+    /// the full text is on stderr.
+    #[test]
+    fn a_reason_is_kept_whole_cut_with_an_ellipsis_or_dropped() {
+        assert_eq!(fit_reason("disk on fire", 10, 40), "disk on fire");
+        assert_eq!(
+            fit_reason("disk on fire", 25, 40),
+            "disk on fi…",
+            "the cut is marked, so a truncated reason is not mistaken for the whole one"
+        );
+        assert_eq!(
+            fit_reason("disk on fire", 36, 40),
+            "",
+            "with no room for even one character the reason is dropped, not smeared"
+        );
     }
 }

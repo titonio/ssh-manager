@@ -62,12 +62,28 @@ pub enum ApplyResult {
 /// Windows outright, and `install.sh` refuses Windows before anyone gets a
 /// binary to update. Fixing the name here would imply the swap works, which is
 /// the claim nobody has tested.
+/// Where the release API is asked.
+///
+/// `https://api.github.com` unless `SSHM_GITHUB_API_URL` names another one,
+/// which is how a GitHub Enterprise install asks its own: the endpoint moves
+/// and nothing else does — release selection stays GitHub's, which is the
+/// whole reason #46 stopped ordering releases by hand.
+///
+/// Set to the API root with no trailing slash, e.g. `https://github.example
+/// .com/api/v3`. It redirects the question *and* the answer's asset URLs,
+/// because the assets come from the same response: an install that can ask
+/// its own API can download from its own API.
+fn api_base_url() -> Option<String> {
+    std::env::var("SSHM_GITHUB_API_URL").ok()
+}
+
 fn update_config(
     current_version: &str,
 ) -> Result<Box<dyn self_github_update_enhanced::update::ReleaseUpdate>, String> {
     let asset_name = get_platform_asset_name()?;
 
-    Update::configure()
+    let mut builder = Update::configure();
+    builder
         .repo_owner("titonio")
         .repo_name("ssh-manager")
         .bin_name("sshm")
@@ -76,7 +92,11 @@ fn update_config(
         .current_version(current_version)
         .no_confirm(true)
         .show_output(false)
-        .show_download_progress(true)
+        .show_download_progress(true);
+    if let Some(base) = api_base_url() {
+        builder.with_url(&base);
+    }
+    builder
         .build()
         .map_err(|e| format!("Failed to build update configuration: {e}"))
 }
@@ -182,38 +202,61 @@ fn replace_target() -> Result<PathBuf, String> {
 pub fn apply_update() -> ApplyResult {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
 
-    // First, and before anything else touches the network: a checkout's
-    // binary is not ours to rewrite.
+    match preflight() {
+        Err(result) => result,
+        Ok(()) => report(build_update(&current_version), current_version),
+    }
+}
+
+/// Everything that has to be true before a single byte is downloaded.
+///
+/// Two questions, in this order, because each one is cheaper than the next
+/// and a refusal is worth the most when it costs the least:
+///
+/// * Is this a checkout? A checkout's binary is not ours to rewrite: under
+///   `cargo run -- update` the resolved executable is a build artefact, and
+///   replacing it would overwrite the developer's own work with a release
+///   build.
+/// * Can the install location be written at all? Asking before the download
+///   is what makes "nothing was downloaded" true, and it is the only way the
+///   diagnostic can name the path. No second install location is offered as a
+///   workaround — a shadowed binary reproducing "`which sshm` and
+///   `sshm --version` disagree" is the confusion this command exists to end.
+fn preflight() -> Result<(), ApplyResult> {
     if let Some(manifest_dir) = dev_build() {
-        return ApplyResult::DevBuild { manifest_dir };
+        return Err(ApplyResult::DevBuild { manifest_dir });
     }
 
-    // Then: can the install location be written at all? Asking before the
-    // download is what makes "nothing was downloaded" true, and it is the
-    // only way the diagnostic can name the path. No second install location
-    // is offered as a workaround — a shadowed binary reproducing "`which
-    // sshm` and `sshm --version` disagree" is the confusion this command
-    // exists to end.
-    let target = match replace_target() {
-        Ok(target) => target,
-        Err(e) => return ApplyResult::Error(e),
-    };
+    let target = replace_target().map_err(ApplyResult::Error)?;
     if !install_dir_writable(&target) {
-        return ApplyResult::Unwritable { path: target };
+        return Err(ApplyResult::Unwritable { path: target });
     }
 
-    let update = match update_config(&current_version) {
-        Ok(update) => update,
-        Err(e) => return ApplyResult::Error(e),
-    };
+    Ok(())
+}
 
-    match update.update() {
+/// Ask the library to fetch and install the latest release.
+///
+/// The only lines in this module that touch the network or write a binary,
+/// which is why they are kept apart from the two functions that decide
+/// *whether* to and the one that says what came back.
+fn build_update(current_version: &str) -> Result<Status, String> {
+    let update = update_config(current_version)?;
+    update.update().map_err(|e| e.to_string())
+}
+
+/// The library's answer, in the words this command reports in.
+///
+/// `Applied` needs the version it came *from*, which only the caller knows:
+/// the library reports where it got to, not where it started.
+fn report(answer: Result<Status, String>, current_version: String) -> ApplyResult {
+    match answer {
         Ok(Status::UpToDate(version)) => ApplyResult::UpToDate { version },
         Ok(Status::Updated(version)) => ApplyResult::Applied {
             from: current_version,
             to: version,
         },
-        Err(e) => ApplyResult::Error(e.to_string()),
+        Err(e) => ApplyResult::Error(e),
     }
 }
 
@@ -395,22 +438,40 @@ fn get_platform_asset_name() -> Result<String, String> {
 /// guards the cached note: something unparseable is not newer, and a silent
 /// answer beats one that invents a release.
 fn check_latest_version(current_version: &str) -> UpdateResult {
-    let update = match update_config(current_version) {
-        Ok(update) => update,
-        Err(e) => {
-            let _ = write_cache(None);
-            return UpdateResult::Error(e);
-        }
-    };
+    settle_release(current_version, latest_release(current_version))
+}
 
-    match update.get_latest_release() {
-        Ok(release) => {
-            if is_newer(&release.version, current_version) {
-                let _ = write_cache(Some(release.version.clone()));
-                return UpdateResult::UpdateAvailable {
-                    version: release.version,
-                };
-            }
+/// Which release GitHub calls the latest, as a version string.
+///
+/// The question and nothing else: no archive is downloaded and no binary is
+/// written. **Check for Updates** answers; **Apply Update** acts, and the two
+/// are different commands (#46).
+fn latest_release(current_version: &str) -> Result<String, String> {
+    let update = update_config(current_version)?;
+    update
+        .get_latest_release()
+        .map(|release| release.version)
+        .map_err(|e| e.to_string())
+}
+
+/// Fold the answer into the cache and into the result the surface prints.
+///
+/// The cache records *every* answer, including the failures: a check that
+/// could not be made is not a check that found nothing, and the note has to
+/// stop claiming an update that may have been withdrawn. Clearing it on the
+/// two negative answers is what keeps a stale `new_version` from outliving the
+/// request that produced it.
+///
+/// Whether the release is newer is `is_newer` again, the same quiet rule that
+/// guards the cached note: something unparseable is not newer, and a silent
+/// answer beats one that invents a release.
+fn settle_release(current_version: &str, answer: Result<String, String>) -> UpdateResult {
+    match answer {
+        Ok(version) if is_newer(&version, current_version) => {
+            let _ = write_cache(Some(version.clone()));
+            UpdateResult::UpdateAvailable { version }
+        }
+        Ok(_) => {
             let _ = write_cache(None);
             UpdateResult::NoUpdate
         }
@@ -419,7 +480,7 @@ fn check_latest_version(current_version: &str) -> UpdateResult {
             // The reason, unadorned: the surface that prints this supplies its
             // own framing, and "Error checking for updates: Failed to check
             // for updates: …" is what doubling it reads like.
-            UpdateResult::Error(e.to_string())
+            UpdateResult::Error(e)
         }
     }
 }
@@ -1071,6 +1132,140 @@ mod tests {
             check_for_update(),
             UpdateResult::UpdateAvailable { version } if version == "0.9.9"
         ));
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    /// The other half of the cache gate: a fresh check that found *nothing*
+    /// answers from the file too. The absence of an update is an answer, and
+    /// it is cached as one — otherwise every frame that paints would ask
+    /// GitHub again.
+    #[test]
+    #[serial]
+    fn check_for_update_answers_no_update_from_a_fresh_empty_cache() {
+        let _not_a_checkout = NotACheckout::take();
+
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+        write_cache(None).unwrap();
+
+        assert!(
+            matches!(check_for_update(), UpdateResult::NoUpdate),
+            "a cached check that found nothing is `NoUpdate`, not a fresh request"
+        );
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    /// No cache file at all is not an error. A first run, or a run after the
+    /// config directory was cleared, answers `NoUpdate` and asks nothing of
+    /// the network — the note is allowed to be absent, never to be late.
+    #[test]
+    #[serial]
+    fn check_for_update_with_no_cache_at_all_is_no_update() {
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+
+        assert!(
+            matches!(check_for_update(), UpdateResult::NoUpdate),
+            "a missing cache is silence, not a failure"
+        );
+    }
+
+    /// The three answers the library can give, in the words **Apply Update**
+    /// reports them in. Checked offline on purpose: these are the `Status`
+    /// values the library would have produced, so the wording is proved
+    /// without downloading a binary.
+    #[test]
+    fn apply_update_reports_the_librarys_three_answers_in_words() {
+        assert_eq!(
+            report(Ok(Status::UpToDate("0.2.0".into())), "0.1.13".into()),
+            ApplyResult::UpToDate {
+                version: "0.2.0".into()
+            },
+            "already newest is a success that wrote nothing"
+        );
+        assert_eq!(
+            report(Ok(Status::Updated("0.2.0".into())), "0.1.13".into()),
+            ApplyResult::Applied {
+                from: "0.1.13".into(),
+                to: "0.2.0".into()
+            },
+            "the swap reports where it started as well as where it got to"
+        );
+        assert_eq!(
+            report(Err("no network".into()), "0.1.13".into()),
+            ApplyResult::Error("no network".into()),
+            "the reason is passed through as it arrived"
+        );
+    }
+
+    /// A newer release is cached *and* returned. Both, because the note a
+    /// later frame paints comes from the file rather than from this call's
+    /// return value: write one and not the other and the next `sshm` says
+    /// nothing about what this one learned.
+    #[test]
+    #[serial]
+    fn a_newer_release_is_cached_and_returned_so_the_next_frame_can_say_it() {
+        let _not_a_checkout = NotACheckout::take();
+        let cache_path = get_cache_file_path().unwrap();
+        fs::remove_file(&cache_path).ok();
+
+        assert!(matches!(
+            settle_release("0.1.0", Ok("9.9.9".into())),
+            UpdateResult::UpdateAvailable { version } if version == "9.9.9"
+        ));
+        assert_eq!(
+            read_cache().unwrap().unwrap().new_version,
+            Some("9.9.9".into()),
+            "and the answer is on disk for the next run"
+        );
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    /// Not newer — the same version, or something unparseable — is `NoUpdate`,
+    /// and the cache is cleared so a note left by an earlier check cannot
+    /// outlive the check that contradicts it.
+    #[test]
+    #[serial]
+    fn settle_release_clears_the_cache_when_nothing_is_newer() {
+        let _not_a_checkout = NotACheckout::take();
+        let cache_path = get_cache_file_path().unwrap();
+        write_cache(Some("9.9.9".into())).unwrap();
+
+        assert!(matches!(
+            settle_release("0.1.0", Ok("0.1.0".into())),
+            UpdateResult::NoUpdate
+        ));
+        assert_eq!(
+            read_cache().unwrap().unwrap().new_version,
+            None,
+            "the stale note is gone, not left to age out"
+        );
+
+        fs::remove_file(&cache_path).ok();
+    }
+
+    /// A failed check clears the cache too — a check that could not be made
+    /// must not leave an old answer looking current — and the reason is
+    /// passed through unadorned.
+    #[test]
+    #[serial]
+    fn a_failed_check_clears_the_cache_so_an_old_answer_does_not_look_current() {
+        let _not_a_checkout = NotACheckout::take();
+        let cache_path = get_cache_file_path().unwrap();
+        write_cache(Some("9.9.9".into())).unwrap();
+
+        assert!(matches!(
+            settle_release("0.1.0", Err("github is having a day".into())),
+            UpdateResult::Error(reason) if reason == "github is having a day"
+        ));
+        assert_eq!(
+            read_cache().unwrap().unwrap().new_version,
+            None,
+            "a failed check does not get to keep the previous answer"
+        );
 
         fs::remove_file(&cache_path).ok();
     }
@@ -2316,7 +2511,14 @@ mod tests {
 
         // `.update()` is the library call that downloads, extracts and
         // replaces the binary. Exactly one place in this module may reach it,
-        // and that place is Apply Update.
+        // and that place is in the Apply Update half of the file: the helper
+        // the command calls to act, never the half that only asks.
+        //
+        // The name this assertion checks moved once — `apply_update` was split
+        // and the swap came to live in `build_update`. What the gate is about
+        // is the role, not the spelling: the function that swaps is the one
+        // Apply Update calls, and only Apply Update calls it. The two
+        // assertions below are what hold that now.
         assert_eq!(
             code.matches(".update()").count(),
             1,
@@ -2325,8 +2527,24 @@ mod tests {
         let at = code.find(".update()").unwrap();
         let enclosing = code[..at].rsplit("fn ").next().unwrap();
         assert!(
-            enclosing.starts_with("apply_update"),
-            "the swap belongs in apply_update, not in {enclosing}"
+            enclosing.starts_with("build_update"),
+            "the swap belongs in the Apply Update half, not in {enclosing}"
+        );
+        // And the helper that holds it is reachable from one command and one
+        // only: `fn build_update` is the definition, so two mentions is
+        // exactly one call site — Apply Update's.
+        assert_eq!(
+            code.matches("build_update(").count(),
+            2,
+            "the swap must be reachable from Apply Update and from nowhere else"
+        );
+        let applied = code[code.find("fn apply_update").unwrap()..]
+            .split("fn ")
+            .nth(1)
+            .unwrap();
+        assert!(
+            applied.contains("build_update("),
+            "and the one command that reaches the swap is Apply Update"
         );
 
         // And the hand-rolled transport is gone, not merely unused: the
@@ -2363,5 +2581,236 @@ mod tests {
                 "version literal {stale} in code: {offenders:?}"
             );
         }
+    }
+
+    /// Points `dirs::config_dir()` at a directory of the test's own, so the
+    /// cache being read is one the test wrote. Restored on the way out, in the
+    /// same spirit as `NotACheckout`: an env change that leaks into another
+    /// test is a flake waiting for an ordering.
+    struct ConfigHome(Option<std::ffi::OsString>);
+
+    impl ConfigHome {
+        fn pointing_at(path: &std::path::Path) -> Self {
+            let previous = std::env::var_os("XDG_CONFIG_HOME");
+            std::env::set_var("XDG_CONFIG_HOME", path);
+            Self(previous)
+        }
+    }
+
+    impl Drop for ConfigHome {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    /// A cache recording a check made at `last_check`, written where the code
+    /// under test will look for it. Named apart from the production
+    /// `write_cache`, which is the thing that *decides* to record an answer.
+    fn seed_cache(dir: &std::path::Path, last_check: u64) {
+        let cache = CacheData {
+            last_check,
+            new_version: None,
+        };
+        fs::write(
+            dir.join("update_cache.json"),
+            serde_json::to_string(&cache).expect("a cache that serialises"),
+        )
+        .expect("the cache file is writable");
+    }
+
+    /// The binary an update replaces is the one that is running. An empty path
+    /// here is an update that writes nowhere — or, once a `join` gets hold of
+    /// it, somewhere nobody meant to write at all.
+    #[test]
+    fn the_replacement_target_is_the_running_binary() {
+        let target = replace_target().expect("the running binary can be located");
+        let exe = std::env::current_exe().expect("the harness knows which binary is running");
+
+        assert_eq!(
+            fs::canonicalize(&target).expect("the target is a real file"),
+            fs::canonicalize(&exe).expect("the running binary is a real file"),
+            "the update has to land on the binary the reader is standing in"
+        );
+    }
+
+    /// A writable install directory passes the preflight, and passing is the
+    /// only thing that lets the update download anything. The question the
+    /// preflight asks is "is it *not* writable"; invert that and every healthy
+    /// machine is told its own directory is unwritable, while every broken one
+    /// is waved through to fail halfway through swapping its binary.
+    #[test]
+    #[serial]
+    fn a_writable_install_directory_passes_the_preflight() {
+        let _not_a_checkout = NotACheckout::take();
+
+        let outcome = preflight();
+        assert!(
+            outcome.is_ok(),
+            "the directory this test binary sits in is writable, so the preflight must say so: {outcome:?}"
+        );
+    }
+
+    /// The once-a-day rule at its boundary: a check older than the day is due,
+    /// one made an hour ago is not. The comparison is between two timestamps,
+    /// and get it wrong and the note either never appears again or reappears
+    /// on every single start of the program.
+    #[test]
+    #[serial]
+    fn a_check_older_than_the_cache_duration_is_due_and_a_fresh_one_is_not() {
+        let _not_a_checkout = NotACheckout::take();
+        let home = tempfile::tempdir().expect("a config home to point at");
+        let _config_home = ConfigHome::pointing_at(home.path());
+
+        let dir = get_cache_dir().expect("the cache directory the code reads");
+        assert!(
+            dir.starts_with(home.path()),
+            "the test must not be reading anyone's real update cache: {dir:?}"
+        );
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("a clock past 1970")
+            .as_secs();
+
+        seed_cache(&dir, now - (CACHE_DURATION_SECS + 100));
+        assert_eq!(
+            should_check_update(),
+            Ok(true),
+            "a check from yesterday is due: the note is allowed to ask again"
+        );
+
+        seed_cache(&dir, now - 3_600);
+        assert_eq!(
+            should_check_update(),
+            Ok(false),
+            "a check from an hour ago is not due: the note must not nag"
+        );
+    }
+
+    // ── Where the release question goes ────────────────────────────────────
+    //
+    // The update check asks a question of an API, and a check that cannot be
+    // asked cannot be tested — so the question gets an answer that is not the
+    // internet. The stub listens on the loopback interface and serves one
+    // response; nothing leaves this machine, which is what keeps the repo's
+    // "no test reaches the network" property intact while the check is still
+    // exercised end to end.
+
+    /// A one-request GitHub API. It answers `releases/latest` with a canned
+    /// body and remembers the request line it served, so a test can check not
+    /// just what came back but where it was asked for.
+    struct StubApi {
+        base: String,
+        asked: std::sync::mpsc::Receiver<String>,
+    }
+
+    impl StubApi {
+        fn start(body: &'static str) -> Self {
+            use std::io::{Read, Write};
+
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a loopback port");
+            let base = format!(
+                "http://127.0.0.1:{}",
+                listener.local_addr().expect("the port it bound").port()
+            );
+            let (tx, asked) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 2048];
+                let read = stream.read(&mut buf).unwrap_or(0);
+                let request_line = String::from_utf8_lossy(&buf[..read])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                let _ = tx.send(request_line);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            });
+            Self { base, asked }
+        }
+
+        /// The request line the stub served. Empty if nothing ever asked.
+        fn request_line(&self) -> String {
+            self.asked
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap_or_default()
+        }
+    }
+
+    /// Puts `SSHM_GITHUB_API_URL` where a test needs it and puts it back after.
+    struct ApiUrl(Option<std::ffi::OsString>);
+
+    impl ApiUrl {
+        fn set(value: &str) -> Self {
+            let previous = std::env::var_os("SSHM_GITHUB_API_URL");
+            std::env::set_var("SSHM_GITHUB_API_URL", value);
+            Self(previous)
+        }
+
+        fn unset() -> Self {
+            let previous = std::env::var_os("SSHM_GITHUB_API_URL");
+            std::env::remove_var("SSHM_GITHUB_API_URL");
+            Self(previous)
+        }
+    }
+
+    impl Drop for ApiUrl {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("SSHM_GITHUB_API_URL", value),
+                None => std::env::remove_var("SSHM_GITHUB_API_URL"),
+            }
+        }
+    }
+
+    /// The canned answer: `tag_name` is the version the check reports, and the
+    /// asset fields are what the library insists on reading even for a check
+    /// that downloads nothing.
+    const ONE_RELEASE: &str = r#"{"tag_name":"v9.9.9","created_at":"2026-01-01T00:00:00Z","assets":[{"name":"sshm-x.tar.gz","url":"http://127.0.0.1/sshm-x.tar.gz"}]}"#;
+
+    /// A GitHub Enterprise install asks its own API and gets its own releases:
+    /// the endpoint is what moves, not the answer's shape or the version that
+    /// comes out of it.
+    #[test]
+    #[serial]
+    fn the_release_question_goes_where_the_environment_points_it() {
+        let stub = StubApi::start(ONE_RELEASE);
+        let _url = ApiUrl::set(&stub.base);
+
+        assert_eq!(
+            latest_release("0.1.13").as_deref(),
+            Ok("9.9.9"),
+            "the version the stubbed API calls latest is the version the check reports"
+        );
+        assert_eq!(
+            stub.request_line(),
+            "GET /repos/titonio/ssh-manager/releases/latest HTTP/1.1",
+            "the question is the endpoint's own, asked of the host the environment named"
+        );
+    }
+
+    /// The override is opt-in. With nothing set the question goes to GitHub, so
+    /// a stray variable in a build farm cannot quietly point the update check
+    /// at somebody else's release list.
+    #[test]
+    #[serial]
+    fn with_nothing_set_the_question_goes_to_github() {
+        let _url = ApiUrl::unset();
+
+        assert_eq!(
+            api_base_url(),
+            None,
+            "no override means the default API and no other"
+        );
     }
 }

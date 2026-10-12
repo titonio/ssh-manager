@@ -293,53 +293,78 @@ pub mod ansi {
         out
     }
 
+    /// The foreground base of an SGR colour parameter.
+    const FG_BASE: u8 = 30;
+    /// The background base of an SGR colour parameter.
+    const BG_BASE: u8 = 40;
+    /// The parameter that means *the terminal's own colour*, per tier: `39` in
+    /// the foreground, `49` in the background. Spelled as the two parameters a
+    /// terminal is actually sent rather than derived as base-plus-nine: they
+    /// are not a multiple of anything, they are what ECMA-48 chose.
+    const FG_DEFAULT: &str = "39";
+    const BG_DEFAULT: &str = "49";
+
+    /// The sixteen named ANSI colours, in their SGR index order.
+    ///
+    /// The order *is* the mapping: index 0 is `Black`, index 15 is `White`.
+    /// Written as data because nothing about it needs a branch — a match of
+    /// seventeen one-line arms is seventeen chances to transpose two, and the
+    /// compiler cannot spot the mistake.
+    const NAMED_ANSI: [Color; 16] = [
+        Color::Black,
+        Color::Red,
+        Color::Green,
+        Color::Yellow,
+        Color::Blue,
+        Color::Magenta,
+        Color::Cyan,
+        Color::Gray,
+        Color::DarkGray,
+        Color::LightRed,
+        Color::LightGreen,
+        Color::LightYellow,
+        Color::LightBlue,
+        Color::LightMagenta,
+        Color::LightCyan,
+        Color::White,
+    ];
+
     /// Named ANSI colors as their 0..=15 index, for SGR emission.
     fn ansi_index(color: Color) -> Option<u8> {
-        Some(match color {
-            Color::Black => 0,
-            Color::Red => 1,
-            Color::Green => 2,
-            Color::Yellow => 3,
-            Color::Blue => 4,
-            Color::Magenta => 5,
-            Color::Cyan => 6,
-            Color::Gray => 7,
-            Color::DarkGray => 8,
-            Color::LightRed => 9,
-            Color::LightGreen => 10,
-            Color::LightYellow => 11,
-            Color::LightBlue => 12,
-            Color::LightMagenta => 13,
-            Color::LightCyan => 14,
-            Color::White => 15,
-            _ => return None,
-        })
+        NAMED_ANSI
+            .iter()
+            .position(|named| *named == color)
+            .map(|index| index as u8)
+    }
+
+    /// The SGR colour parameter for `color` on a tier base — [`FG_BASE`] or
+    /// [`BG_BASE`].
+    ///
+    /// One function for both tiers because they are the same arithmetic
+    /// offset by ten: `31` and `41`, `91` and `101`, `38;5;n` and `48;5;n`.
+    /// Two hand-written copies of that arithmetic is a palette fork waiting
+    /// to happen.
+    fn color_code(color: Color, base: u8, unnamed: &str) -> String {
+        match color {
+            Color::Reset => unnamed.to_string(),
+            Color::Indexed(n) => format!("{};5;{n}", base + 8),
+            Color::Rgb(r, g, b) => format!("{};2;{r};{g};{b}", base + 8),
+            named => match ansi_index(named) {
+                Some(i) if i < 8 => (base + i).to_string(),
+                Some(i) => (base + 60 + (i - 8)).to_string(),
+                // A colour with no ANSI name is not a colour this serializer
+                // was asked to name: hand the tier's default back instead.
+                None => unnamed.to_string(),
+            },
+        }
     }
 
     fn fg_code(color: Color) -> String {
-        match color {
-            Color::Reset => "39".to_string(),
-            Color::Indexed(n) => format!("38;5;{n}"),
-            Color::Rgb(r, g, b) => format!("38;2;{r};{g};{b}"),
-            named => match ansi_index(named) {
-                Some(i) if i < 8 => format!("{}", 30 + i),
-                Some(i) => format!("{}", 90 + (i - 8)),
-                None => "39".to_string(),
-            },
-        }
+        color_code(color, FG_BASE, FG_DEFAULT)
     }
 
     fn bg_code(color: Color) -> String {
-        match color {
-            Color::Reset => "49".to_string(),
-            Color::Indexed(n) => format!("48;5;{n}"),
-            Color::Rgb(r, g, b) => format!("48;2;{r};{g};{b}"),
-            named => match ansi_index(named) {
-                Some(i) if i < 8 => format!("{}", 40 + i),
-                Some(i) => format!("{}", 100 + (i - 8)),
-                None => "49".to_string(),
-            },
-        }
+        color_code(color, BG_BASE, BG_DEFAULT)
     }
 
     /// Build the SGR parameter list for a set of modifiers.
@@ -507,5 +532,112 @@ mod tests {
         // Every style switch must be preceded by a reset, or a dropped attribute
         // would silently bleed into the next run.
         assert_eq!(s.matches("\x1b[0m").count(), 3, "unexpected resets: {s:?}");
+    }
+
+    /// The SGR parameter *is* the colour on the glass, and a glyph snapshot
+    /// cannot show a wrong one. Pinned for all sixteen named colours, both
+    /// tiers: the ordinary eight on the 30/40 bases and the bright eight on
+    /// the 90/100 ones.
+    #[test]
+    fn the_sixteen_named_colours_emit_their_named_ansi_pair() {
+        let named = [
+            (Color::Black, 30, 40),
+            (Color::Red, 31, 41),
+            (Color::Green, 32, 42),
+            (Color::Yellow, 33, 43),
+            (Color::Blue, 34, 44),
+            (Color::Magenta, 35, 45),
+            (Color::Cyan, 36, 46),
+            (Color::Gray, 37, 47),
+            (Color::DarkGray, 90, 100),
+            (Color::LightRed, 91, 101),
+            (Color::LightGreen, 92, 102),
+            (Color::LightYellow, 93, 103),
+            (Color::LightBlue, 94, 104),
+            (Color::LightMagenta, 95, 105),
+            (Color::LightCyan, 96, 106),
+            (Color::White, 97, 107),
+        ];
+
+        for (color, fg, bg) in named {
+            assert_eq!(
+                ansi::style_to_ansi(Style::default().fg(color).bg(color)),
+                format!("\x1b[{fg};{bg}m"),
+                "{color:?} emitted the wrong SGR pair"
+            );
+        }
+    }
+
+    /// The two tiers the 16-colour set cannot name keep their own prefixes:
+    /// `38;5;`/`48;5;` for the 256-colour cube, `38;2;`/`48;2;` for 24-bit.
+    #[test]
+    fn the_indexed_and_truecolor_tiers_keep_their_sgr_prefixes() {
+        assert_eq!(
+            ansi::style_to_ansi(
+                Style::default()
+                    .fg(Color::Indexed(245))
+                    .bg(Color::Indexed(245))
+            ),
+            "\x1b[38;5;245;48;5;245m"
+        );
+        assert_eq!(
+            ansi::style_to_ansi(
+                Style::default()
+                    .fg(Color::Rgb(1, 2, 3))
+                    .bg(Color::Rgb(4, 5, 6))
+            ),
+            "\x1b[38;2;1;2;3;48;2;4;5;6m"
+        );
+    }
+
+    /// An unset colour is the terminal's default, never a colour of ours —
+    /// which is what keeps the one transparent frame transparent.
+    #[test]
+    fn an_unset_colour_is_the_terminal_default() {
+        assert_eq!(ansi::style_to_ansi(Style::default()), "\x1b[39;49m");
+    }
+
+    /// A 16-colour terminal has no grey below `fg_muted` to sit the placeholder
+    /// in, so the placeholder collapses onto the muted token — the trade its
+    /// own doc comment names. Drop that field and the placeholder keeps its
+    /// 256-colour grey, which a 16-colour terminal answers with whatever it
+    /// likes: the dimmed text comes back louder than the text beside it.
+    #[test]
+    fn ansi16_snaps_the_placeholder_it_cannot_render_too() {
+        let resolved = Theme::clack().resolve(ColorSupport::Ansi16);
+
+        assert_eq!(
+            resolved.fg_placeholder,
+            Color::DarkGray,
+            "the placeholder must collapse onto a token the palette actually has"
+        );
+        assert_eq!(
+            resolved.fg_placeholder, resolved.fg_muted,
+            "in sixteen colours the placeholder and the muted tier are one token, not two"
+        );
+    }
+
+    /// `end_line` is what turns a run of styled text back into a stack of
+    /// *lines*: the colour is closed so nothing bleeds into the next row, then
+    /// the row ends. Without it a whole frame serializes onto a single line,
+    /// painted in the colour of whichever span happened to be last.
+    #[test]
+    fn a_closed_line_ends_the_colour_and_starts_the_next() {
+        let mut out = String::new();
+        let mut runs = ansi::RunWriter::new(&mut out);
+        runs.push(Style::default().fg(Color::Red), "first");
+        runs.end_line();
+        runs.push(Style::default().fg(Color::Green), "second");
+        runs.end_line();
+
+        assert_eq!(
+            out.matches('\n').count(),
+            2,
+            "one newline per line, or the frame arrives as one line: {out:?}"
+        );
+        assert!(
+            out.ends_with("\x1b[0m\n"),
+            "the last line must be closed too, or its colour runs past the frame: {out:?}"
+        );
     }
 }

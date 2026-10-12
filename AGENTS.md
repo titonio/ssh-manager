@@ -14,6 +14,17 @@ The five canonical triage roles use their default label strings (`needs-triage`,
 
 Single-context: one `CONTEXT.md` at the repo root plus `docs/adr/`. See `docs/agents/domain.md`.
 
+### Test gates
+
+A change to `sshm/src` counts as verified when the suite is green *and* nothing
+in the diff survives mutation: `./sshm/mutants.sh --in-diff <diff>` tests exactly
+the lines the branch touched, which is the same gate CI applies. A surviving
+mutant is a line the tests no longer depend on, so the answer is a test — always.
+Nothing is skipped, excluded or filtered out of the sweep: a mutant that is
+skipped is a bug that is skipped, and the whole point of the gate is that it
+finds what the suite does not. `sshm/coverage.sh` is the coverage and CRAP gate;
+`sshm/tests/README.md` says what each gate proves.
+
 ### UI design
 
 Any change to rendering, layout, keybindings, hint text, or colour goes through the

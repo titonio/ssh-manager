@@ -1,0 +1,12 @@
+# CRAP score gate, shared by local runs (`./coverage.sh`) and CI.
+#
+# CRAP(m) = CC² × (1 − coverage)³ + CC, so a function is only flagged when its
+# complexity is *not* covered by tests. 12 is deliberately strict: nothing with
+# real branching ships without tests over it.
+#
+# Run from this directory so the default `tests/**`, `benches/**` and
+# `examples/**` excludes match (they are relative globs):
+#   cargo llvm-cov --all-features --lcov --output-path lcov.info
+#   cargo crap --lcov lcov.info
+threshold = 12.0
+fail-above = true

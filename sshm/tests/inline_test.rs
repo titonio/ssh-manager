@@ -1249,3 +1249,64 @@ impl Write for Shared {
         Ok(())
     }
 }
+
+/// A resize to *exactly* the width the widest live row already occupies wraps
+/// nothing: the terminal has not run out of room, it has exactly enough. The
+/// frame is reopened at the new height rather than thrown away, because
+/// cancelling a frame that still fits would punish the user for dragging the
+/// window to a size the frame was already drawn for.
+#[test]
+fn a_resize_to_exactly_the_width_already_drawn_reopens_rather_than_cancels() {
+    let live = Live {
+        rows: FRAME_LINES,
+        widest: 80,
+    };
+
+    assert_eq!(
+        plan_resize(live, 80, 24),
+        ResizePlan::Reopen {
+            visible_rows: VISIBLE_ROWS
+        },
+        "80 columns of live rows in an 80-column terminal have not wrapped"
+    );
+}
+
+/// Collapsing into a trace exactly as tall as the frame leaves no surplus, and
+/// the driver then asks for no rows to be deleted. `ESC [ 0 M` is not a no-op
+/// everywhere: ECMA-48 reads a zero parameter as the default, which for `M` is
+/// *one line*, so a frame that asked to delete zero rows could eat the prompt
+/// line it was standing on.
+#[test]
+fn a_collapse_with_no_surplus_asks_for_no_rows_to_be_deleted() {
+    let mut out: Vec<u8> = Vec::new();
+    let frame = build_frame(&many(20), "", 0, FrameMode::Pick, canvas());
+    let mut live = LiveFrame::new(&mut out);
+    live.open(&frame).unwrap();
+
+    let same_height: Vec<Line<'static>> = (0..FRAME_LINES).map(|_| Line::from("·")).collect();
+    live.collapse(&same_height).unwrap();
+
+    let glass = String::from_utf8(out).expect("the driver writes text");
+    assert!(
+        !glass.contains("\x1b[0M"),
+        "nothing left over means nothing to delete, not a delete of zero: {glass:?}"
+    );
+}
+
+/// Erasing a frame that was never opened gives the screen back exactly as it
+/// was — which is to say, it writes nothing. There are no live rows to move up
+/// over and none to delete, and asking for `ESC [ 0 M` is not harmless: a
+/// terminal that reads a zero parameter as the ECMA-48 default hears *one
+/// line*, so the refusal would eat the user's own prompt on the way out.
+#[test]
+fn erasing_a_frame_that_was_never_opened_writes_nothing_at_all() {
+    let mut out: Vec<u8> = Vec::new();
+    let mut live = LiveFrame::new(&mut out);
+
+    live.erase().unwrap();
+
+    assert!(
+        out.is_empty(),
+        "a frame that never drew a row must not move or delete anything: {out:?}"
+    );
+}

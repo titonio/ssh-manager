@@ -1,0 +1,32 @@
+[package]
+name = "sshm-e2e"
+version = "0.1.0"
+edition = "2021"
+description = "End-to-end PTY tests for the sshm binary, outside the sshm crate so the mutation sweep never sees them"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The terminal: a real pty, plus an emulator that keeps the colours a
+# glyph-only snapshot throws away.
+portable-pty = "0.9"
+vt100 = "0.16"
+# tcgetattr on the master, and killpg on the way out.
+libc = "0.2"
+serde_json = "1.0"
+tempfile = "3.8"
+# Only for `colour::token`, which renames a `Theme` role's colour into the
+# vocabulary the emulator reports in. Same version as the app's, so the two
+# `Color` types are literally the same type.
+ratatui = "0.30"
+
+[dev-dependencies]
+insta = "1.34"
+# The theme, so a colour assertion can name the *role* it is checking instead
+# of baking a hue into the test — the rule `theme.rs` exists to enforce, and the
+# reason a glyph-only snapshot once sat on an unreadable selection colour.
+# A dev-dependency, and a cycle through dev-dependencies at that: `sshm` dev-
+# depends on this crate for the harness, this crate dev-depends on `sshm`'s lib
+# for the tokens. Cargo allows that, and neither binary pulls the other.
+sshm = { path = "../sshm" }

@@ -28,13 +28,24 @@ jobs:
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
       with:
-        workspaces: sshm
+        workspaces: |
+          sshm
+          sshm-e2e
 
     - name: Check formatting
       run: cargo fmt --manifest-path sshm/Cargo.toml -- --check
 
     - name: Run clippy
       run: cargo clippy --manifest-path sshm/Cargo.toml --all-targets --all-features
+
+    # There is no root workspace, so nothing reaches into sshm-e2e on its own
+    # and the end-to-end crate would otherwise be the one part of the tree no
+    # job ever lints. A gate that is not itself checked is a gate that rots.
+    - name: Check the end-to-end crate's formatting
+      run: cargo fmt --manifest-path sshm-e2e/Cargo.toml -- --check
+
+    - name: Run clippy on the end-to-end crate
+      run: cargo clippy --manifest-path sshm-e2e/Cargo.toml --all-targets
 
   # install.sh is served straight from `master`, so a bad merge is live for
   # every user before anyone can release their way out of it — and until
@@ -80,6 +91,66 @@ jobs:
 
     - name: Run tests
       run: cargo test --manifest-path sshm/Cargo.toml --all-features
+
+  # The end-to-end suite: the real binary in a real pseudo-terminal, driven with
+  # real keystrokes. Everything in `test` above drives the frame through a seam,
+  # and the seam cannot see whether a chord arrives as the bytes crossterm
+  # decodes or whether the terminal is handed back — both of which are the
+  # app's contract with the user.
+  #
+  # Plain `ubuntu-latest`, with no `container:` on purpose. A container job has
+  # no controlling terminal of its own and no guarantee of `/dev/ptmx`, and a PTY
+  # test that cannot open a pty does not fail loudly — it fails confusingly, or
+  # not at all. The runner image has pty devices; a container inherits whatever
+  # the job happened to mount.
+  #
+  # Worth marking as a required status check on master, like `installer`.
+  e2e:
+    needs: check
+    runs-on: ubuntu-latest
+    # The suite itself is a handful of seconds; the bound is for a cold
+    # dependency build of the crate and its harness. Roughly twice what a warm
+    # run costs, because a job killed by the runner timeout reports nothing.
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: |
+          sshm
+          sshm-e2e
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@cargo-nextest
+
+    # The Shell Widget tests drive a real zsh and a real bash. bash is what the
+    # runner is already running; zsh is not in the ubuntu-latest image, so the
+    # job installs it. The first CI run of this suite is what found that out,
+    # and it found it in four seconds rather than as a shell test timing out
+    # three minutes later, which is the whole point of asserting the shells are
+    # there instead of letting a missing one turn into a skip or a mystery.
+    - name: Install the shells the suite drives
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zsh
+
+    - name: Check the shells the suite drives are present
+      run: command -v zsh && command -v bash
+
+    # The same script a laptop runs, so the two cannot drift: it builds the
+    # binary, points the suite at that binary through SSHM_E2E_BIN, and uses
+    # nextest when it is installed. Per-test isolation and the ten-second
+    # per-test deadline are in sshm-e2e/.config/nextest.toml, and there are no
+    # retries anywhere — a flake is a bug, not a hiccup.
+    - name: Run the end-to-end suite
+      run: ./sshm-e2e/run-e2e.sh
 
   design:
     needs: check
@@ -131,6 +202,9 @@ jobs:
     - name: Install cargo-llvm-cov
       uses: taiki-e/install-action@cargo-llvm-cov
 
+    - name: Install cargo-crap
+      uses: taiki-e/install-action@cargo-crap
+
     - name: Cache cargo
       uses: Swatinem/rust-cache@v2
       with:
@@ -142,6 +216,16 @@ jobs:
           --fail-under-lines 80 \
           --fail-under-functions 80 \
           --lcov --output-path lcov.info
+
+    # CRAP = CC² × (1 − coverage)³ + CC, so this flags the functions that are
+    # complex *and* untested — the ones a change can break with no test failing.
+    # The threshold and --fail-above live in sshm/.cargo-crap.toml, so the
+    # local gate in sshm/coverage.sh and this one can never drift apart.
+    # Run from sshm/ so the default tests/** excludes match; the lcov paths are
+    # absolute, so cargo-crap matches them against ./src by suffix either way.
+    - name: CRAP gate
+      working-directory: sshm
+      run: cargo crap --lcov ../lcov.info
 
     - name: Upload coverage artifact
       uses: actions/upload-artifact@v4

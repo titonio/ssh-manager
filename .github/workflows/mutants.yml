@@ -1,0 +1,185 @@
+# Mutation testing, via cargo-mutants.
+#
+# Coverage says a line was executed; a mutant asks whether anything *depends* on
+# it. Each mutant replaces one function body, condition or match arm with a
+# trivial value, and the suite must still fail. A mutant that passes every test
+# is a behaviour no test guards — which is exactly what a green 80%-coverage gate
+# can still be sitting on top of.
+#
+# Two modes, because they answer different questions:
+#
+#   * `mutants-in-diff` runs on a pull request and tests only the mutants that
+#     overlap the lines the PR touched (`--in-diff`). It is a required status
+#     check on master: a mutant in code you just changed is a mutant you can
+#     still fix, and it is the only one of the two that can be. It is *not* a
+#     full run — an edit here can stop a test over there from mattering.
+#
+#   * `mutants-full` runs the whole crate on a schedule and on demand, and
+#     reports instead of gating: the artifact is the work list, and a weekly red
+#     job that nobody triages trains everyone to ignore red jobs.
+#
+# The options that can live in a file are in sshm/.cargo/mutants.toml. The ones
+# that cannot — `--in-place` above all — are here and in sshm/mutants.sh, which
+# both jobs call so that CI and a laptop cannot drift apart.
+
+name: Mutation tests
+
+on:
+  pull_request:
+    branches: [ master ]
+    # No `paths:` filter, deliberately: this check is required, and a workflow
+    # that path filtering skips leaves a required check sitting at "Expected —
+    # waiting for status to be reported" for ever, with the PR unmergeable. The
+    # cheap version of the same saving is the `rust` output below, which skips
+    # the work inside the job — and a skipped step still reports Success.
+  schedule:
+    # Mondays 03:37 UTC. Off the hour on purpose: every cron in every repo
+    # lands on :00, and a scheduled run that is queued behind them is a run
+    # whose results arrive after people have stopped looking.
+    - cron: '37 3 * * 1'
+  # For running the full sweep after a burst of refactoring, or the first time
+  # this is set up.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants-in-diff:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # An ordinary PR touches a handful of functions and finishes in minutes. The
+    # bound is for the refactor that rewrites half the crate — 791 mutants, ~3s
+    # each on 12 cores and the runner has 4 — and a job killed by the runner
+    # timeout reports nothing at all.
+    timeout-minutes: 120
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        # The default shallow checkout has neither the base branch nor enough
+        # history to find a merge base, so the diff below would be empty and the
+        # gate would pass without testing anything.
+        fetch-depth: 0
+
+    - name: Diff against the merge base
+      id: diff
+      working-directory: sshm
+      run: |
+        base=$(git merge-base "origin/${GITHUB_BASE_REF}" HEAD)
+        # --relative is not cosmetic. cargo-mutants matches the paths in the
+        # diff against its own, and it is rooted at sshm/, so a repo-root diff
+        # names sshm/src/frame.rs, matches nothing, and the job goes green
+        # having tested zero mutants. --relative keeps the paths as src/… and
+        # drops everything outside sshm/, which cannot contain a mutant.
+        git diff --relative "$base" HEAD > "$RUNNER_TEMP/pr.diff"
+        if grep -q '^+++ b/sshm/' "$RUNNER_TEMP/pr.diff"; then
+          echo "::error::the diff is repo-rooted: no path in it would match a mutant"
+          exit 1
+        fi
+        # A PR that touches no Rust source has no mutants, so there is nothing to
+        # test: say so, and let the job pass on its own terms rather than
+        # pretending a sweep happened. Everything below is then skipped, and a
+        # skipped step still reports Success to a required check.
+        if git diff --name-only --relative "$base" HEAD -- 'src/*.rs' | grep -q .; then
+          echo "rust=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "rust=false" >> "$GITHUB_OUTPUT"
+          echo "No Rust source in this diff, so there is nothing to mutate."
+        fi
+        wc -l "$RUNNER_TEMP/pr.diff"
+
+    - name: Setup Rust
+      if: steps.diff.outputs.rust == 'true'
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+
+    - name: Cache cargo
+      if: steps.diff.outputs.rust == 'true'
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: sshm
+
+    - name: Install cargo-mutants
+      if: steps.diff.outputs.rust == 'true'
+      uses: taiki-e/install-action@cargo-mutants
+
+    # cargo-mutants emits GitHub annotations for missed mutants when it sees
+    # $GITHUB_ACTION, so they land on the PR's files without an extra step.
+    # Exit code 2 is a surviving mutant, which is what fails the check; exit code
+    # 5 would mean the diff does not describe this tree, i.e. it was built
+    # against the wrong base.
+    - name: Mutate the changed lines
+      if: steps.diff.outputs.rust == 'true'
+      run: ./sshm/mutants.sh --in-diff "$RUNNER_TEMP/pr.diff"
+
+    - name: Archive the results
+      if: always() && steps.diff.outputs.rust == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: mutants-in-diff
+        path: sshm/mutants.out/
+        if-no-files-found: warn
+
+  mutants-full:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # 791 mutants, each one rebuild of the crate plus the whole suite: measured at
+    # 43 minutes on 12 cores, and the runner has 4, plus a cold dependency build.
+    # Generous, because a job killed by the runner timeout reports nothing at all.
+    timeout-minutes: 240
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+        override: true
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: sshm
+
+    - name: Install cargo-mutants
+      uses: taiki-e/install-action@cargo-mutants
+
+    # `continue-on-error` on the step, not on the job: the run has to finish and
+    # upload before anything is judged, and the summary below has to be written.
+    - name: Mutate the whole crate
+      continue-on-error: true
+      run: ./sshm/mutants.sh
+
+    - name: Summarise
+      if: always()
+      run: |
+        out=sshm/mutants.out
+        count() { [ -f "$out/$1" ] && wc -l < "$out/$1" || echo 0; }
+        {
+          echo "## cargo-mutants ($(date -u +%FT%TZ))"
+          echo ""
+          echo "| outcome | count |"
+          echo "|---|---|"
+          echo "| missed | $(count missed.txt) |"
+          echo "| caught | $(count caught.txt) |"
+          echo "| unviable | $(count unviable.txt) |"
+          echo "| timeout | $(count timeout.txt) |"
+          echo ""
+          echo 'Full list in the `mutants-full` artifact: `missed.txt` is the work'
+          echo 'list, `log/` has the per-mutant build and test output.'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Archive the results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: mutants-full
+        path: sshm/mutants.out/
+        if-no-files-found: warn

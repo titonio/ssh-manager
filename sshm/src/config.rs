@@ -93,59 +93,97 @@ pub struct SshConfigEntry {
     pub hostname: Option<String>,
 }
 
-pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Vec::new(),
-    };
+/// The stanza being read: one slot per keyword the importer understands.
+///
+/// The slots are per-stanza, not per-line, because ssh_config keywords belong
+/// to the `Host` line above them — which is also why a keyword written before
+/// any `Host` line rides along to the next stanza instead of becoming an
+/// entry of its own: there is no entry without a host to name.
+#[derive(Default)]
+struct Stanza {
+    host: Option<String>,
+    user: Option<String>,
+    port: Option<u16>,
+    key_file: Option<String>,
+    hostname: Option<String>,
+}
 
-    let mut entries = Vec::new();
-    let mut current_host: Option<String> = None;
-    let mut current_user: Option<String> = None;
-    let mut current_port: Option<u16> = None;
-    let mut current_key_file: Option<String> = None;
-    let mut current_hostname: Option<String> = None;
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with('#') || line.is_empty() {
-            continue;
-        }
-
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() < 2 {
-            continue;
-        }
-
-        match parts[0].to_lowercase().as_str() {
-            "host" => {
-                if let Some(host) = current_host.take() {
-                    entries.push(SshConfigEntry {
-                        host,
-                        user: current_user.take(),
-                        port: current_port.take(),
-                        key_file: current_key_file.take(),
-                        hostname: current_hostname.take(),
-                    });
-                }
-                current_host = Some(parts[1].to_string());
-            }
-            "user" => current_user = Some(parts[1].to_string()),
-            "port" => current_port = parts[1].parse().ok(),
-            "identityfile" => current_key_file = Some(parts[1].to_string()),
-            "hostname" => current_hostname = Some(parts[1].to_string()),
+impl Stanza {
+    /// Fold one keyword's value into the stanza.
+    ///
+    /// An unknown keyword is ignored, and a `Port` that is not a number leaves
+    /// the slot empty rather than guessing 22 — the importer reports what the
+    /// file said, not what it probably meant.
+    fn set(&mut self, keyword: &str, value: &str) {
+        match keyword {
+            "host" => self.host = Some(value.to_string()),
+            "user" => self.user = Some(value.to_string()),
+            "port" => self.port = value.parse().ok(),
+            "identityfile" => self.key_file = Some(value.to_string()),
+            "hostname" => self.hostname = Some(value.to_string()),
             _ => {}
         }
     }
 
-    if let Some(host) = current_host {
-        entries.push(SshConfigEntry {
-            host,
-            user: current_user.take(),
-            port: current_port.take(),
-            key_file: current_key_file.take(),
-            hostname: current_hostname.take(),
-        });
+    /// Take the stanza as an entry, leaving the slots empty for the next one.
+    ///
+    /// `None` when no `Host` line started a stanza — which is what lets the
+    /// reader flush the stanza it has finished reading at the start of the
+    /// next one and again at the end of the file through the same call.
+    fn take(&mut self) -> Option<SshConfigEntry> {
+        Some(SshConfigEntry {
+            host: self.host.take()?,
+            user: self.user.take(),
+            port: self.port.take(),
+            key_file: self.key_file.take(),
+            hostname: self.hostname.take(),
+        })
+    }
+}
+
+/// One ssh_config line as its lowercased keyword and its value.
+///
+/// `None` when the line names no keyword or gives it nothing: a blank line, a
+/// line of spaces, a bare `Host` with no value. A comment needs no special
+/// case here — its first word is `#something`, and `Stanza::set` ignores every
+/// keyword it does not know, which is the same reason an unknown ssh_config
+/// keyword is skipped. Guarding on `#` as well would be a second place that
+/// decides what a comment means, and the two could disagree.
+///
+/// The keyword is lowercased because ssh_config is spelled however the user
+/// likes and the importer matches on meaning, not on case.
+fn directive(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    let mut parts = line.split_whitespace();
+    let keyword = parts.next()?.to_lowercase();
+    let value = parts.next()?.to_string();
+    Some((keyword, value))
+}
+
+pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+
+    let mut entries = Vec::new();
+    let mut stanza = Stanza::default();
+
+    for line in content.lines() {
+        let Some((keyword, value)) = directive(line) else {
+            continue;
+        };
+        // A `Host` line closes the stanza before it: the entry the user was
+        // reading is complete the moment the next one starts.
+        if keyword == "host" {
+            if let Some(entry) = stanza.take() {
+                entries.push(entry);
+            }
+        }
+        stanza.set(&keyword, &value);
+    }
+
+    if let Some(entry) = stanza.take() {
+        entries.push(entry);
     }
 
     entries
