@@ -98,20 +98,6 @@ pub enum Settle {
         /// The store's own reason, carried through verbatim.
         message: String,
     },
-    /// An import the store refused (#38).
-    ///
-    /// The store refused the write; the frame collapses rather than
-    /// showing a list it cannot vouch for — the same contract
-    /// [`Settle::Error`] and [`Settle::AddFailed`] hold, for the same
-    /// reason. There is no Connection to name here: the ask was about a
-    /// file, not a row, and a line that invented one would claim an
-    /// object the set never received. So the line carries the store's
-    /// reason alone — `◆ import failed: <reason>` — dim where the other
-    /// failure traces are dim, the `◆` carrying the state.
-    ImportFailed {
-        /// The store's own reason, carried through verbatim.
-        message: String,
-    },
 }
 
 /// One row of the frame, as an instruction to the driver.
@@ -238,20 +224,6 @@ pub fn settle_trace(settle: &Settle, canvas: Canvas) -> Vec<Line<'static>> {
             // shape for it would be a second grammar.
             let mut line = connection_trace("error", &TraceSubject::from(draft), &t);
             push_reason(&mut line, message, canvas.fit_width(), &t);
-            vec![fit_line(line, canvas.fit_width())]
-        }
-        Settle::ImportFailed { message } => {
-            // No `connection_trace` here: an import is about a file,
-            // not a row, and there is no Connection to name. The line
-            // keeps the failure grammar the other traces use — accent
-            // glyph, dim text, the store's own reason cut to the
-            // canvas — so a refused import reads as the same class of
-            // failure even though it names nothing.
-            let mut line = Line::from(vec![icon(t.accent), Span::styled(" import failed: ", dim)]);
-            let reason = fit_reason(message, line.width(), canvas.fit_width());
-            if !reason.is_empty() {
-                line.spans.push(Span::styled(reason, dim));
-            }
             vec![fit_line(line, canvas.fit_width())]
         }
     }

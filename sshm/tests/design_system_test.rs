@@ -1740,26 +1740,4 @@ fn dump_frames_for_review() {
     )
     .unwrap_or_else(|e| panic!("write {path}: {e}"));
     eprintln!("wrote {path}");
-
-    // The `◆ import failed: <reason>` settle (#38) is the same
-    // single-line shape, so it is dumped the same way: the trace lines'
-    // ANSI joined by newlines, through the same `line_to_ansi` the
-    // frames' `to_ansi` writes with.
-    let import_failed_line = sshm::inline::settle_trace(
-        &sshm::inline::Settle::ImportFailed {
-            message: "disk on fire: read-only filesystem".into(),
-        },
-        Canvas::new(80, 24, truecolor),
-    );
-    let path = format!("{dir}/frame-import-failed-settle.ansi");
-    std::fs::write(
-        &path,
-        import_failed_line
-            .iter()
-            .map(|l| sshm::theme::ansi::line_to_ansi(l))
-            .collect::<Vec<_>>()
-            .join("\n"),
-    )
-    .unwrap_or_else(|e| panic!("write {path}: {e}"));
-    eprintln!("wrote {path}");
 }
