@@ -119,6 +119,50 @@ pub fn remove(config: &mut Config, id: &str) -> Result<Option<Connection>, Strin
     Ok(removed)
 }
 
+/// The draft an adopt writes from `target`, or the reason it cannot be adopted.
+///
+/// The copy carries the stanza's own fields and nothing else: an adopted
+/// Connection lands **unfiled**, because a `Host` stanza has no folder and
+/// inventing one would put the new row somewhere the user never put it. The
+/// id and the provenance are not copied at all — [`connection_from`] mints a
+/// fresh id and sets [`Source::Stored`], which is the whole point of an adopt:
+/// what comes back is sshm's own, so it can be edited and deleted like
+/// anything else in the store.
+fn adopted_draft(target: &Connection) -> Result<ConnectionDraft, String> {
+    if target.source != Source::SshConfig {
+        return Err(format!(
+            "adopt refused: {} is already in sshm's store",
+            target.alias
+        ));
+    }
+    Ok(ConnectionDraft {
+        folder: String::new(),
+        ..ConnectionDraft::from_connection(target)
+    })
+}
+
+/// Copy the Config Host `target` into the store, persist the set, and return
+/// the Connection that was written.
+///
+/// The only implementation of "adopt a Connection", and it is a thin one: the
+/// draft is checked, then handed to [`add`], so an adopt mints its id, sets its
+/// provenance and writes the file exactly the way a hand-typed add does. There
+/// is no second write path for the frame to get wrong.
+pub fn adopt(config: &mut Config, target: &Connection) -> Result<Connection, String> {
+    let draft = adopted_draft(target)?;
+    add(config, &draft)
+}
+
+/// Why a stored store refuses every adopt, in the words the frame shows.
+///
+/// A [`Config`] holds only rows that are already sshm's own — nothing in it
+/// came from `~/.ssh/config`, so there is nothing in it to copy in. The
+/// refusal is not an error the user caused; it is the shape of that store,
+/// which is why it is worded about the store and not about the row.
+fn nothing_to_adopt() -> String {
+    "adopt refused: sshm's store holds no ssh-config rows".to_string()
+}
+
 /// The live set of Connections a frame lists, and the seam a manage action
 /// persists through (#36).
 ///
@@ -164,6 +208,21 @@ pub trait Store {
         existing_id: &str,
         draft: &ConnectionDraft,
     ) -> Result<Option<Connection>, String>;
+
+    /// Copy the Config Host `target` into the set, persist it, and return the
+    /// Connection that was written.
+    ///
+    /// The adopt half of the seam the frame's `◇ adopted` note rests on. A
+    /// Config Host is the user's own stanza — sshm reads `~/.ssh/config` and
+    /// never writes it — so the one thing a frame may do with one is offer a
+    /// copy of it into sshm's store, where it can be edited and deleted like
+    /// anything else.
+    ///
+    /// `Err` unless `target` really is a config row: a Connection already in
+    /// the store has nothing to adopt, and a store that wrote a second copy of
+    /// it would be duplicating a row the user owns and hiding the copy behind
+    /// it under the collision rule.
+    fn adopt(&mut self, target: &Connection) -> Result<Connection, String>;
 }
 
 impl Store for Config {
@@ -185,6 +244,12 @@ impl Store for Config {
         draft: &ConnectionDraft,
     ) -> Result<Option<Connection>, String> {
         edit(self, existing_id, draft)
+    }
+
+    /// Always a refusal: a stored store holds only rows that are already
+    /// sshm's own, so there is nothing in it to copy in.
+    fn adopt(&mut self, _target: &Connection) -> Result<Connection, String> {
+        Err(nothing_to_adopt())
     }
 }
 
@@ -244,5 +309,14 @@ impl Store for Ephemeral {
         };
         self.connections[i] = conn.clone();
         Ok(Some(conn))
+    }
+
+    fn adopt(&mut self, target: &Connection) -> Result<Connection, String> {
+        // The same rule and the same construction as the persisted path, with
+        // only the durability absent: the visual harness has to be able to show
+        // an adopt, and a harness that admitted a row the real store refuses
+        // would be demoing a write that cannot happen.
+        let draft = adopted_draft(target)?;
+        self.add(&draft)
     }
 }

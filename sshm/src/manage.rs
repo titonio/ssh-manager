@@ -47,6 +47,19 @@ pub enum Phase {
     /// pressed, captured by value. The confirm asks about *this* one; a
     /// cursor that drifts afterwards changes nothing about it.
     ConfirmDelete { target: Connection },
+    /// The inline adopt ask: copy this Config Host into sshm's store.
+    ///
+    /// Enter over a config row, because a row merged from `~/.ssh/config` is
+    /// the user's own stanza and the one thing sshm may do with it is offer a
+    /// copy. It is a confirm and not an instant write for the same reason a
+    /// delete is: the answer writes `connections.json`, and a keystroke that
+    /// means "this one" must not be a file change on its own.
+    ///
+    /// `target` is the row Enter was pressed over, captured by value exactly as
+    /// [`Phase::ConfirmDelete`] captures its target — including its
+    /// `ssh-config:` id, which is what the store refuses to delete and the
+    /// thing an adopt copies *from* rather than into.
+    ConfirmAdopt { target: Connection },
     /// The Form Map, open on one of its two starting drafts (#37).
     ///
     /// One value holds the whole surface: which row the cursor is on, what
@@ -668,6 +681,17 @@ pub enum Trace {
     /// is held to. `◇ added [prod] web-01` is a claim about
     /// `connections.json`, and only the store gets to make it.
     Added { connection: Connection },
+    /// Enter on a Config Host was answered `y` **and the store really wrote
+    /// the copy**.
+    ///
+    /// The adopt half of [`Trace::Added`], held to the same discipline: it is
+    /// earned through [`settle_adopt`] and never by the `y` that asked, because
+    /// `◇ adopted build-box` is a claim about `connections.json` and only the
+    /// store gets to make it. The note names the copy rather than the stanza,
+    /// because the stanza is still where it was — what changed is that sshm now
+    /// has a row of its own for that box, and the config row the copy hides has
+    /// left the list in the same keystroke.
+    Adopted { connection: Connection },
     /// The map was backed out of without submitting. Nothing was
     /// written, and the note says so rather than leaving the user to
     /// wonder whether a half-filled Connection got saved.
@@ -822,6 +846,15 @@ pub enum Effect {
         /// `target`'s id.
         draft: ConnectionDraft,
     },
+    /// Copy the Config Host `target` into the store and persist it.
+    ///
+    /// The adopt half of the write effects, emitted only from the adopt ask
+    /// and only for the captured row. The whole config row travels with the
+    /// request rather than its id: the id is the merge's own
+    /// `ssh-config:<pattern>`, which names nothing in `connections.json`, and
+    /// the fields the copy is made of are the ones on the row the user was
+    /// looking at.
+    Adopt { target: Connection },
     /// Leave the frame with this outcome.
     Exit(InlineOutcome),
 }
@@ -952,6 +985,40 @@ fn index_of_id(connections: &[Connection], id: &str) -> usize {
     connections.iter().position(|c| c.id == id).unwrap_or(0)
 }
 
+/// Fold the store's answer to [`Effect::Adopt`] into the state the frame is
+/// rebuilt from.
+///
+/// The adopt half of the honesty rule, the same shape as [`settle_add`]: the
+/// `y` is what the user *did*, and `◇ adopted` is a claim about the file.
+///
+/// * `Ok(connection)` — the note earns `adopted`, and names the copy the store
+///   actually wrote (its fresh id, its absent folder — not the stanza's
+///   `ssh-config:` id). The list is refreshed and shows the result, which for
+///   an adopt means two things at once: the new row is there and the config row
+///   it hides is gone. Both are the store's doing — a `LiveStore` re-merges
+///   inside `adopt` — so this only has to clear a filter that would hide the
+///   new row and put the cursor on it, exactly as an add does.
+/// * `Err(message)` — the store refused, and the caller collapses the frame to
+///   `◆ error …` the way a refused delete does.
+pub fn settle_adopt(
+    _state: &ManageState,
+    connections: &[Connection],
+    outcome: Result<Connection, String>,
+) -> Result<ManageState, String> {
+    match outcome {
+        Ok(connection) => {
+            let selection = index_of_id(connections, &connection.id);
+            Ok(ManageState {
+                phase: Phase::List,
+                query: String::new(),
+                selection,
+                trace: Some(Trace::Adopted { connection }),
+            })
+        }
+        Err(message) => Err(message),
+    }
+}
+
 /// What a [`Store::update`] call actually did (#37).
 ///
 /// The edit half of [`DeleteOutcome`]. The state machine owns no disk and
@@ -1070,6 +1137,7 @@ pub fn step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) -
     match state.phase {
         Phase::List => list_step(state, key, selected),
         Phase::ConfirmDelete { ref target } => confirm_step(state, key, target),
+        Phase::ConfirmAdopt { ref target } => confirm_adopt_step(state, key, target),
         Phase::Form(ref map) => form_step(state, key, map),
     }
 }
@@ -1186,6 +1254,18 @@ fn list_key_step(state: &ManageState, key: KeyEvent, selected: Option<&Connectio
         KeyCode::Esc => return Step::exit(next, InlineOutcome::Cancelled),
         KeyCode::Enter => {
             if let Some(conn) = selected {
+                if conn.source == Source::SshConfig {
+                    // Enter on a Config Host asks for a copy instead of
+                    // picking: the row is the user's own stanza, sshm may not
+                    // change it, and the one thing worth doing to it — putting
+                    // a copy in sshm's store — is a write, so it gets an ask.
+                    return Step::state_only(ManageState {
+                        phase: Phase::ConfirmAdopt {
+                            target: conn.clone(),
+                        },
+                        ..next
+                    });
+                }
                 return Step::exit(next, InlineOutcome::Picked(conn.clone()));
             }
         }
@@ -1268,6 +1348,68 @@ fn declined(state: &ManageState, target: &Connection) -> ManageState {
         trace: Some(Trace::Declined {
             connection: target.clone(),
         }),
+        ..state.clone()
+    }
+}
+
+/// The adopt ask: `y` copies, everything else declines and says nothing.
+///
+/// The answer set is [`confirm_step`]'s, because it is the same kind of
+/// question — an answer that writes `connections.json` — with one difference,
+/// and the difference is what the two questions are about. A declined delete
+/// leaves [`Trace::Declined`] because the frame had asked the user to remove
+/// one of their own Connections and they said no; a declined adopt leaves
+/// **nothing**, because nothing was asked of the store and the list is exactly
+/// the list it was. A settled `■` line over an unchanged row would be recording
+/// a non-event.
+///
+/// * `y` / `Y` — confirm. One adopt, of the captured target.
+/// * `n` / `N`, `Esc` — decline. No effect, no note.
+/// * any other printable — decline **and** filter: a user who hits Enter by
+///   accident and carries on typing ends up searching, not adopting.
+/// * anything else — ignored. The target was captured at the keystroke, so
+///   there is nothing for a moving cursor to change.
+fn confirm_adopt_step(state: &ManageState, key: KeyEvent, target: &Connection) -> Step {
+    if is_chord(key, 'c') {
+        return Step::exit(state.clone(), InlineOutcome::Cancelled);
+    }
+
+    if is_answer(key, 'y') {
+        // The ask, not the claim: whether a row was written is the store's to
+        // say, and the driver folds its answer back through [`settle_adopt`].
+        return Step {
+            state: ManageState {
+                phase: Phase::List,
+                trace: None,
+                ..state.clone()
+            },
+            effects: vec![Effect::Adopt {
+                target: target.clone(),
+            }],
+        };
+    }
+
+    if is_answer(key, 'n') || key.code == KeyCode::Esc {
+        return Step::state_only(declined_adopt(state));
+    }
+
+    if let KeyCode::Char(ch) = key.code {
+        if is_text(key) {
+            let mut next = declined_adopt(state);
+            next.query.push(ch);
+            return Step::state_only(next);
+        }
+    }
+
+    Step::state_only(state.clone())
+}
+
+/// The state after an adopt ask that did not adopt: back on the list, with
+/// nothing to report.
+fn declined_adopt(state: &ManageState) -> ManageState {
+    ManageState {
+        phase: Phase::List,
+        trace: None,
         ..state.clone()
     }
 }

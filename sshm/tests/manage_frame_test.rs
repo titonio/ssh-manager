@@ -66,10 +66,34 @@ fn gpu_server() -> Connection {
     }
 }
 
+/// A Config Host named `build-box`, for the adopt frames: the alias is the one
+/// the ticket's ask is quoted with.
+fn build_box() -> Connection {
+    Connection {
+        id: "ssh-config:build-box".into(),
+        alias: "build-box".into(),
+        host: "build.example.com".into(),
+        user: "ci".into(),
+        port: 2222,
+        key_path: None,
+        folder: None,
+        source: Source::SshConfig,
+    }
+}
+
+/// The stored copy the store hands back after adopting `build_box()`: same
+/// fields, a uuid of its own, and no folder — a stanza has none.
+fn adopted_box() -> Connection {
+    Connection {
+        id: "minted-1".into(),
+        source: Source::Stored,
+        ..build_box()
+    }
+}
+
 fn wide() -> Canvas {
     Canvas::new(120, 24, ColorSupport::Truecolor)
 }
-
 fn line_text(line: &Line<'static>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
@@ -505,6 +529,167 @@ fn the_read_only_note_is_a_muted_note_that_survives_monochrome() {
     assert!(
         joined.contains("◇ read-only — from ssh-config"),
         "the whole note is words, so colour off must not cost a word: {joined}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Adopt: the ask, and the note a copy leaves
+//
+// Enter over a Config Host asks `◆ Adopt build-box into sshm's store? (y/N)`:
+// the same `◆ … (y/N)` grammar as the delete confirm, because it is the same
+// kind of thing — a question whose answer writes a file. The note it leaves is
+// a write note, `◇ adopted build-box`, in the `◇ added` / `◇ edited` grammar:
+// the copy is a Connection the store made, and the row it was made from has
+// just left the list, so the note is the only place the two meet.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The state a real adopt leaves: Enter over the config row, answered `y`, and
+/// the store's answer folded back in — built the way the driver builds it.
+fn adopted_state() -> ManageState {
+    let asking = step(&ManageState::new(), key(KeyCode::Enter), Some(&build_box()));
+    let answered = step(&asking.state, plain('y'), Some(&build_box()));
+    manage::settle_adopt(
+        &answered.state,
+        &[web01(), adopted_box()],
+        Ok(adopted_box()),
+    )
+    .expect("a Connection the store really wrote settles back onto the list")
+}
+
+#[test]
+fn the_adopt_confirm_asks_with_the_ticket_s_own_words() {
+    let asking = step(&ManageState::new(), key(KeyCode::Enter), Some(&build_box()));
+
+    let frame = render_list(&[build_box(), web01()], &asking.state);
+
+    assert_eq!(
+        line_text(&frame.lines()[0]),
+        "◆ Adopt build-box into sshm's store? (y/N)",
+        "the ask is the ticket's string, verbatim — and it names the alias the \
+         row underneath wears, not a destination the user has to decode"
+    );
+}
+
+#[test]
+fn the_adopt_confirm_hints_only_the_answers_it_reads() {
+    let asking = step(&ManageState::new(), key(KeyCode::Enter), Some(&build_box()));
+
+    let frame = render_list(&[build_box()], &asking.state);
+    let rail = line_text(frame.lines().iter().rev().nth(1).expect("hint rail"));
+
+    for answer in ["y confirm", "N abort", "Esc back"] {
+        assert!(
+            rail.contains(answer),
+            "the adopt ask reads exactly these, so it must name them: {rail:?}"
+        );
+    }
+}
+
+/// The ask is a line in the frame, not a new frame: the row it asks about stays
+/// on the glass, and the height does not move.
+#[test]
+fn the_adopt_confirm_still_shows_the_list_at_the_same_height() {
+    let plain_frame = render_list(&[build_box(), web01()], &ManageState::new());
+    let asking = step(&ManageState::new(), key(KeyCode::Enter), Some(&build_box()));
+
+    let frame = render_list(&[build_box(), web01()], &asking.state);
+    let text = frame_text(&frame);
+
+    assert_eq!(
+        frame.lines().len(),
+        plain_frame.lines().len(),
+        "opening the ask must not change the frame's height"
+    );
+    assert_eq!(frame.lines().len(), FRAME_LINES);
+    assert!(
+        text.iter().any(|l| l.contains("[ssh-config] build-box")),
+        "the row being asked about is still on the glass: {text:?}"
+    );
+}
+
+#[test]
+fn an_adopted_connection_is_noted_in_the_write_grammar() {
+    let adopted = adopted_state();
+
+    let frame = render_list(&[web01(), adopted_box()], &adopted);
+
+    assert_eq!(
+        note(&frame),
+        "◇ adopted build-box",
+        "one note, verb then alias, like every other write note"
+    );
+    assert_eq!(
+        line_text(&frame.lines()[0]),
+        "◆ Manage Connections",
+        "the ask is over, so the header is the list's again"
+    );
+}
+
+/// The note is a `◇` note like every other one: `fg_muted` carries it, no
+/// `DIM`, and with the colour turned off the words are all that is left — so
+/// the words have to be enough.
+#[test]
+fn the_adopt_note_is_a_muted_note_that_survives_monochrome() {
+    let adopted = adopted_state();
+    let frame = render_list(&[web01(), adopted_box()], &adopted);
+
+    let glyph = line_with(&frame, '◇')
+        .spans
+        .iter()
+        .find(|s| s.content.contains('◇'))
+        .expect("the ◇ glyph span");
+    assert_eq!(
+        glyph.style.fg,
+        Some(sshm::theme::Theme::clack().fg_muted),
+        "the note is a *muted* note: {:?}",
+        glyph.style
+    );
+    assert!(
+        !glyph.style.add_modifier.contains(Modifier::DIM),
+        "the note must not carry DIM: {:?}",
+        glyph.style
+    );
+
+    let mono = build_frame_with_flow(
+        &[web01(), adopted_box()],
+        &adopted.query,
+        adopted.selection,
+        FrameMode::Manage,
+        Canvas::new(120, 24, ColorSupport::Monochrome),
+        &FrameFlow::from(&adopted),
+    );
+    let joined = frame_text(&mono).join("\n");
+    assert!(
+        joined.contains("◇ adopted build-box"),
+        "the whole note is words, so colour off must not cost a word: {joined}"
+    );
+}
+
+/// The ask is drawn with the delete confirm's span grammar: the verb and the
+/// alias bold, the `(y/N)` muted, and the `◆` in the accent role — no literal
+/// hue anywhere, and the same recession with the colour turned off.
+#[test]
+fn the_adopt_ask_wears_the_confirm_span_grammar() {
+    let asking = step(&ManageState::new(), key(KeyCode::Enter), Some(&build_box()));
+    let frame = render_list(&[build_box()], &asking.state);
+
+    let header = &frame.lines()[0];
+    let styled = |needle: &str| {
+        header
+            .spans
+            .iter()
+            .find(|s| s.content.contains(needle))
+            .unwrap_or_else(|| panic!("no span containing {needle:?} in {header:?}"))
+    };
+    let bold = ratatui::style::Style::default()
+        .fg(sshm::theme::Theme::clack().fg)
+        .add_modifier(Modifier::BOLD);
+    assert_eq!(styled("Adopt").style, bold, "the verb is bold");
+    assert_eq!(styled("build-box").style, bold, "and so is the alias");
+    assert_eq!(
+        styled("(y/N)").style,
+        ratatui::style::Style::default().fg(sshm::theme::Theme::clack().fg_muted),
+        "the answer hint recedes into `fg_muted`, as the delete confirm's does"
     );
 }
 

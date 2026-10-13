@@ -110,4 +110,17 @@ impl Store for LiveStore {
         self.refresh();
         Ok(edited)
     }
+
+    /// Copy a Config Host into the store and re-merge, which is the whole
+    /// reason adopt needs the freshness contract at all.
+    ///
+    /// The copy matches the stanza it was made from on host and user, so the
+    /// collision rule retires the config row the moment the store row exists:
+    /// without the re-merge the frame would go on listing a row the user has
+    /// just resolved, and the `◇ adopted` note would be describing a duplicate.
+    fn adopt(&mut self, target: &Connection) -> Result<Connection, String> {
+        let adopted = connections::adopt(&mut self.config, target)?;
+        self.refresh();
+        Ok(adopted)
+    }
 }

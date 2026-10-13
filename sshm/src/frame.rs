@@ -307,6 +307,14 @@ pub enum FrameMode {
 pub struct FrameFlow {
     /// The Connection the inline delete confirm is asking about.
     pub confirming: Option<Connection>,
+    /// The Config Host the adopt ask is offering to copy into the store.
+    ///
+    /// A separate field rather than a second meaning for `confirming`, because
+    /// the two asks are different questions about different rows: one is
+    /// "remove this Connection of yours", the other "take a copy of this
+    /// stanza into sshm". The frame draws both with the same `◆ … (y/N)`
+    /// grammar and the same rail, and nothing else about them is shared.
+    pub adopt_confirm: Option<Connection>,
     /// What the last management action did, rendered as the lines above the
     /// rows.
     pub trace: Option<crate::manage::Trace>,
@@ -353,10 +361,12 @@ pub struct FormFlow {
 
 impl From<&crate::manage::ManageState> for FrameFlow {
     fn from(state: &crate::manage::ManageState) -> Self {
-        let (confirming, form) = match &state.phase {
-            crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None),
-            crate::manage::Phase::List => (None, None),
+        let (confirming, adopt_confirm, form) = match &state.phase {
+            crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None, None),
+            crate::manage::Phase::ConfirmAdopt { target } => (None, Some(target.clone()), None),
+            crate::manage::Phase::List => (None, None, None),
             crate::manage::Phase::Form(map) => (
+                None,
                 None,
                 Some(FormFlow {
                     rows: map.rows(),
@@ -372,6 +382,7 @@ impl From<&crate::manage::ManageState> for FrameFlow {
 
         Self {
             confirming,
+            adopt_confirm,
             trace: state.trace.clone(),
             form,
         }
@@ -422,9 +433,10 @@ fn trace_lines(trace: &Option<crate::manage::Trace>, t: &Theme) -> Vec<Line<'sta
         Trace::Deleted { .. } | Trace::DeleteFailed { .. } | Trace::Declined { .. } => {
             delete_trace_lines(trace, t)
         }
-        Trace::Added { .. } | Trace::Edited { .. } | Trace::EditFailed { .. } => {
-            write_trace_lines(trace, t)
-        }
+        Trace::Added { .. }
+        | Trace::Adopted { .. }
+        | Trace::Edited { .. }
+        | Trace::EditFailed { .. } => write_trace_lines(trace, t),
         Trace::AddAbandoned | Trace::EditAbandoned => abandoned_trace_lines(trace, t),
         // Not a family, because there is nothing for a family to assemble: no
         // question was asked, so no settled line comes first, and no write
@@ -471,10 +483,17 @@ fn delete_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Lin
 /// user pressed Enter on a Connection the store does not have, and a
 /// `◇ edited` over a list still showing the old row would contradict the
 /// rows underneath it.
+///
+/// `Adopted` is the write the confirm asked about, and it still belongs here:
+/// the ask settled itself by leaving the frame, and what is owed is the plain
+/// fact that a row was written. The copy carries no folder — a stanza has
+/// none — so the note reads `◇ adopted build-box`, verb and alias and nothing
+/// in between.
 fn write_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Line<'static>>> {
     use crate::manage::Trace;
     let (verb, connection) = match trace {
         Trace::Added { connection } => ("added", connection),
+        Trace::Adopted { connection } => ("adopted", connection),
         Trace::Edited { connection } => ("edited", connection),
         Trace::EditFailed { connection } => (EDIT_FAILED_NOTE, connection),
         _ => return None,
@@ -1414,7 +1433,11 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
     const FORM_SUBMIT: &[&str] = &["Esc back", "Enter save", "↑↓ move", "Ctrl+C quit"];
     const CONFIRMING: &[&str] = &["Esc back", "y confirm", "N abort", "Ctrl+C quit"];
 
-    let hints: &[&str] = if flow.confirming.is_some() {
+    // While a confirm is open the rail changes to the answers that confirm
+    // actually reads, in the same order: the way out first. Both asks read the
+    // same four keys, so one hint set serves both — and the adopt ask would be
+    // lying about `N abort` if it inherited the list's rail instead.
+    let hints: &[&str] = if flow.confirming.is_some() || flow.adopt_confirm.is_some() {
         CONFIRMING
     } else if let Some(form) = &flow.form {
         // The rail names what Enter means on the row the cursor is on:
@@ -1500,6 +1523,28 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
         spans.push(Span::styled("(y/N)", dim));
 
         return Line::from(spans);
+    }
+
+    // The adopt ask, in the same `◆ … (y/N)` grammar as the delete: one line,
+    // one question whose answer writes a file. It names the alias the row
+    // underneath already wears and the destination in plain words — "sshm's
+    // store" — because the row it asks about is a stanza the user wrote by
+    // hand, and the only thing worth decoding is where the copy would go.
+    //
+    // No folder prefix, unlike the delete: a Config Host has no folder and the
+    // ask is about the row as it stands.
+    if let Some(target) = &flow.adopt_confirm {
+        let dim = Style::default().fg(t.fg_muted);
+        let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
+
+        return Line::from(vec![
+            Span::styled("◆", Style::default().fg(t.accent)),
+            Span::raw(" "),
+            Span::styled("Adopt ", bold),
+            Span::styled(target.alias.clone(), bold),
+            Span::styled(" into sshm's store? ", bold),
+            Span::styled("(y/N)", dim),
+        ]);
     }
 
     // The form's header names the *ask*, not the field. The old add header

@@ -2955,6 +2955,331 @@ fn the_read_only_refusal_leaves_the_list_the_user_was_reading() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Adopt: Enter on a Config Host copies it into sshm's store
+//
+// A Config Host is the user's own stanza: sshm reads it and never writes it,
+// which is why `Ctrl+X` and `Ctrl+E` refuse above. The one thing worth doing
+// to such a row is *copying* it — adopting it — so Enter, the key that means
+// "this one", asks whether to take a copy into sshm's store. The ask is a
+// confirm like the delete confirm, because the answer writes a file; and it is
+// scoped to the row Enter was pressed over, for the same reason a delete is.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn enter_over_a_config_row_asks_to_adopt_it() {
+    let step = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    );
+
+    assert_eq!(
+        step.state.phase,
+        Phase::ConfirmAdopt {
+            target: gpu_server()
+        },
+        "Enter on a config row asks rather than picking: the row is not sshm's \
+         to connect out of, and the copy is a write"
+    );
+    assert!(
+        step.effects.is_empty(),
+        "an ask writes nothing: the store is asked only after the answer \
+         arrives: {:?}",
+        step.effects
+    );
+}
+
+/// The ask is scoped to the row Enter was pressed over, exactly as a delete is:
+/// the cursor is free to move afterwards and the target is not.
+#[test]
+fn the_adopt_ask_is_scoped_to_the_row_enter_was_pressed_over() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
+
+    let moved = step(&asking, key(KeyCode::Down), Some(&web01()));
+
+    assert_eq!(
+        moved.state.phase,
+        Phase::ConfirmAdopt {
+            target: gpu_server()
+        },
+        "movement does not move the target: the ask is about the row the key \
+         was pressed over"
+    );
+    assert!(moved.effects.is_empty());
+}
+
+#[test]
+fn answering_y_asks_for_exactly_one_adopt_and_returns_to_the_list() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
+
+    let step = step(&asking, plain('y'), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List, "the ask is over");
+    assert_eq!(
+        step.state.trace, None,
+        "whether anything was adopted is a fact about the disk, and the disk \
+         has not been asked yet"
+    );
+    assert_eq!(
+        step.effects,
+        vec![Effect::Adopt {
+            target: gpu_server()
+        }],
+        "one adopt, of the captured target"
+    );
+}
+
+#[test]
+fn answering_n_declines_the_adopt_and_leaves_nothing_to_report() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
+
+    let step = step(&asking, plain('n'), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List);
+    assert_eq!(
+        step.state.trace, None,
+        "nothing was asked of the store and nothing was written, so there is \
+         no answer to record"
+    );
+    assert!(step.effects.is_empty());
+}
+
+#[test]
+fn escape_declines_the_adopt_and_leaves_nothing_to_report() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
+
+    let step = step(&asking, key(KeyCode::Esc), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List);
+    assert_eq!(step.state.trace, None);
+    assert!(step.effects.is_empty());
+}
+
+#[test]
+fn ctrl_c_inside_an_adopt_confirm_cancels_without_adopting() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
+
+    let step = step(&asking, ctrl('c'), Some(&gpu_server()));
+
+    assert_eq!(
+        step.effects,
+        vec![Effect::Exit(InlineOutcome::Cancelled)],
+        "Ctrl+C leaves the frame; it does not adopt on the way out"
+    );
+}
+
+/// The filter is live right through the ask, exactly as it is through a delete
+/// confirm: a user who hits Enter by accident and carries on typing ends up
+/// searching, not adopting.
+#[test]
+fn a_printable_inside_the_adopt_confirm_declines_and_filters() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
+
+    let step = step(&asking, plain('g'), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List, "the ask is gone");
+    assert_eq!(step.state.query, "g", "and the character was not wasted");
+    assert_eq!(
+        step.state.trace, None,
+        "a decline that is also a filter has nothing to report"
+    );
+    assert!(step.effects.is_empty());
+}
+
+/// Enter over a stored row keeps its old meaning: the frame closes with that
+/// Connection. Adopt is what a *config* row's Enter means, and nothing else.
+#[test]
+fn enter_over_a_stored_row_still_picks_it() {
+    let step = step(&ManageState::new(), key(KeyCode::Enter), Some(&web01()));
+
+    assert_eq!(
+        step.effects,
+        vec![Effect::Exit(InlineOutcome::Picked(web01()))],
+        "a stored row is sshm's own: Enter takes it, it does not offer a copy"
+    );
+    assert_eq!(step.state.phase, Phase::List);
+}
+
+/// Opening the ask does not erase what happened last; answering it does.
+///
+/// The note above the list is the answer to the last question the frame asked,
+/// so while the ask is open the previous action's note is still on the glass —
+/// it is still the last thing that happened. But an answer to *this* question
+/// is not that old claim: leaving `◇ added web-01` above a row the user has
+/// just said yes to would be reporting the wrong event, and the driver replaces
+/// it either way, so the state the ask hands back must not be holding on to it.
+#[test]
+fn answering_y_clears_the_note_the_previous_action_left() {
+    let stale = ManageState {
+        trace: Some(Trace::Added {
+            connection: web01(),
+        }),
+        ..ManageState::new()
+    };
+    let asking = step(&stale, key(KeyCode::Enter), Some(&gpu_server())).state;
+    assert_eq!(
+        asking.trace,
+        Some(Trace::Added {
+            connection: web01()
+        }),
+        "the ask opens over the note that was already there"
+    );
+
+    let step = step(&asking, plain('y'), Some(&gpu_server()));
+
+    assert_eq!(
+        step.state.trace, None,
+        "the answer is a question put to the store, not the note that came \
+         before it"
+    );
+}
+
+/// A declined adopt has nothing to say, and that includes the note left over
+/// from whatever happened before the ask.
+///
+/// The frame's note is the answer to the last question it asked. The last
+/// question was this one, the answer was no, and there is nothing to report —
+/// so the glass goes back to being a list and nothing else, rather than
+/// wearing an old claim as though it were the newest thing on screen.
+#[test]
+fn declining_the_adopt_clears_the_note_the_previous_action_left() {
+    let stale = ManageState {
+        trace: Some(Trace::Added {
+            connection: web01(),
+        }),
+        ..ManageState::new()
+    };
+    let asking = step(&stale, key(KeyCode::Enter), Some(&gpu_server())).state;
+
+    let step = step(&asking, key(KeyCode::Esc), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List);
+    assert_eq!(step.state.trace, None);
+}
+
+/// The decline hands back the list the user was reading.
+///
+/// Their filter and their cursor are theirs: the ask borrowed the frame for a
+/// moment and gives it back as it was, which is the same promise the delete
+/// confirm makes. A decline that reset the search box would be a side effect
+/// nobody asked for, and one nobody would think to look for.
+#[test]
+fn declining_the_adopt_hands_back_the_list_the_user_was_reading() {
+    let filtered = ManageState {
+        query: "gpu".into(),
+        selection: 4,
+        ..ManageState::new()
+    };
+    let asking = step(&filtered, key(KeyCode::Enter), Some(&gpu_server())).state;
+
+    let step = step(&asking, plain('n'), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List);
+    assert_eq!(step.state.query, "gpu", "the filter is still the filter");
+    assert_eq!(step.state.selection, 4, "and the cursor is where it was");
+    assert!(step.effects.is_empty());
+}
+
+// ── settle_adopt: the note is the store's to give ───────────────────────────
+
+#[test]
+fn an_adopt_the_store_wrote_earns_the_adopted_note() {
+    let adopted = Connection {
+        id: "minted-1".into(),
+        source: Source::Stored,
+        ..gpu_server()
+    };
+    let list = vec![web01(), adopted.clone()];
+
+    let settled = manage::settle_adopt(&ManageState::new(), &list, Ok(adopted.clone()))
+        .expect("a Connection the store wrote settles back onto the list");
+
+    assert_eq!(settled.phase, Phase::List);
+    assert_eq!(
+        settled.trace,
+        Some(Trace::Adopted {
+            connection: adopted
+        })
+    );
+    assert_eq!(
+        settled.selection, 1,
+        "the cursor lands on the row the store just made"
+    );
+}
+
+/// The adopted row is a *new* row in a list that was filtered: a filter the
+/// user typed before the ask would otherwise hide the row the note names.
+#[test]
+fn an_adopt_clears_a_filter_that_would_hide_the_new_row() {
+    let adopted = Connection {
+        id: "minted-1".into(),
+        source: Source::Stored,
+        ..gpu_server()
+    };
+    let filtered = ManageState {
+        query: "web".into(),
+        ..ManageState::new()
+    };
+
+    let settled = {
+        let list = vec![adopted.clone()];
+        manage::settle_adopt(&filtered, &list, Ok(adopted))
+    }
+    .expect("settles");
+
+    assert_eq!(
+        settled.query, "",
+        "the list is refreshed and shows the resulting Connection"
+    );
+}
+
+#[test]
+fn a_refused_adopt_is_reported_as_a_failure() {
+    let outcome = manage::settle_adopt(
+        &ManageState::new(),
+        &[],
+        Err("read-only file system".into()),
+    );
+
+    assert_eq!(
+        outcome,
+        Err("read-only file system".to_string()),
+        "a store that refused the write is the caller's to collapse, not a \
+         note to paint over the list"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test helpers
 // ─────────────────────────────────────────────────────────────────────────────
 

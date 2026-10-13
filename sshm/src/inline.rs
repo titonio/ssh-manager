@@ -884,6 +884,7 @@ fn perform<W: Write>(
         Effect::Exit(outcome) => settle(live, paint.canvas, outcome).map(Some),
         Effect::Delete { target } => perform_delete(live, store, state, target, paint),
         Effect::Add { draft } => perform_add(live, store, state, draft, paint),
+        Effect::Adopt { target } => perform_adopt(live, store, state, target, paint),
         Effect::Update { target, draft } => {
             perform_update(live, store, state, target, draft, paint)
         }
@@ -927,6 +928,33 @@ fn perform_add<W: Write>(
             Ok(None)
         }
         Err(message) => settle_add_error(live, paint.canvas, &draft, message).map(Some),
+    }
+}
+
+/// [`Store::adopt`] is the only implementation of "copy a Config Host into the
+/// store", so the `◇ adopted` note can only ever report what the store
+/// answered — the same discipline [`perform_add`] is written under.
+///
+/// The failure collapses through [`settle_error`] and not [`settle_add_error`]:
+/// an adopt has a Connection to name — the row the ask was about — where an add
+/// has only a draft, and a line that invented a draft here would be describing
+/// input the user never typed.
+///
+/// [`Store::adopt`]: crate::connections::Store::adopt
+fn perform_adopt<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &mut dyn Store,
+    state: &mut ManageState,
+    target: Connection,
+    paint: &Paint<'_>,
+) -> io::Result<Option<InlineOutcome>> {
+    let adopted = store.adopt(&target);
+    match manage::settle_adopt(state, store.all(), adopted) {
+        Ok(next) => {
+            *state = next;
+            Ok(None)
+        }
+        Err(message) => settle_error(live, paint.canvas, &target, message).map(Some),
     }
 }
 
@@ -1253,6 +1281,21 @@ mod tests {
         }
     }
 
+    /// A Config Host: a row merged in from `~/.ssh/config`, which is the only
+    /// kind of row an adopt is ever asked about.
+    fn config_host(alias: &str) -> Connection {
+        Connection {
+            id: format!("ssh-config:{alias}"),
+            alias: alias.to_string(),
+            host: "gpu.example.com".into(),
+            user: "root".into(),
+            port: 22,
+            key_path: None,
+            folder: None,
+            source: Source::SshConfig,
+        }
+    }
+
     fn draft() -> ConnectionDraft {
         ConnectionDraft {
             alias: "db-01".into(),
@@ -1329,6 +1372,27 @@ mod tests {
             self.connections[at].alias = draft.alias.clone();
             self.connections[at].host = draft.host.clone();
             Ok(Some(self.connections[at].clone()))
+        }
+
+        fn adopt(&mut self, target: &Connection) -> Result<Connection, String> {
+            self.asked.push(format!("adopt {}", target.alias));
+            if let Some(reason) = &self.refuse {
+                return Err(reason.clone());
+            }
+            if target.source != Source::SshConfig {
+                return Err(format!(
+                    "adopt refused: {} is already in sshm's store",
+                    target.alias
+                ));
+            }
+            let conn = Connection {
+                id: format!("minted-{}", self.connections.len()),
+                folder: None,
+                source: Source::Stored,
+                ..target.clone()
+            };
+            self.connections.push(conn.clone());
+            Ok(conn)
         }
     }
 
@@ -1706,6 +1770,40 @@ mod tests {
         let (answer, _, glass) = perform_effect(Effect::Add { draft: draft() }, &mut store);
 
         let err = answer.expect_err("a refused add is a failed command");
+        assert!(format!("{err}").contains("read-only file system"));
+        assert!(plain(&glass).contains("error"), "the glass says so too");
+    }
+
+    #[test]
+    fn an_adopt_effect_writes_through_the_store_and_names_the_new_row() {
+        let mut store = ledger(vec![config_host("gpu-server")]);
+        let target = store.all()[0].clone();
+
+        let (answer, state, glass) = perform_effect(Effect::Adopt { target }, &mut store);
+
+        assert!(answer.expect("the store took the adopt").is_none());
+        assert_eq!(store.asked, vec!["adopt gpu-server".to_string()]);
+        let copy = store.connections[1].clone();
+        assert_eq!(copy.source, Source::Stored, "the copy is sshm's own");
+        assert_eq!(
+            state.trace,
+            Some(manage::Trace::Adopted { connection: copy }),
+            "the note reports the row the store wrote, not the stanza it came \
+             from, and it is earned by that answer rather than by the `y`"
+        );
+        assert_eq!(state.selection, 1, "and the cursor lands on the new row");
+        assert!(plain(&glass).is_empty(), "an adopt repaints nothing here");
+    }
+
+    #[test]
+    fn a_refused_adopt_collapses_the_frame_and_leaves_an_error() {
+        let mut store = ledger(vec![config_host("gpu-server")]);
+        store.refuse = Some("read-only file system".into());
+        let target = store.all()[0].clone();
+
+        let (answer, _, glass) = perform_effect(Effect::Adopt { target }, &mut store);
+
+        let err = answer.expect_err("a refused adopt is a failed command");
         assert!(format!("{err}").contains("read-only file system"));
         assert!(plain(&glass).contains("error"), "the glass says so too");
     }

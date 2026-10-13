@@ -9,8 +9,9 @@
 
 use std::ffi::OsString;
 
-use sshm::config::{parse_ssh_config, Config, Connection, Source};
+use sshm::config::{parse_ssh_config, ssh_config_path, Config, Connection, Source};
 use sshm::connections::{self, ConnectionDraft, Ephemeral, Store};
+use sshm::live::LiveStore;
 
 /// Point `HOME` at a throwaway directory so a test never touches the real
 /// `~/.ssh/connections.json`, and put it back on the way out.
@@ -36,6 +37,15 @@ impl TempHome {
         let ssh_dir = self.path().join(".ssh");
         std::fs::create_dir_all(&ssh_dir).expect("create .ssh");
         std::fs::write(ssh_dir.join("config"), content).expect("write ~/.ssh/config");
+    }
+    /// The aliases the store file holds, in file order: proof that a mutation
+    /// reached the disk and not merely the in-memory set.
+    fn stored_aliases(&self) -> Vec<String> {
+        Config::load()
+            .connections
+            .iter()
+            .map(|c| c.alias.clone())
+            .collect()
     }
 }
 
@@ -642,4 +652,232 @@ fn connection(id: &str, alias: &str) -> sshm::config::Connection {
         folder: Some("prod".to_string()),
         source: Source::Stored,
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Adopt: a Config Host copied into sshm's store
+//
+// The store is the only thing that can write `connections.json`, so the copy an
+// adopt makes is the store's job: it decides what the new row is, whether it
+// may exist at all, and what the list looks like once it does. The frame asks;
+// these tests are about what answering means.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A `~/.ssh/config` holding one box, and the live store reading it: the pair a
+/// frame is actually handed, built the way `main.rs` builds one.
+fn live_store_with_a_config_host() -> (TempHome, LiveStore) {
+    let home = TempHome::new();
+    home.write_ssh_config(
+        "Host build-box\n  HostName build.example.com\n  User ci\n  Port 2222\n  IdentityFile ~/.ssh/id_ci\n",
+    );
+    let store = LiveStore::new(Config::load(), ssh_config_path());
+    (home, store)
+}
+
+/// The config row of that fixture, as the frame would hand it back.
+fn config_row(store: &LiveStore) -> Connection {
+    store
+        .all()
+        .iter()
+        .find(|c| c.source == Source::SshConfig)
+        .cloned()
+        .expect("the fixture lists a config row")
+}
+
+#[test]
+#[serial_test::serial]
+fn adopting_a_config_row_writes_it_into_sshms_store() {
+    let (home, mut store) = live_store_with_a_config_host();
+    let target = config_row(&store);
+
+    let adopted = store
+        .adopt(&target)
+        .expect("a Config Host can be copied into the store");
+
+    assert_eq!(adopted.alias, "build-box");
+    assert_eq!(adopted.host, "build.example.com");
+    assert_eq!(adopted.user, "ci");
+    assert_eq!(adopted.port, 2222);
+    assert_eq!(adopted.key_path.as_deref(), Some("~/.ssh/id_ci"));
+    assert_eq!(
+        adopted.folder, None,
+        "a stanza has no folder and an adopt does not invent one"
+    );
+    assert_eq!(
+        adopted.source,
+        Source::Stored,
+        "the copy is sshm's own from here on, which is what makes it editable"
+    );
+    assert_ne!(
+        adopted.id, target.id,
+        "the copy is a new Connection, not the stanza re-labelled"
+    );
+    assert_eq!(
+        home.stored_aliases(),
+        vec!["build-box".to_string()],
+        "the write reached the file, not just the list"
+    );
+}
+
+/// An adopt lands unfiled whatever the row it was made from claims.
+///
+/// A `Host` stanza has no folder, so a config row wearing one is a row the
+/// frame is holding from before something else changed. Inheriting it would
+/// file the new Connection under a folder that only ever described a different
+/// row — the copy would open in the wrong place, and the user would have to
+/// know that before they could find it.
+#[test]
+#[serial_test::serial]
+fn an_adopted_row_lands_unfiled_even_if_the_row_it_came_from_carries_a_folder() {
+    let (_home, mut store) = live_store_with_a_config_host();
+    let target = Connection {
+        folder: Some("somewhere-else".into()),
+        ..config_row(&store)
+    };
+
+    let adopted = store
+        .adopt(&target)
+        .expect("a Config Host can be copied into the store");
+
+    assert_eq!(
+        adopted.folder, None,
+        "the copy is unfiled: an adopt never files a Connection the user did \
+         not file"
+    );
+}
+
+/// The collision rule is what makes an adopt visible as *one* row: the stored
+/// copy matches the stanza on host and user, so the config row it was made from
+/// stops being listed in the same keystroke that wrote the copy. A frame that
+/// kept both would show the user a duplicate they just resolved.
+#[test]
+#[serial_test::serial]
+fn adopting_a_config_row_leaves_one_row_for_that_host() {
+    let (_home, mut store) = live_store_with_a_config_host();
+    let target = config_row(&store);
+    assert_eq!(
+        store.all().len(),
+        1,
+        "setup: the fixture lists exactly the config row"
+    );
+
+    let adopted = store.adopt(&target).expect("adopted");
+
+    let rows: Vec<&Connection> = store
+        .all()
+        .iter()
+        .filter(|c| c.alias == "build-box")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the stored copy hides the stanza it was made from: {:?}",
+        aliases(store.all())
+    );
+    assert_eq!(
+        rows[0].id, adopted.id,
+        "and the row that survives is the copy"
+    );
+    assert_eq!(rows[0].source, Source::Stored);
+}
+
+#[test]
+#[serial_test::serial]
+fn adopting_a_stored_row_is_refused() {
+    let (home, mut store) = live_store_with_a_config_host();
+    let kept = store
+        .add(&draft("web-01", "10.0.0.4", "deploy", "22"))
+        .expect("the fixture's stored row");
+    let before = home.stored_aliases();
+
+    let refusal = store
+        .adopt(&kept)
+        .expect_err("a row that is already sshm's own has nothing to adopt");
+
+    assert!(
+        refusal.contains("web-01"),
+        "the refusal names the row it refused: {refusal}"
+    );
+    assert_eq!(
+        home.stored_aliases(),
+        before,
+        "a refusal writes nothing: a second copy of a Connection the user \
+         already owns is not what they asked for"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn a_stored_store_has_nothing_to_adopt() {
+    let _home = TempHome::new();
+    let mut config = Config::new();
+    let row = connection("id-web-01", "web-01");
+
+    let refusal = config.adopt(&row).expect_err(
+        "a Config holds only stored rows, so there is nothing \
+                     in it to copy in",
+    );
+
+    assert!(
+        refusal.contains("ssh-config"),
+        "the refusal says why: {refusal}"
+    );
+    assert!(
+        config.connections.is_empty(),
+        "and the refusal is not a write with an error stapled on"
+    );
+}
+
+#[test]
+fn ephemeral_adoption_adds_the_row_and_writes_nothing() {
+    let mut store = Ephemeral::new(vec![config_host("build-box", "build.example.com", "ci")]);
+    let target = store.all()[0].clone();
+
+    let adopted = store
+        .adopt(&target)
+        .expect("the visual harness has to be able to show an adopt");
+
+    assert_eq!(
+        store.all().len(),
+        2,
+        "the copy joins the set the frame is showing"
+    );
+    assert_eq!(adopted.source, Source::Stored);
+    assert_eq!(adopted.folder, None);
+    assert_ne!(adopted.id, target.id);
+}
+
+#[test]
+fn ephemeral_refuses_to_adopt_a_stored_row() {
+    let mut store = Ephemeral::new(vec![connection("id-web-01", "web-01")]);
+    let target = store.all()[0].clone();
+
+    let refusal = store
+        .adopt(&target)
+        .expect_err("the harness holds the same rule the real store does");
+
+    assert!(
+        refusal.contains("web-01"),
+        "the refusal names the row it refused: {refusal}"
+    );
+    assert_eq!(store.all().len(), 1, "and nothing was added");
+}
+
+/// A Config Host as the merge would hand it over: no folder, no uuid.
+fn config_host(alias: &str, host: &str, user: &str) -> Connection {
+    Connection {
+        id: format!("ssh-config:{alias}"),
+        alias: alias.to_string(),
+        host: host.to_string(),
+        user: user.to_string(),
+        port: 22,
+        key_path: None,
+        folder: None,
+        source: Source::SshConfig,
+    }
+}
+
+/// The aliases of a list, for failure messages that read as a list.
+fn aliases(rows: &[Connection]) -> Vec<&str> {
+    rows.iter().map(|c| c.alias.as_str()).collect()
 }

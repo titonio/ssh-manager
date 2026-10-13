@@ -109,6 +109,30 @@ fn merged() -> Vec<Connection> {
     vec![gpu_server(), prod_server(), dev_box()]
 }
 
+/// A Config Host named `build-box`, for the adopt frames: the ask is quoted
+/// with this alias, and the copy it offers has no folder to prefix.
+fn build_box() -> Connection {
+    Connection {
+        id: "ssh-config:build-box".into(),
+        alias: "build-box".into(),
+        host: "build.example.com".into(),
+        user: "ci".into(),
+        port: 2222,
+        key_path: None,
+        folder: None,
+        source: Source::SshConfig,
+    }
+}
+
+/// The stored copy an adopt of `build_box()` hands back.
+fn adopted_box() -> Connection {
+    Connection {
+        id: "minted-1".into(),
+        source: Source::Stored,
+        ..build_box()
+    }
+}
+
 /// One unmodified keystroke.
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -1524,6 +1548,7 @@ fn dump_frames_for_review() {
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
                     confirming: Some(c[0].clone()),
+                    adopt_confirm: None,
                     trace: None,
                     form: None,
                 },
@@ -1539,6 +1564,7 @@ fn dump_frames_for_review() {
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::Deleted {
                         connection: c[0].clone(),
                     }),
@@ -1556,6 +1582,7 @@ fn dump_frames_for_review() {
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::DeleteFailed {
                         connection: c[0].clone(),
                     }),
@@ -1573,6 +1600,7 @@ fn dump_frames_for_review() {
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::Edited {
                         connection: c[0].clone(),
                     }),
@@ -1590,6 +1618,7 @@ fn dump_frames_for_review() {
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::EditFailed {
                         connection: c[0].clone(),
                     }),
@@ -1611,6 +1640,7 @@ fn dump_frames_for_review() {
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::AddAbandoned),
                     form: None,
                 },
@@ -1626,6 +1656,7 @@ fn dump_frames_for_review() {
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::EditAbandoned),
                     form: None,
                 },
@@ -1647,6 +1678,7 @@ fn dump_frames_for_review() {
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::ReadOnly {
                         connection: gpu_server(),
                     }),
@@ -1664,8 +1696,84 @@ fn dump_frames_for_review() {
                 Canvas::new(80, 24, mono),
                 &FrameFlow {
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::ReadOnly {
                         connection: gpu_server(),
+                    }),
+                    form: None,
+                },
+            ),
+        ),
+        // The adopt ask and the note it leaves. The ask is the delete confirm's
+        // `◆ … (y/N)` grammar pointed at a different question — so the read is
+        // whether it still reads as *a confirm* and not as a new kind of
+        // screen — and the note is a write note over a list whose config row
+        // has just left. Dumped at 80 columns in both colour modes: the ask
+        // carries more words than the delete's, and the confirm rail has to
+        // survive that next to it.
+        (
+            "frame-manage-adopt-confirm",
+            build_frame_with_flow(
+                &[build_box(), prod_server(), dev_box()],
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    adopt_confirm: Some(build_box()),
+                    trace: None,
+                    form: None,
+                },
+            ),
+        ),
+        (
+            "frame-manage-adopt-confirm-mono",
+            build_frame_with_flow(
+                &[build_box(), prod_server(), dev_box()],
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, mono),
+                &FrameFlow {
+                    confirming: None,
+                    adopt_confirm: Some(build_box()),
+                    trace: None,
+                    form: None,
+                },
+            ),
+        ),
+        (
+            "frame-manage-adopted",
+            build_frame_with_flow(
+                &[adopted_box(), prod_server(), dev_box()],
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    adopt_confirm: None,
+                    trace: Some(sshm::manage::Trace::Adopted {
+                        connection: adopted_box(),
+                    }),
+                    form: None,
+                },
+            ),
+        ),
+        (
+            "frame-manage-adopted-mono",
+            build_frame_with_flow(
+                &[adopted_box(), prod_server(), dev_box()],
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, mono),
+                &FrameFlow {
+                    confirming: None,
+                    adopt_confirm: None,
+                    trace: Some(sshm::manage::Trace::Adopted {
+                        connection: adopted_box(),
                     }),
                     form: None,
                 },
