@@ -91,9 +91,7 @@ fn selecting_a_connection_runs_ssh_with_exactly_the_connection_s_fields() {
 #[test]
 fn selecting_a_config_host_runs_the_bare_alias_and_nothing_else() {
     let fixture = Fixture::new()
-        .with_ssh_config(
-            "Host build-box\n  HostName build.example.com\n  User ci\n  Port 2222\n",
-        )
+        .with_ssh_config("Host build-box\n  HostName build.example.com\n  User ci\n  Port 2222\n")
         .and_then(|f| f.with_ssh_shim())
         .expect("seed");
     let mut pty = Pty::spawn(sshm_binary(), &[], &fixture).expect("spawn sshm");
