@@ -126,7 +126,7 @@ pub struct SshConfigEntry {
     pub hostname: Option<String>,
 }
 
-/// The stanza being read: one slot per keyword the importer understands.
+/// The stanza being read: one slot per keyword the reader understands.
 ///
 /// The slots are per-stanza, not per-line, because ssh_config keywords belong
 /// to the `Host` line above them — which is also why a keyword written before
@@ -147,7 +147,7 @@ impl Stanza {
     /// Fold one keyword's value into the stanza.
     ///
     /// An unknown keyword is ignored, and a `Port` that is not a number leaves
-    /// the slot empty rather than guessing 22 — the importer reports what the
+    /// the slot empty rather than guessing 22 — the reader reports what the
     /// file said, not what it probably meant.
     fn set(&mut self, keyword: &str, value: &str) {
         match keyword {
@@ -200,7 +200,7 @@ impl Stanza {
 /// could disagree.
 ///
 /// The keyword is lowercased because ssh_config is spelled however the user
-/// likes and the importer matches on meaning, not on case.
+/// likes and the reader matches on meaning, not on case.
 ///
 /// The value is the **rest of the line**, not just its first word, because a
 /// `Host` line names every pattern it lists: keeping only the first token
@@ -240,11 +240,11 @@ fn directive(line: &str) -> Option<(String, String)> {
 /// Parse an ssh_config file into one entry per Host pattern it names.
 ///
 /// Lenient by design: a file that cannot be read parses as no entries, and a
-/// line that names no known keyword is skipped — the importer reports what
+/// line that names no known keyword is skipped — the reader reports what
 /// the file said, not what it wishes the file had said. A `Host web db` line
 /// yields two entries sharing the stanza's fields, because both hosts are
 /// real and dropping either is a silent loss. Wildcard patterns are returned
-/// as-is; deciding what is importable is the caller's job.
+/// as-is; deciding what becomes a row is the merge's job.
 pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
     let Ok(content) = fs::read_to_string(path) else {
         return Vec::new();

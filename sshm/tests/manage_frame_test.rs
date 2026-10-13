@@ -96,8 +96,8 @@ fn render(state: &ManageState) -> sshm::frame::Frame {
 }
 
 /// Render the manage frame over an arbitrary list, for the states whose
-/// list is not the fixture's — an empty set, and the CTA that stays under
-/// it, is part of what is pinned.
+/// list is not the fixture's — a refusal note, for instance, is pinned
+/// against the rows it refused.
 fn render_list(list: &[Connection], state: &ManageState) -> sshm::frame::Frame {
     build_frame_with_flow(
         list,
