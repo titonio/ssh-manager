@@ -459,35 +459,3 @@ fn the_file_is_read_at_open_and_again_after_a_mutation() {
          frame was open is there with it"
     );
 }
-
-/// The whole-file import still works through the live store.
-///
-/// The import is retired by a later task, but until it is, it is a mutation like
-/// any other: it goes to the inner store, persists, and re-merges — which is what
-/// keeps the adopted host to one row instead of two. Asserted rather than left
-/// alone, because a delegating method is exactly the line a suite stops looking
-/// at.
-#[test]
-#[serial]
-fn importing_through_the_live_store_still_folds_and_re_merges() {
-    let home = TempHome::new();
-    home.write_ssh_config(
-        "Host web-01\n  HostName 10.0.0.1\n  User deploy\n\nHost db-01\n  HostName 10.0.0.9\n  User dba\n",
-    );
-    let ssh_config = config::ssh_config_path().expect("the throwaway home has a path");
-    let mut store = LiveStore::new(Config::load(), Some(ssh_config.clone()));
-    assert_eq!(aliases(store.all()), vec!["db-01", "web-01"]);
-
-    let report = store
-        .import_ssh_config(ssh_config.to_str().expect("a utf-8 temp path"))
-        .expect("the import succeeds");
-    assert_eq!(report.imported, 2, "both concrete stanzas came across");
-
-    assert_eq!(aliases(store.all()), vec!["db-01", "web-01"]);
-    assert!(
-        store.all().iter().all(|c| c.source == Source::Stored),
-        "an adopted host is one row, and it is the stored one: the config copy \
-         the collision rule hides is the whole adopt story"
-    );
-    assert_eq!(home.stored_aliases(), vec!["web-01", "db-01"]);
-}

@@ -31,7 +31,7 @@ bytes the frame emits, which a glyph snapshot cannot.
 |---|---|
 | `src/*` `#[cfg(test)]` (lib target) | Unit tests beside the code: config, the Connection manager, update checking, the theme/ANSI serializer, and the live driver's keystroke routing — private machinery, so it is tested where it lives |
 | `src/main.rs` `#[cfg(test)]` (bin target) | CLI dispatch and the generated shell init scripts (insta **inline** snapshots) |
-| `tests/connections_test.rs` | The Connection manager seam: add, edit, delete, `~/.ssh/config` import — through the public interface only |
+| `tests/connections_test.rs` | The Connection manager seam: add, edit, delete — through the public interface only |
 | `tests/design_system_test.rs` | The deterministic design gates: palette purity, the Clack palette's shape, hint fitting, `NO_COLOR` degradation, and the settle-verb state set. Plus the frame dump (below) |
 | `tests/emit_test.rs` | The emit axis: `Emit::resolve` turning a frame outcome into an `Action`, and `frame_stream`'s stdout-vs-`/dev/tty` routing |
 | `tests/filter_test.rs` | Fuzzy filtering, `build_row_text`, and the row-text pairing: the field offsets must index the text the frame actually renders |
@@ -182,7 +182,7 @@ expensive kind, and keeping them out of the sweep is what lets them stay.
 | `navigation_test.rs` | The cursor walking and clamping at both ends, filtering as typing, the empty and no-match states, and the two ways out — Escape and Ctrl+C — each with its own status |
 | `form_test.rs` | Ctrl+A and Ctrl+E opening the Form Map, the state glyphs that make a required field differ from an optional one in monochrome, and Enter writing the store |
 | `edit_delete_test.rs` | Editing a Connection row by row, the delete question answered three ways, and every route back out of a form |
-| `import_test.rs` | A first run on a machine that has a `~/.ssh/config`: the config's hosts are the first screen, nothing is offered, and looking writes no store file |
+| `first_run_test.rs` | A first run on a machine that has a `~/.ssh/config`: the config's hosts are the first screen, nothing is offered, and looking writes no store file |
 | `update_test.rs` | A newer release served on loopback appearing as a note above a list that still works |
 | `emit_test.rs` | The argv `ssh` is actually handed, and the fact that a captured pipe receives the alias and none of the frame's chrome |
 | `shell_test.rs` | The Shell Widget in a real zsh and a real bash: the chord firing, the buffer being replaced, and Escape leaving a half-typed command alone |

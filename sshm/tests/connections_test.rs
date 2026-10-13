@@ -9,7 +9,7 @@
 
 use std::ffi::OsString;
 
-use sshm::config::{Config, Connection, Source};
+use sshm::config::{parse_ssh_config, Config, Connection, Source};
 use sshm::connections::{self, ConnectionDraft, Ephemeral, Store};
 
 /// Point `HOME` at a throwaway directory so a test never touches the real
@@ -231,205 +231,6 @@ fn user_can_add_a_connection_from_a_draft() {
     assert!(
         !added.id.is_empty(),
         "an added Connection carries an id of its own"
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn user_can_import_connections_from_the_ssh_config() {
-    let home = TempHome::new();
-    home.write_ssh_config(
-        "Host web-01\n  HostName 10.0.0.4\n  User deploy\n  Port 2222\n\
-         \nHost db-01\n  HostName 10.0.0.9\n  User dba\n",
-    );
-    let mut config = Config::new();
-
-    let report = connections::import(&mut config).expect("import should succeed");
-
-    assert_eq!(report.imported, 2, "both Connections came across");
-    assert_eq!(report.failed(), 0);
-    assert_eq!(config.connections.len(), 2);
-    assert_eq!(config.connections[0].alias, "web-01");
-    assert_eq!(config.connections[0].host, "10.0.0.4");
-    assert_eq!(config.connections[0].user, "deploy");
-    assert_eq!(config.connections[0].port, 2222);
-    assert_eq!(
-        config.connections[1].port, 22,
-        "a Host with no Port line lands on the SSH default"
-    );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// The import seam (#38) — what the first-run offer actually does on `y`
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// The offer says "Import 2 connections from ~/.ssh/config?" and the user's
-/// `y` has to be durable: the folded Connections are on disk, not just in
-/// the set the frame was holding.
-#[test]
-#[serial_test::serial]
-fn the_store_persists_the_connections_it_imported() {
-    let home = TempHome::new();
-    home.write_ssh_config(
-        "Host web-01\n  HostName 10.0.0.4\n  User deploy\n\n\
-         Host db-01\n  HostName 10.0.0.9\n  User dba\n",
-    );
-    let mut config = Config::new();
-    let stored = home.path().join(".ssh").join("connections.json");
-    assert!(!stored.exists(), "nothing written before the import");
-
-    let store: &mut dyn Store = &mut config;
-    let report = store
-        .import_ssh_config(home.path().join(".ssh").join("config").to_str().unwrap())
-        .expect("importing a readable ssh config should succeed");
-
-    assert_eq!(report.imported, 2);
-    let on_disk = std::fs::read_to_string(&stored).expect("the import should have written the set");
-    assert!(
-        on_disk.contains("web-01") && on_disk.contains("db-01"),
-        "both imported Connections must reach the persisted set: {on_disk}"
-    );
-}
-
-/// Nothing to add means nothing to write: an import that folded no new
-/// Connection must not touch the user's file, the same rule the delete and
-/// edit paths hold.
-#[test]
-#[serial_test::serial]
-fn the_store_writes_nothing_when_the_import_adds_nothing() {
-    let home = TempHome::new();
-    let ssh_config = home.path().join(".ssh").join("config");
-    home.write_ssh_config("Host web-01\n  HostName 10.0.0.4\n  User deploy\n");
-    let mut config = Config::new();
-    connections::add(&mut config, &draft("web-01", "10.0.0.4", "deploy", "22")).unwrap();
-    let stored = home.path().join(".ssh").join("connections.json");
-    std::fs::remove_file(&stored).expect("the add should have written the set");
-
-    let store: &mut dyn Store = &mut config;
-    let report = store
-        .import_ssh_config(ssh_config.to_str().unwrap())
-        .expect("an import with nothing to add is not a failure");
-
-    assert_eq!(report.imported, 0, "every stanza is already held");
-    assert!(
-        !stored.exists(),
-        "nothing was added, so the set must not be written at all"
-    );
-}
-
-/// A partial failure is still a success: the good Connections arrive and
-/// get persisted, and the ones that could not become Connections are
-/// reported rather than silently dropped.
-#[test]
-#[serial_test::serial]
-fn the_store_imports_the_good_stanzas_and_reports_the_ones_that_could_not_arrive() {
-    let home = TempHome::new();
-    let ssh_config = home.path().join(".ssh").join("config");
-    home.write_ssh_config(
-        "Host web-01\n  HostName 10.0.0.4\n  User deploy\n\n\
-         Host *.example.com\n  User wildcard\n\n\
-         Host db-01\n  HostName 10.0.0.9\n  User dba\n",
-    );
-    let mut config = Config::new();
-
-    let store: &mut dyn Store = &mut config;
-    let report = store
-        .import_ssh_config(ssh_config.to_str().unwrap())
-        .expect("a stanza that cannot import must not abort the import");
-
-    assert_eq!(report.imported, 2, "the concrete Hosts still came across");
-    assert_eq!(
-        report.failures,
-        vec!["wildcard host \"*.example.com\""],
-        "the stanza that could not become a Connection is named"
-    );
-    assert_eq!(config.connections.len(), 2);
-
-    let on_disk = std::fs::read_to_string(home.path().join(".ssh").join("connections.json"))
-        .expect("a partial import is still an import");
-    assert!(
-        !on_disk.contains("*.example.com"),
-        "the wildcard pattern must not be persisted as a Connection: {on_disk}"
-    );
-}
-
-/// A second `y` on the same set adds nothing, so it writes nothing — the
-/// offer cannot turn into a pile of duplicate Connections by being answered
-/// twice.
-#[test]
-#[serial_test::serial]
-fn importing_twice_adds_nothing_the_second_time() {
-    let home = TempHome::new();
-    let ssh_config = home.path().join(".ssh").join("config");
-    home.write_ssh_config(
-        "Host web-01\n  HostName 10.0.0.4\n  User deploy\n\n\
-         Host db-01\n  HostName 10.0.0.9\n  User dba\n",
-    );
-    let mut config = Config::new();
-    let store: &mut dyn Store = &mut config;
-
-    store
-        .import_ssh_config(ssh_config.to_str().unwrap())
-        .expect("first import");
-    let second = store
-        .import_ssh_config(ssh_config.to_str().unwrap())
-        .expect("a second import is not a failure");
-
-    assert_eq!(second.imported, 0, "everything was already in the set");
-    assert_eq!(second.failed(), 0);
-    assert_eq!(store.all().len(), 2, "no duplicates were added");
-}
-
-/// The visual harness imports through `Ephemeral` too: the folded rows
-/// really land in the set the frame is showing, but nothing reaches the
-/// user's `connections.json`. Same fold, durability absent.
-#[test]
-#[serial_test::serial]
-fn ephemeral_import_folds_the_set_without_persisting_it() {
-    let home = TempHome::new();
-    let ssh_config = home.path().join(".ssh").join("config");
-    home.write_ssh_config(
-        "Host web-01\n  HostName 10.0.0.4\n  User deploy\n\n\
-         Host *.example.com\n  User wildcard\n",
-    );
-    let mut store = Ephemeral::new(Vec::new());
-
-    let report = store
-        .import_ssh_config(ssh_config.to_str().unwrap())
-        .expect("folding should succeed");
-
-    assert_eq!(report.imported, 1, "the concrete Host arrived");
-    assert_eq!(report.failures, vec!["wildcard host \"*.example.com\""]);
-    assert_eq!(store.all().len(), 1, "the set really grew");
-    assert_eq!(store.all()[0].alias, "web-01");
-
-    let stored = home.path().join(".ssh").join("connections.json");
-    assert!(
-        !stored.exists(),
-        "the harness store must never write the user's connections.json"
-    );
-}
-
-#[test]
-#[serial_test::serial]
-fn ephemeral_import_twice_adds_nothing() {
-    let home = TempHome::new();
-    let ssh_config = home.path().join(".ssh").join("config");
-    home.write_ssh_config("Host web-01\n  HostName 10.0.0.4\n  User deploy\n");
-    let mut store = Ephemeral::new(Vec::new());
-
-    store
-        .import_ssh_config(ssh_config.to_str().unwrap())
-        .expect("first fold");
-    let second = store
-        .import_ssh_config(ssh_config.to_str().unwrap())
-        .expect("a second fold is not a failure");
-
-    assert_eq!(second.imported, 0);
-    assert_eq!(
-        store.all().len(),
-        1,
-        "no duplicates in the harness set either"
     );
 }
 
@@ -734,86 +535,6 @@ fn ephemeral_update_answers_with_the_connection_it_wrote() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The import boundary (#38) — the write happens exactly when something arrived
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// The offer counts what would arrive, the user says `y`, and the accounting has
-/// to match the write: an import that folded nothing must leave the user's
-/// `connections.json` alone. Write on an empty import and a user who declined
-/// to be surprised gets a Connections file created out of nothing — and every
-/// later run now has a set to load where there was none.
-#[test]
-#[serial_test::serial]
-fn the_import_writes_nothing_when_no_connection_arrived() {
-    let home = TempHome::new();
-    home.write_ssh_config("Host *\n  User default\n\nHost *.example.com\n  User wildcard\n");
-    let mut config = Config::new();
-    let stored = home.path().join(".ssh").join("connections.json");
-    assert!(!stored.exists(), "nothing written before the import");
-
-    let report =
-        connections::import(&mut config).expect("an import with nothing to add is not a failure");
-
-    assert_eq!(
-        report.imported, 0,
-        "both stanzas are patterns, so nothing arrived"
-    );
-    assert!(
-        !stored.exists(),
-        "zero Connections arrived, so the set must not be written at all"
-    );
-}
-
-/// One Connection is already a reason to write: the user who imported a single
-/// Host stanza and restarts sshm to an empty list was told `◇ imported 1
-/// connection` for nothing. This is the boundary — one arrived, so the file is
-/// there.
-#[test]
-#[serial_test::serial]
-fn the_import_writes_the_set_when_a_single_connection_arrived() {
-    let home = TempHome::new();
-    home.write_ssh_config("Host web-01\n  HostName 10.0.0.4\n  User deploy\n");
-    let mut config = Config::new();
-
-    let report = connections::import(&mut config).expect("importing one Connection should succeed");
-
-    assert_eq!(report.imported, 1, "exactly one Connection arrived");
-    let on_disk = std::fs::read_to_string(home.path().join(".ssh").join("connections.json"))
-        .expect("one imported Connection is still an import, so the set must be written");
-    assert!(
-        on_disk.contains("web-01") && on_disk.contains("10.0.0.4"),
-        "the imported Connection must be on disk: {on_disk}"
-    );
-}
-
-/// And the write does not stop being a write as the count grows: three stanzas
-/// arriving means three Connections in the file, not a report of three and an
-/// untouched disk.
-#[test]
-#[serial_test::serial]
-fn the_import_writes_the_set_when_every_stanza_arrived() {
-    let home = TempHome::new();
-    home.write_ssh_config(
-        "Host web-01\n  HostName 10.0.0.4\n  User deploy\n\n\
-         Host web-02\n  HostName 10.0.0.5\n  User deploy\n\n\
-         Host db-01\n  HostName 10.0.0.9\n  User dba\n",
-    );
-    let mut config = Config::new();
-
-    let report = connections::import(&mut config).expect("importing should succeed");
-
-    assert_eq!(report.imported, 3, "every concrete Host arrived");
-    let on_disk = std::fs::read_to_string(home.path().join(".ssh").join("connections.json"))
-        .expect("three imported Connections are written");
-    for alias in ["web-01", "web-02", "db-01"] {
-        assert!(
-            on_disk.contains(alias),
-            "{alias} must be in the persisted set: {on_disk}"
-        );
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Reading the saved set — the Connections the user already has
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -859,10 +580,10 @@ fn loading_reads_the_connections_the_user_saved() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// A commented-out stanza stays commented out: `# Host old-box` is a note the
-/// user left themselves, not a Connection waiting to be imported, and a blank
-/// line is a blank line. The reader's contract is that a directive is neither a
-/// blank line nor a comment, so a user who commented a box out before importing
-/// must not get it back as a Connection they never asked for.
+/// user left themselves, not a stanza waiting to be read, and a blank line is a
+/// blank line. The reader's contract is that a directive is neither a blank line
+/// nor a comment, so a user who commented a box out must not find it back on a
+/// list they never asked for.
 ///
 /// Sweep note, so nobody hunts for the missing kill: the `||` → `&&` mutant on
 /// that guard is *equivalent*, and this test does not kill it — it passes under
@@ -877,7 +598,7 @@ fn loading_reads_the_connections_the_user_saved() {
 /// 20 000 random six-line files — byte for byte identical, 21 482 cases.
 #[test]
 #[serial_test::serial]
-fn a_comment_or_a_blank_line_never_becomes_a_connection() {
+fn a_comment_or_a_blank_line_never_becomes_a_stanza() {
     let home = TempHome::new();
     home.write_ssh_config(
         "# Host commented-out\n\
@@ -887,23 +608,27 @@ fn a_comment_or_a_blank_line_never_becomes_a_connection() {
          Host real-one\n  HostName 10.0.0.1\n  User alice\n\
          #user bob\n#hostname 10.0.0.2\n#port 9999\n#\n",
     );
-    let mut config = Config::new();
 
-    let report = connections::import(&mut config).expect("a commented stanza is not a failure");
+    let entries = parse_ssh_config(
+        home.path()
+            .join(".ssh")
+            .join("config")
+            .to_str()
+            .expect("a utf-8 temp path"),
+    );
 
-    let aliases: Vec<String> = config.connections.iter().map(|c| c.alias.clone()).collect();
+    let hosts: Vec<String> = entries.iter().map(|e| e.host.clone()).collect();
     assert_eq!(
-        report.imported, 1,
-        "only the uncommented Host arrived: {aliases:?}"
+        hosts,
+        vec!["real-one".to_string()],
+        "only the uncommented Host was read"
     );
     assert_eq!(
-        report.failed(),
-        0,
-        "a comment is not a stanza that failed to import"
+        entries[0].hostname.as_deref(),
+        Some("10.0.0.1"),
+        "and it kept its own fields, not a commented-out neighbour's"
     );
-    assert_eq!(aliases, vec!["real-one".to_string()]);
-    assert_eq!(config.connections[0].host, "10.0.0.1");
-    assert_eq!(config.connections[0].user, "alice");
+    assert_eq!(entries[0].user.as_deref(), Some("alice"));
 }
 
 fn connection(id: &str, alias: &str) -> sshm::config::Connection {

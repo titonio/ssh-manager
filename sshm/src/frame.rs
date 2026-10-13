@@ -316,8 +316,6 @@ pub struct FrameFlow {
     /// would mean the renderer had to know which command opened the map,
     /// which is exactly the coupling this shape removes.
     pub form: Option<FormFlow>,
-    /// The first-run import offer, while one is open (#38).
-    pub import_offer: Option<ImportOfferFlow>,
 }
 
 /// The form map as far as the frame can see it.
@@ -355,9 +353,9 @@ pub struct FormFlow {
 
 impl From<&crate::manage::ManageState> for FrameFlow {
     fn from(state: &crate::manage::ManageState) -> Self {
-        let (confirming, form, import_offer) = match &state.phase {
-            crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None, None),
-            crate::manage::Phase::List => (None, None, None),
+        let (confirming, form) = match &state.phase {
+            crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None),
+            crate::manage::Phase::List => (None, None),
             crate::manage::Phase::Form(map) => (
                 None,
                 Some(FormFlow {
@@ -369,15 +367,6 @@ impl From<&crate::manage::ManageState> for FrameFlow {
                     header: map.header(),
                     error: map.error.clone(),
                 }),
-                None,
-            ),
-            crate::manage::Phase::ConfirmImport { count, path } => (
-                None,
-                None,
-                Some(ImportOfferFlow {
-                    count: *count,
-                    path: path.clone(),
-                }),
             ),
         };
 
@@ -385,30 +374,8 @@ impl From<&crate::manage::ManageState> for FrameFlow {
             confirming,
             trace: state.trace.clone(),
             form,
-            import_offer,
         }
     }
-}
-
-/// The first-run import offer as far as the frame can see it (#38).
-///
-/// The frame does not run the offer — [`crate::manage`] answers it and
-/// the frame runner in `main.rs` decides when an empty set with an
-/// importable file deserves the ask. This is the projection of the ask
-/// itself: how many Connections the scan found, and the file it found
-/// them in. The frame turns that into the header question and nothing
-/// else — `count` is what the scan said, not a promise about what the
-/// write will return. The number the user is *then* told arrived comes
-/// back through [`crate::manage::Trace::Imported`], earned from the
-/// store rather than carried forward from here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImportOfferFlow {
-    /// What the scan found at `path`: the stanzas that could become
-    /// Connections.
-    pub count: usize,
-    /// The file the offer is about — the one shown in the question and
-    /// the one a `y` writes from, so the two can never disagree.
-    pub path: String,
 }
 
 /// The lines the flow draws between the header and the rows, capped at the
@@ -458,7 +425,6 @@ fn trace_lines(trace: &Option<crate::manage::Trace>, t: &Theme) -> Vec<Line<'sta
         Trace::Added { .. } | Trace::Edited { .. } | Trace::EditFailed { .. } => {
             write_trace_lines(trace, t)
         }
-        Trace::Imported { .. } | Trace::ImportDeclined => import_trace_lines(trace, t),
         Trace::AddAbandoned | Trace::EditAbandoned => abandoned_trace_lines(trace, t),
         // Not a family, because there is nothing for a family to assemble: no
         // question was asked, so no settled line comes first, and no write
@@ -514,43 +480,6 @@ fn write_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Line
         _ => return None,
     };
     Some(vec![note_line(verb, connection, t)])
-}
-
-/// The import family (#38).
-///
-/// The offer was asked on the header, not here, so there is no settled
-/// question to record — only the write that happened, or the refusal of it.
-/// The refused note is what makes the empty list underneath read as
-/// *declined* rather than as a screen that never asked anything.
-fn import_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Line<'static>>> {
-    use crate::manage::Trace;
-    match trace {
-        Trace::Imported { imported, failed } => {
-            Some(vec![plain_note_line(&import_note(*imported, *failed), t)])
-        }
-        Trace::ImportDeclined => Some(vec![plain_note_line(IMPORT_DECLINED_NOTE, t)]),
-        _ => None,
-    }
-}
-
-/// `imported 12 connections`, with the skipped count alongside when there is
-/// one — and it is called *skipped*, not *failed*: the offer's number came
-/// from a scan that already left those stanzas out, so they are not a
-/// shortfall of what the user was promised. The live PTY run for #38 caught
-/// `1 failed` reading as "one of your three failed" when nothing of the three
-/// had — the skipped stanza was never one of them. The word carries the
-/// difference.
-fn import_note(imported: usize, failed: usize) -> String {
-    let noun = if imported == 1 {
-        "connection"
-    } else {
-        "connections"
-    };
-    if failed > 0 {
-        format!("imported {imported} {noun}, {failed} skipped")
-    } else {
-        format!("imported {imported} {noun}")
-    }
 }
 
 /// The abandoned family: a sequence backed out of with nothing written.
@@ -820,14 +749,6 @@ const EDIT_FAILED_NOTE: &str = "edit failed — no such Connection:";
 /// written. The word "deleted" never appears on a frame where a deletion
 /// did not happen — that is the whole rule this note exists to keep.
 const DELETE_FAILED_NOTE: &str = "delete failed — no such Connection:";
-
-/// The note a declined import offer leaves.
-///
-/// The decline half of [`ADD_ABANDONED_NOTE`], shorter because there was
-/// no half-filled form to account for: nothing was written, and the one
-/// thing the note has to carry is that the ask was *heard* — the empty
-/// list under it reads as refused, not as never-offered.
-const IMPORT_DECLINED_NOTE: &str = "import declined";
 
 /// The note a management chord leaves over a Config Host.
 ///
@@ -1480,9 +1401,7 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// not the one that happens.
 ///
 /// While the delete confirm is open the rail changes to the answers that
-/// confirm actually reads, in the same order: the way out first. The import
-/// offer wears the same rail — same answers, same order, because it is
-/// the same kind of ask with the same conservative answer set.
+/// confirm actually reads, in the same order: the way out first.
 ///
 /// The rail is fitted with the shared drop-from-the-end rule
 /// ([`fit_hints_with`], the same one [`fit_hints`] is built on), against the
@@ -1495,7 +1414,7 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
     const FORM_SUBMIT: &[&str] = &["Esc back", "Enter save", "↑↓ move", "Ctrl+C quit"];
     const CONFIRMING: &[&str] = &["Esc back", "y confirm", "N abort", "Ctrl+C quit"];
 
-    let hints: &[&str] = if flow.confirming.is_some() || flow.import_offer.is_some() {
+    let hints: &[&str] = if flow.confirming.is_some() {
         CONFIRMING
     } else if let Some(form) = &flow.form {
         // The rail names what Enter means on the row the cursor is on:
@@ -1583,41 +1502,6 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
         return Line::from(spans);
     }
 
-    // The import offer: the question *is* the header, same position and
-    // grammar as the delete confirm's — one line, one ask (#38). The
-    // count and the path are the two facts the answer is about, so they
-    // are bold; the words that only glue them together recede, exactly as
-    // the folder prefix does in the delete question. The path is shown
-    // in the form the user recognises (see [`display_import_path`]),
-    // display-only: the write still goes to the raw path the phase
-    // carries.
-    if let Some(offer) = &flow.import_offer {
-        let dim = Style::default().fg(t.fg_muted);
-        let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
-
-        let home = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned));
-        let shown = display_import_path(&offer.path, home.as_deref());
-        // One offered Connection reads "Import 1 connection", not
-        // "Import 1 connections" — the same plural the note keeps, so
-        // the ask and the answer agree on the noun.
-        let noun = if offer.count == 1 {
-            "connection"
-        } else {
-            "connections"
-        };
-
-        return Line::from(vec![
-            Span::styled("◆", Style::default().fg(t.accent)),
-            Span::raw(" "),
-            Span::styled("Import ", bold),
-            Span::styled(offer.count.to_string(), bold),
-            Span::styled(format!(" {noun} from "), dim),
-            Span::styled(shown, bold),
-            Span::styled("? ", bold),
-            Span::styled("(y/N)", dim),
-        ]);
-    }
-
     // The form's header names the *ask*, not the field. The old add header
     // wore the field word because the field was the whole question; on the
     // map every field is on screen at once, so the question at the top of
@@ -1651,36 +1535,6 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
             Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
         ),
     ])
-}
-
-/// The import offer's path in the form the user recognises: a home-dir
-/// prefix shown as `~/`, the way they type it (#38).
-///
-/// Pure on purpose: `home` is a parameter, not a call to
-/// `dirs::home_dir()`, so the rule is pinned against a fake home rather
-/// than the machine the test happens to run on. The header passes the
-/// real home; the tests pass a made-up one.
-///
-/// The cut falls at a **path boundary**, never at a string prefix:
-/// `/home/anyoneelse` merely starts with `/home/anyone` and is not
-/// inside it, so it stays raw — mangling it would point the user at a
-/// file that does not exist. With no home to explain the path, the raw
-/// path is shown: a `~` standing for nothing is worse than the long
-/// form. Display-only either way — the write goes to the raw path the
-/// phase carries, never to the abbreviation.
-pub fn display_import_path(path: &str, home: Option<&str>) -> String {
-    let Some(home) = home.filter(|h| !h.is_empty()) else {
-        return path.to_string();
-    };
-
-    if path == home {
-        return "~".to_string();
-    }
-
-    match path.strip_prefix(home) {
-        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
-        _ => path.to_string(),
-    }
 }
 
 /// The caret the add map draws for itself.

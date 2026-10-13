@@ -1523,7 +1523,6 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: Some(c[0].clone()),
                     trace: None,
                     form: None,
@@ -1539,7 +1538,6 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
                     trace: Some(sshm::manage::Trace::Deleted {
                         connection: c[0].clone(),
@@ -1557,7 +1555,6 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
                     trace: Some(sshm::manage::Trace::DeleteFailed {
                         connection: c[0].clone(),
@@ -1575,7 +1572,6 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
                     trace: Some(sshm::manage::Trace::Edited {
                         connection: c[0].clone(),
@@ -1593,7 +1589,6 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
                     trace: Some(sshm::manage::Trace::EditFailed {
                         connection: c[0].clone(),
@@ -1615,7 +1610,6 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
                     trace: Some(sshm::manage::Trace::AddAbandoned),
                     form: None,
@@ -1631,7 +1625,6 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
                     trace: Some(sshm::manage::Trace::EditAbandoned),
                     form: None,
@@ -1653,7 +1646,6 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
                     trace: Some(sshm::manage::Trace::ReadOnly {
                         connection: gpu_server(),
@@ -1671,109 +1663,10 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, mono),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
                     trace: Some(sshm::manage::Trace::ReadOnly {
                         connection: gpu_server(),
                     }),
-                    form: None,
-                },
-            ),
-        ),
-        // The #38 import grammar: the offer asks on the header with the
-        // count and the file it scanned, the `◇` notes report what the
-        // answer actually did (earned from the store, not carried from
-        // the ask), and the decline is the note that makes the empty
-        // CTA underneath read as *heard and refused* rather than as a
-        // screen that never asked anything.
-        (
-            "frame-import-offer-80",
-            build_frame_with_flow(
-                &[],
-                "",
-                0,
-                FrameMode::Manage,
-                Canvas::new(80, 24, truecolor),
-                &FrameFlow {
-                    import_offer: Some(sshm::frame::ImportOfferFlow {
-                        count: 12,
-                        path: "/home/dev/.ssh/config".into(),
-                    }),
-                    confirming: None,
-                    trace: None,
-                    form: None,
-                },
-            ),
-        ),
-        (
-            "frame-import-offer-80-mono",
-            build_frame_with_flow(
-                &[],
-                "",
-                0,
-                FrameMode::Manage,
-                Canvas::new(80, 24, mono),
-                &FrameFlow {
-                    import_offer: Some(sshm::frame::ImportOfferFlow {
-                        count: 12,
-                        path: "/home/dev/.ssh/config".into(),
-                    }),
-                    confirming: None,
-                    trace: None,
-                    form: None,
-                },
-            ),
-        ),
-        (
-            "frame-imported-80",
-            build_frame_with_flow(
-                &c,
-                "",
-                0,
-                FrameMode::Manage,
-                Canvas::new(80, 24, truecolor),
-                &FrameFlow {
-                    import_offer: None,
-                    confirming: None,
-                    trace: Some(sshm::manage::Trace::Imported {
-                        imported: 12,
-                        failed: 0,
-                    }),
-                    form: None,
-                },
-            ),
-        ),
-        (
-            "frame-imported-partial-80",
-            build_frame_with_flow(
-                &c,
-                "",
-                0,
-                FrameMode::Manage,
-                Canvas::new(80, 24, truecolor),
-                &FrameFlow {
-                    import_offer: None,
-                    confirming: None,
-                    trace: Some(sshm::manage::Trace::Imported {
-                        imported: 9,
-                        failed: 3,
-                    }),
-                    form: None,
-                },
-            ),
-        ),
-        (
-            "frame-import-declined-80",
-            build_frame_with_flow(
-                &[],
-                "",
-                0,
-                FrameMode::Manage,
-                Canvas::new(80, 24, truecolor),
-                &FrameFlow {
-                    import_offer: None,
-                    confirming: None,
-                    trace: Some(sshm::manage::Trace::ImportDeclined),
                     form: None,
                 },
             ),

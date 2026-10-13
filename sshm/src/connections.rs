@@ -1,7 +1,7 @@
 //! The Connection manager.
 //!
-//! Every change to the Connection set lives here: add, edit, delete and the
-//! `~/.ssh/config` import. Each operation mutates the set, persists it when
+//! Every change to the Connection set lives here: add, edit and delete.
+//! Each operation mutates the set, persists it when
 //! something actually changed, and reports what came back, so a surface can
 //! render its own trace without re-implementing the rules.
 //!
@@ -13,7 +13,7 @@
 //! and the manage paths that will are #36/#37. The seam is exercised by
 //! `tests/connections_test.rs` until they land.
 
-use crate::config::{Config, Connection, ImportReport, Source};
+use crate::config::{Config, Connection, Source};
 
 /// The field values a Connection is built from while the user adds or edits one.
 ///
@@ -164,22 +164,6 @@ pub trait Store {
         existing_id: &str,
         draft: &ConnectionDraft,
     ) -> Result<Option<Connection>, String>;
-
-    /// Fold the Host stanzas of the ssh config at `path` into the set and
-    /// persist the result (#38).
-    ///
-    /// The import half of the seam the first-run offer's `◇ imported 12
-    /// connections` note rests on. The offer counts what would arrive
-    /// before asking; this is the answer to having asked, so it returns
-    /// the same accounting — including the stanzas that could not become
-    /// Connections, which the trace reports as `3 skipped` rather than
-    /// hiding. Per-entry failures never abort: the fold happens in memory
-    /// and is written once, so a partial import is still a real import
-    /// and a failed write leaves the on-disk set exactly as it was.
-    ///
-    /// Nothing is written when nothing was imported — the same rule every
-    /// other method on this trait holds.
-    fn import_ssh_config(&mut self, path: &str) -> Result<ImportReport, String>;
 }
 
 impl Store for Config {
@@ -201,14 +185,6 @@ impl Store for Config {
         draft: &ConnectionDraft,
     ) -> Result<Option<Connection>, String> {
         edit(self, existing_id, draft)
-    }
-
-    fn import_ssh_config(&mut self, path: &str) -> Result<ImportReport, String> {
-        let report = crate::config::import_from_ssh_config_with_path(self, path);
-        if report.imported > 0 {
-            self.save()?;
-        }
-        Ok(report)
     }
 }
 
@@ -269,39 +245,4 @@ impl Store for Ephemeral {
         self.connections[i] = conn.clone();
         Ok(Some(conn))
     }
-
-    fn import_ssh_config(&mut self, path: &str) -> Result<ImportReport, String> {
-        // Folded through the same `import_from_ssh_config_with_path` the
-        // persisted store uses, so the rows the harness shows are the
-        // rows the real store would have written — same wildcards
-        // refused, same already-held Connections skipped. The set really
-        // grows. Only the durability is absent: nothing is saved.
-        let mut scratch = Config {
-            connections: std::mem::take(&mut self.connections),
-        };
-        let report = crate::config::import_from_ssh_config_with_path(&mut scratch, path);
-        self.connections = scratch.connections;
-        Ok(report)
-    }
-}
-
-/// Import Connections from the user's `~/.ssh/config`, persist the set,
-/// and report what came across. Connections already in the set are left
-/// alone, so importing twice adds nothing the second time — and when
-/// nothing is added, nothing is written.
-///
-/// A stanza that cannot become a Connection (a globbed Host pattern) is a
-/// reported failure, not a failed import: the good Connections still
-/// arrive and are persisted. The caller renders both halves — `◇ imported
-/// 9 connections, 3 skipped` — because a user who was promised an import
-/// is owed to know which half did not show up.
-///
-/// A home directory that cannot be resolved is an `Err`, not a panic: a
-/// surface shows the string it is given, it has no crash to recover from.
-pub fn import(config: &mut Config) -> Result<ImportReport, String> {
-    let report = crate::config::import_from_ssh_config(config)?;
-    if report.imported > 0 {
-        config.save()?;
-    }
-    Ok(report)
 }

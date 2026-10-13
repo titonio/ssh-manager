@@ -33,7 +33,7 @@
 
 use std::path::PathBuf;
 
-use crate::config::{self, Config, Connection, ImportReport};
+use crate::config::{self, Config, Connection};
 use crate::connections::{self, ConnectionDraft, Store};
 
 /// The `Store` a frame is handed: sshm's own Connections with the usable
@@ -109,18 +109,5 @@ impl Store for LiveStore {
         let edited = connections::edit(&mut self.config, existing_id, draft)?;
         self.refresh();
         Ok(edited)
-    }
-
-    /// Fold the whole ssh config into the store, then re-merge.
-    ///
-    /// Delegated to the inner `Config` unchanged — the whole-file import is
-    /// retired by a later task, and until it is this is still the only
-    /// implementation of it. It is a mutation like any other, so it re-merges:
-    /// the stanzas it copies are now stored rows, and their config rows have to
-    /// stop showing alongside them in the same keystroke.
-    fn import_ssh_config(&mut self, path: &str) -> Result<ImportReport, String> {
-        let report = Store::import_ssh_config(&mut self.config, path)?;
-        self.refresh();
-        Ok(report)
     }
 }
