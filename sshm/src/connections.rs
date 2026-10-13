@@ -80,8 +80,12 @@ fn none_if_blank(value: &str) -> Option<String> {
 /// must not edit, so the name is not available to a folder — and it is refused
 /// whatever its casing, because a user scanning the list reads the word, not
 /// its bytes.
+///
+/// The padding goes first for the same reason: `sshm add --folder " ssh-config "`
+/// carries the shell's spaces, and a row filed under them draws the frame's own
+/// prefix just the same.
 pub fn is_reserved_folder(folder: &str) -> bool {
-    folder.eq_ignore_ascii_case(crate::frame::SSH_CONFIG_TAG)
+    folder.trim().eq_ignore_ascii_case(crate::frame::SSH_CONFIG_TAG)
 }
 
 /// The refusal every writer gives for a reserved folder, in the words the user
@@ -320,6 +324,14 @@ impl Store for Ephemeral {
     }
 
     fn add(&mut self, draft: &ConnectionDraft) -> Result<Connection, String> {
+        // The same refusal as the persisted store, for the same reason: a row
+        // filed under the frame's own word draws `[ssh-config]` without being
+        // one, and a harness that admitted it would be showing the user a row
+        // the real store would have refused.
+        if is_reserved_folder(&draft.folder) {
+            return Err(reserved_folder_refusal(&draft.folder));
+        }
+
         // Built through the same `connection_from` the persisted path
         // uses, so the row the harness shows is the row the real store
         // would have written. Only the durability is absent.
@@ -333,6 +345,12 @@ impl Store for Ephemeral {
         existing_id: &str,
         draft: &ConnectionDraft,
     ) -> Result<Option<Connection>, String> {
+        // Refused ahead of the lookup, as the persisted path does: the folder is
+        // a fact about the draft, not about the row it targets.
+        if is_reserved_folder(&draft.folder) {
+            return Err(reserved_folder_refusal(&draft.folder));
+        }
+
         // Same discipline as `add`: built through `connection_from`, with
         // the *existing* id kept. A new id here would make the harness's
         // edited row a different Connection from the one the real store

@@ -77,6 +77,46 @@ fn selecting_a_connection_runs_ssh_with_exactly_the_connection_s_fields() {
     );
 }
 
+/// A `[ssh-config]` row runs the bare alias, because the alias is the name the
+/// user's own file answers to.
+///
+/// The mirror of the first test, and the reason it is not enough on its own: a
+/// Config Host has the same four fields as a stored Connection, so a build path
+/// that treated every row the same would re-encode them into
+/// `ssh -p 2222 ci@build.example.com` and still reach the machine in the easy
+/// case — while silently ignoring whatever the `Host` line is really doing, a
+/// `ProxyJump`, a `Match` block, an alias that is not a hostname at all. The
+/// stanza carries a `User` and a non-default `Port` so that wrong shape is
+/// visible in the log instead of merely possible.
+#[test]
+fn selecting_a_config_host_runs_the_bare_alias_and_nothing_else() {
+    let fixture = Fixture::new()
+        .with_ssh_config(
+            "Host build-box\n  HostName build.example.com\n  User ci\n  Port 2222\n",
+        )
+        .and_then(|f| f.with_ssh_shim())
+        .expect("seed");
+    let mut pty = Pty::spawn(sshm_binary(), &[], &fixture).expect("spawn sshm");
+    pty.wait_for_text("build-box")
+        .expect("the picker draws the config row");
+    pty.key(b"\r");
+
+    pty.wait_until_pumping("ssh to be invoked and recorded", DEFAULT_TIMEOUT, || {
+        fixture.ssh_calls_are_complete()
+    })
+    .expect("ssh was invoked");
+    let recorded = fixture.ssh_calls().expect("the log reads");
+    assert_eq!(
+        recorded,
+        [vec!["build-box".to_string()]],
+        "a config host is the alias and nothing else — no `-p`, no `-i`, no `user@`"
+    );
+
+    pty.wait_exit(DEFAULT_TIMEOUT)
+        .expect("sshm leaves with ssh's status")
+        .assert_code(0);
+}
+
 /// Escape from bare `sshm` runs nothing at all.
 ///
 /// The mirror image of the test above, and the half that matters more: a cancel

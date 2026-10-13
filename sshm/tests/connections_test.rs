@@ -980,6 +980,66 @@ fn the_live_store_refuses_the_reserved_folder_on_both_halves_of_its_seam() {
     );
 }
 
+/// The visual harness writes through the same seam as the real store, so it
+/// refuses the same folder: a harness that admitted a row wearing `[ssh-config]`
+/// would be demoing a write the real store cannot make, and the frame would look
+/// correct while proving nothing.
+#[test]
+fn the_ephemeral_store_refuses_the_reserved_folder_on_both_halves_too() {
+    let mut store = Ephemeral::new(vec![connection("id-web-01", "web-01")]);
+
+    let refusal = store
+        .add(&filed("web-02", "ssh-config"))
+        .expect_err("the harness may not add a row the real store would refuse");
+    assert!(refusal.contains("reserved"), "got: {refusal}");
+    assert_eq!(
+        aliases(store.all()),
+        vec!["web-01"],
+        "a refusal adds nothing, even in memory"
+    );
+
+    let refusal = store
+        .update("id-web-01", &filed("web-01", "SSH-Config"))
+        .expect_err("and it refuses on the edit half too");
+    assert!(refusal.contains("reserved"), "got: {refusal}");
+    assert_eq!(
+        store.all()[0].folder.as_deref(),
+        Some("prod"),
+        "the row keeps the folder it had"
+    );
+}
+
+/// The reserved name with spaces around it is still the reserved name.
+///
+/// `sshm add --folder " ssh-config "` reaches the check with the padding the
+/// shell was given, and a comparison against the bare word lets it through: the
+/// row is then filed under a folder that draws the frame's own prefix, which is
+/// the impersonation the rule exists to stop. The padding is not part of the
+/// user's answer to "which folder", so it is not part of the name.
+#[test]
+#[serial_test::serial]
+fn a_reserved_name_with_spaces_around_it_is_still_the_reserved_name() {
+    assert!(
+        connections::is_reserved_folder(" ssh-config "),
+        "the same word with padding is the same word"
+    );
+    assert!(
+        connections::is_reserved_folder("\tSSH-Config\n"),
+        "and padding on any spelling of it"
+    );
+    assert!(
+        !connections::is_reserved_folder("pro d"),
+        "trimming is not the same as ignoring spaces inside a name"
+    );
+
+    let _home = TempHome::new();
+    let mut config = Config::new();
+    let refusal = connections::add(&mut config, &filed("web-01", " ssh-config "))
+        .expect_err("`sshm add --folder \" ssh-config \"` must not land the row");
+    assert!(refusal.contains("reserved"), "got: {refusal}");
+    assert!(config.connections.is_empty(), "a refusal adds nothing");
+}
+
 /// The rule is about one word, not about folders: `prod` is the user's own and
 /// stays theirs. This is also the test that says the refusal is not a blanket
 /// refusal of every folder.
