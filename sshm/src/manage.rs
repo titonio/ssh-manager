@@ -31,8 +31,8 @@
 //! The frame's constant height and the settle-collapse are #34's and are
 //! untouched: this module only says which lines the frame should be showing.
 
-use crate::config::{self, Connection};
-use crate::connections::ConnectionDraft;
+use crate::config::{Connection, Source};
+use crate::connections::{self, ConnectionDraft};
 use crate::inline::InlineOutcome;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -47,6 +47,19 @@ pub enum Phase {
     /// pressed, captured by value. The confirm asks about *this* one; a
     /// cursor that drifts afterwards changes nothing about it.
     ConfirmDelete { target: Connection },
+    /// The inline adopt ask: copy this Config Host into sshm's store.
+    ///
+    /// Enter over a config row, because a row merged from `~/.ssh/config` is
+    /// the user's own stanza and the one thing sshm may do with it is offer a
+    /// copy. It is a confirm and not an instant write for the same reason a
+    /// delete is: the answer writes `connections.json`, and a keystroke that
+    /// means "this one" must not be a file change on its own.
+    ///
+    /// `target` is the row Enter was pressed over, captured by value exactly as
+    /// [`Phase::ConfirmDelete`] captures its target — including its
+    /// `ssh-config:` id, which is what the store refuses to delete and the
+    /// thing an adopt copies *from* rather than into.
+    ConfirmAdopt { target: Connection },
     /// The Form Map, open on one of its two starting drafts (#37).
     ///
     /// One value holds the whole surface: which row the cursor is on, what
@@ -66,23 +79,6 @@ pub enum Phase {
     /// it is diffed against is the largest thing a `Phase` carries, and the
     /// frame holds one on its state rather than passing phases around.
     Form(Box<FormMap>),
-    /// The first-run import offer (#38).
-    ///
-    /// `count` is what the scan found at `path`: the Host stanzas in
-    /// that file that could become Connections. It is a number about a
-    /// file, not a promise about the set — the offer is made before
-    /// anything is written, and the number the user is *then* told
-    /// arrived comes back through [`ImportOutcome`] rather than being
-    /// carried forward from here.
-    ///
-    /// `path` is the file the user was shown, and the file the write is
-    /// about. Carrying it in the phase is what stops the driver from
-    /// re-deriving `~/.ssh/config` at the moment of the write and
-    /// importing something the user never agreed to. The offer is also
-    /// the only phase that arrives unasked: nobody pressed a chord to
-    /// open it, which is why its answer set is as conservative as the
-    /// delete confirm's.
-    ConfirmImport { count: usize, path: String },
 }
 
 /// Which field of the form a map row stands for.
@@ -186,6 +182,19 @@ impl FormField {
                 Ok(0) | Err(_) => Err("port must be 1–65535 (e.g. 22)".to_string()),
                 Ok(port) => Ok(port.to_string()),
             },
+            // The one folder name sshm keeps for itself: a stored row filed
+            // under `ssh-config` would draw the tag a Config Host draws and
+            // read as a row nobody may edit. The store refuses the same draft
+            // ([`crate::connections::is_reserved_folder`]); asking it here is
+            // what puts the `!` on the row where it was typed instead of
+            // letting the write fail three keystrokes later.
+            FormField::Folder => {
+                if connections::is_reserved_folder(value) {
+                    Err(connections::reserved_folder_refusal(value))
+                } else {
+                    Ok(value.to_string())
+                }
+            }
             _ => Ok(value.to_string()),
         }
     }
@@ -685,6 +694,17 @@ pub enum Trace {
     /// is held to. `◇ added [prod] web-01` is a claim about
     /// `connections.json`, and only the store gets to make it.
     Added { connection: Connection },
+    /// Enter on a Config Host was answered `y` **and the store really wrote
+    /// the copy**.
+    ///
+    /// The adopt half of [`Trace::Added`], held to the same discipline: it is
+    /// earned through [`settle_adopt`] and never by the `y` that asked, because
+    /// `◇ adopted build-box` is a claim about `connections.json` and only the
+    /// store gets to make it. The note names the copy rather than the stanza,
+    /// because the stanza is still where it was — what changed is that sshm now
+    /// has a row of its own for that box, and the config row the copy hides has
+    /// left the list in the same keystroke.
+    Adopted { connection: Connection },
     /// The map was backed out of without submitting. Nothing was
     /// written, and the note says so rather than leaving the user to
     /// wonder whether a half-filled Connection got saved.
@@ -715,34 +735,26 @@ pub enum Trace {
     /// was pressed; if the store no longer has it, saying `edited` would
     /// describe a write that did not happen.
     EditFailed { connection: Connection },
-    /// The import ran **and the store really wrote `imported`
-    /// Connections**; `failed` stanzas could not become Connections at
-    /// all (#38).
+    /// `Ctrl+X` or `Ctrl+E` over a Config Host: sshm will not change it, and
+    /// the note says so in place of a confirm or a form.
     ///
-    /// Earned through [`settle_import`], never by the `y` that answered
-    /// the offer — the same discipline [`Trace::Deleted`] and
-    /// [`Trace::Added`] are held to. `◇ imported 12 connections` is a
-    /// claim about `connections.json`, and the keystroke that asked for
-    /// it knows nothing about the file.
+    /// A refusal, not a settle. Nothing was asked of the store and nothing
+    /// was written, so the keystroke is honest about it on its own — the
+    /// discipline [`Trace::Deleted`] is held to, where only the store's answer
+    /// earns the note. What it replaces is the sequence the chord would
+    /// otherwise have opened: a confirm over a row that can never be deleted,
+    /// or a form whose `▶` row promises a write sshm does not perform.
     ///
-    /// Both numbers travel because a partial import is not a whole one.
-    /// The skipped count names stanzas the scan already left out of the
-    /// offer — a `Host *.example.com` can never become a Connection — so
-    /// it is not a shortfall of what the user was promised; it is the
-    /// rest of the file, reported rather than silently dropped. The live
-    /// PTY run for #38 is why the word is *skipped* and not *failed*:
-    /// `1 failed` under an offer of `3` read as one of the three having
-    /// failed, when nothing of the three had.
-    Imported { imported: usize, failed: usize },
-    /// The offer was answered no, or abandoned. Nothing was written
-    /// (#38).
-    ///
-    /// The import half of [`Trace::AddAbandoned`], with one difference
-    /// worth naming: the offer is the only ask the user did not raise, so
-    /// the decline is the answer the frame is most likely to show. It
-    /// exists so the empty list underneath it reads as *heard and
-    /// refused* rather than as a screen that never asked anything.
-    ImportDeclined,
+    /// The wording names the provenance rather than the Connection, because
+    /// the reason for the refusal is where the row came from — and the row is
+    /// still on the glass underneath the note, tagged `[ssh-config]`. The
+    /// Connection travels with the variant all the same, because every other
+    /// trace says which row it is about, and a refusal that cannot name its
+    /// row is a note nothing can pin to the keystroke that raised it.
+    ReadOnly {
+        /// The Config Host the chord was pressed over.
+        connection: Connection,
+    },
 }
 
 /// Everything the manage frame's interaction consists of.
@@ -847,19 +859,17 @@ pub enum Effect {
         /// `target`'s id.
         draft: ConnectionDraft,
     },
+    /// Copy the Config Host `target` into the store and persist it.
+    ///
+    /// The adopt half of the write effects, emitted only from the adopt ask
+    /// and only for the captured row. The whole config row travels with the
+    /// request rather than its id: the id is the merge's own
+    /// `ssh-config:<pattern>`, which names nothing in `connections.json`, and
+    /// the fields the copy is made of are the ones on the row the user was
+    /// looking at.
+    Adopt { target: Connection },
     /// Leave the frame with this outcome.
     Exit(InlineOutcome),
-    /// Fold the ssh config at `path` into the store and persist the
-    /// result (#38).
-    ///
-    /// The path travels with the request because the user agreed to
-    /// *that* file: the offer named it, and the write has to be about
-    /// the same one. What arrives is not known here — the store answers
-    /// with an [`ImportReport`], and [`settle_import`] is where the
-    /// frame learns whether it may say `imported`.
-    ///
-    /// [`ImportReport`]: crate::config::ImportReport
-    Import { path: String },
 }
 
 /// What a [`Store::remove`] call actually did.
@@ -988,6 +998,40 @@ fn index_of_id(connections: &[Connection], id: &str) -> usize {
     connections.iter().position(|c| c.id == id).unwrap_or(0)
 }
 
+/// Fold the store's answer to [`Effect::Adopt`] into the state the frame is
+/// rebuilt from.
+///
+/// The adopt half of the honesty rule, the same shape as [`settle_add`]: the
+/// `y` is what the user *did*, and `◇ adopted` is a claim about the file.
+///
+/// * `Ok(connection)` — the note earns `adopted`, and names the copy the store
+///   actually wrote (its fresh id, its absent folder — not the stanza's
+///   `ssh-config:` id). The list is refreshed and shows the result, which for
+///   an adopt means two things at once: the new row is there and the config row
+///   it hides is gone. Both are the store's doing — a `LiveStore` re-merges
+///   inside `adopt` — so this only has to clear a filter that would hide the
+///   new row and put the cursor on it, exactly as an add does.
+/// * `Err(message)` — the store refused, and the caller collapses the frame to
+///   `◆ error …` the way a refused delete does.
+pub fn settle_adopt(
+    _state: &ManageState,
+    connections: &[Connection],
+    outcome: Result<Connection, String>,
+) -> Result<ManageState, String> {
+    match outcome {
+        Ok(connection) => {
+            let selection = index_of_id(connections, &connection.id);
+            Ok(ManageState {
+                phase: Phase::List,
+                query: String::new(),
+                selection,
+                trace: Some(Trace::Adopted { connection }),
+            })
+        }
+        Err(message) => Err(message),
+    }
+}
+
 /// What a [`Store::update`] call actually did (#37).
 ///
 /// The edit half of [`DeleteOutcome`]. The state machine owns no disk and
@@ -1072,81 +1116,6 @@ pub fn settle_edit(
     }
 }
 
-/// What a [`Store::import_ssh_config`] call actually did (#38).
-///
-/// The import half of [`DeleteOutcome`]. The state machine owns no disk
-/// and cannot know how many Connections a file holds, so the driver runs
-/// the effect and hands the answer back through [`settle_import`].
-///
-/// There are two arms where the delete has three because an import has
-/// no *absent* case. A file with nothing to import answers truthfully
-/// with `imported: 0` — nothing was written, and nothing on screen
-/// contradicts that — whereas `Ok(None)` from a delete is a claim the
-/// frame could not otherwise tell from a removal.
-///
-/// [`Store::import_ssh_config`]: crate::connections::Store::import_ssh_config
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ImportOutcome {
-    /// The import ran. `imported` Connections were written; `failed`
-    /// stanzas could not become Connections.
-    Imported { imported: usize, failed: usize },
-    /// The store refused the import and said why.
-    Failed(String),
-}
-
-impl ImportOutcome {
-    /// Classify what [`Store::import_ssh_config`] returned.
-    ///
-    /// The report's two halves become the note's two numbers, with
-    /// `failed` read through [`ImportReport::failed`] rather than
-    /// recounted here — one place that says how many stanzas did not
-    /// cross, so the note and the report cannot drift apart.
-    ///
-    /// [`Store::import_ssh_config`]: crate::connections::Store::import_ssh_config
-    /// [`ImportReport::failed`]: crate::config::ImportReport::failed
-    pub fn from_report(result: Result<config::ImportReport, String>) -> Self {
-        match result {
-            Ok(report) => ImportOutcome::Imported {
-                imported: report.imported,
-                failed: report.failed(),
-            },
-            Err(message) => ImportOutcome::Failed(message),
-        }
-    }
-}
-
-/// Fold the store's answer to [`Effect::Import`] into the state the frame
-/// is rebuilt from (#38).
-///
-/// The import half of the honesty rule, mirroring [`settle_add`] and
-/// [`settle_delete`]:
-///
-/// * `Imported { imported, failed }` — the note earns `imported`, with
-///   the numbers the store reported rather than the count the offer was
-///   made at. Those can differ: the scan and the write are two reads of
-///   the same file, and the file is allowed to have changed in between.
-/// * `Failed(message)` — the caller collapses the frame to `◆ error …`,
-///   the same way a refused add and a refused delete do. A live list the
-///   store cannot vouch for is worse than no list.
-///
-/// The refresh is the one [`settle_add`] performs — filter cleared,
-/// cursor at the top — and the reason is stronger here than anywhere
-/// else: the offer only ever appears on an empty set, so a filter left
-/// over from before it would hide every Connection the user just said
-/// yes to, and the frame would read `No matches` under a note naming
-/// twelve.
-pub fn settle_import(_state: &ManageState, outcome: ImportOutcome) -> Result<ManageState, String> {
-    match outcome {
-        ImportOutcome::Imported { imported, failed } => Ok(ManageState {
-            phase: Phase::List,
-            query: String::new(),
-            selection: 0,
-            trace: Some(Trace::Imported { imported, failed }),
-        }),
-        ImportOutcome::Failed(message) => Err(message),
-    }
-}
-
 /// The outcome of one keystroke: the state to become, and the effects to run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Step {
@@ -1181,11 +1150,8 @@ pub fn step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) -
     match state.phase {
         Phase::List => list_step(state, key, selected),
         Phase::ConfirmDelete { ref target } => confirm_step(state, key, target),
+        Phase::ConfirmAdopt { ref target } => confirm_adopt_step(state, key, target),
         Phase::Form(ref map) => form_step(state, key, map),
-        // `count` is not re-read here: the offer's answer is about the
-        // file, and what arrived from it is the store's answer, not the
-        // scan's estimate.
-        Phase::ConfirmImport { ref path, .. } => confirm_import_step(state, key, path),
     }
 }
 
@@ -1219,6 +1185,13 @@ fn list_step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) 
 /// pressed the chord, whatever the cursor gets up to in between. With nothing
 /// under the cursor they ask for nothing, because the frame will not invent a
 /// target to change.
+///
+/// A Config Host gets neither sequence. `Ctrl+X` over a row merged from
+/// `~/.ssh/config` would ask the user to confirm a delete sshm must not
+/// perform, and `Ctrl+E` would hand them a form whose submit row promises a
+/// write to a file sshm never writes; either one is a UI that lies. Both stop
+/// at [`Trace::ReadOnly`] instead, on the list, with the filter and the cursor
+/// untouched — the refusal is a note about the row, not a different screen.
 fn list_chord_step(
     state: &ManageState,
     key: KeyEvent,
@@ -1234,8 +1207,24 @@ fn list_chord_step(
         })
     };
 
+    // A refusal is `opened` with no sequence to open: it replaces the note and
+    // nothing else, so the phase rides along from `..state.clone()` — which is
+    // `Phase::List`, because a chord is only read on the list. Spelling the
+    // phase out here would be a claim no test could check, and the mutation
+    // sweep proves it by deleting the line and losing nothing; what the tests
+    // do check is that the frame is still on the list afterwards.
+    let refused = |target: &Connection| {
+        Step::state_only(ManageState {
+            trace: Some(Trace::ReadOnly {
+                connection: target.clone(),
+            }),
+            ..state.clone()
+        })
+    };
+
     if is_chord(key, 'x') {
         return Some(match selected {
+            Some(target) if target.source == Source::SshConfig => refused(target),
             Some(target) => opened(Phase::ConfirmDelete {
                 target: target.clone(),
             }),
@@ -1245,6 +1234,7 @@ fn list_chord_step(
 
     if is_chord(key, 'e') {
         return Some(match selected {
+            Some(target) if target.source == Source::SshConfig => refused(target),
             Some(target) => Step::state_only(ManageState {
                 phase: Phase::Form(Box::new(FormMap::from_connection(target))),
                 // The note from the last action is cleared the same way
@@ -1277,6 +1267,18 @@ fn list_key_step(state: &ManageState, key: KeyEvent, selected: Option<&Connectio
         KeyCode::Esc => return Step::exit(next, InlineOutcome::Cancelled),
         KeyCode::Enter => {
             if let Some(conn) = selected {
+                if conn.source == Source::SshConfig {
+                    // Enter on a Config Host asks for a copy instead of
+                    // picking: the row is the user's own stanza, sshm may not
+                    // change it, and the one thing worth doing to it — putting
+                    // a copy in sshm's store — is a write, so it gets an ask.
+                    return Step::state_only(ManageState {
+                        phase: Phase::ConfirmAdopt {
+                            target: conn.clone(),
+                        },
+                        ..next
+                    });
+                }
                 return Step::exit(next, InlineOutcome::Picked(conn.clone()));
             }
         }
@@ -1363,53 +1365,50 @@ fn declined(state: &ManageState, target: &Connection) -> ManageState {
     }
 }
 
-/// The first-run import offer: `y` imports, everything else declines (#38).
+/// The adopt ask: `y` copies, everything else declines and says nothing.
 ///
-/// The answer set is [`confirm_step`]'s, unchanged, because the same
-/// argument applies with more force — this is the only ask the user did
-/// not raise themselves:
+/// The answer set is [`confirm_step`]'s, because it is the same kind of
+/// question — an answer that writes `connections.json` — with one difference,
+/// and the difference is what the two questions are about. A declined delete
+/// leaves [`Trace::Declined`] because the frame had asked the user to remove
+/// one of their own Connections and they said no; a declined adopt leaves
+/// **nothing**, because nothing was asked of the store and the list is exactly
+/// the list it was. A settled `■` line over an unchanged row would be recording
+/// a non-event.
 ///
-/// * `y` / `Y` — accept. One import, of the path the offer named.
-/// * `n` / `N`, `Esc` — decline. Nothing is asked for.
-/// * any other printable — decline **and** filter. The filter is live
-///   right through the offer (user story 21), so a user who did not
-///   mean to answer a question that appeared on its own and carries on
-///   typing ends up searching, not importing twelve Connections they
-///   never asked for. The character is not wasted and is not an answer.
-/// * anything else — ignored. Movement in particular does nothing: the
-///   offer is about a file, not about a row, and there is no row to
-///   point at anyway.
-fn confirm_import_step(state: &ManageState, key: KeyEvent, path: &str) -> Step {
+/// * `y` / `Y` — confirm. One adopt, of the captured target.
+/// * `n` / `N`, `Esc` — decline. No effect, no note.
+/// * any other printable — decline **and** filter: a user who hits Enter by
+///   accident and carries on typing ends up searching, not adopting.
+/// * anything else — ignored. The target was captured at the keystroke, so
+///   there is nothing for a moving cursor to change.
+fn confirm_adopt_step(state: &ManageState, key: KeyEvent, target: &Connection) -> Step {
     if is_chord(key, 'c') {
         return Step::exit(state.clone(), InlineOutcome::Cancelled);
     }
 
     if is_answer(key, 'y') {
-        // The ask, not the claim. `trace` deliberately stays empty:
-        // how many Connections the file holds is a fact about the disk,
-        // and the disk has not been asked yet. The driver runs the
-        // effect and folds the answer back through [`settle_import`],
-        // which is what puts `imported` — or the collapse — on the
-        // frame.
+        // The ask, not the claim: whether a row was written is the store's to
+        // say, and the driver folds its answer back through [`settle_adopt`].
         return Step {
             state: ManageState {
                 phase: Phase::List,
                 trace: None,
                 ..state.clone()
             },
-            effects: vec![Effect::Import {
-                path: path.to_string(),
+            effects: vec![Effect::Adopt {
+                target: target.clone(),
             }],
         };
     }
 
     if is_answer(key, 'n') || key.code == KeyCode::Esc {
-        return Step::state_only(import_declined(state));
+        return Step::state_only(declined_adopt(state));
     }
 
     if let KeyCode::Char(ch) = key.code {
         if is_text(key) {
-            let mut next = import_declined(state);
+            let mut next = declined_adopt(state);
             next.query.push(ch);
             return Step::state_only(next);
         }
@@ -1418,16 +1417,12 @@ fn confirm_import_step(state: &ManageState, key: KeyEvent, path: &str) -> Step {
     Step::state_only(state.clone())
 }
 
-/// The state after an offer that did not import: back on the list, with
-/// the decline left as the trace.
-///
-/// The import half of [`declined`], minus the target — a decline is a
-/// decline whatever the file was, and the frame says `import declined`
-/// rather than naming a path the user has already seen.
-fn import_declined(state: &ManageState) -> ManageState {
+/// The state after an adopt ask that did not adopt: back on the list, with
+/// nothing to report.
+fn declined_adopt(state: &ManageState) -> ManageState {
     ManageState {
         phase: Phase::List,
-        trace: Some(Trace::ImportDeclined),
+        trace: None,
         ..state.clone()
     }
 }

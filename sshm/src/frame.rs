@@ -38,7 +38,7 @@
 //! 3. **Glyphs and modifiers carry meaning, not hue.** Every state the frame can
 //!    be in says the same thing with the colour turned off.
 
-use crate::config::Connection;
+use crate::config::{Connection, Source};
 use crate::theme::{ColorSupport, Theme};
 use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
@@ -307,6 +307,14 @@ pub enum FrameMode {
 pub struct FrameFlow {
     /// The Connection the inline delete confirm is asking about.
     pub confirming: Option<Connection>,
+    /// The Config Host the adopt ask is offering to copy into the store.
+    ///
+    /// A separate field rather than a second meaning for `confirming`, because
+    /// the two asks are different questions about different rows: one is
+    /// "remove this Connection of yours", the other "take a copy of this
+    /// stanza into sshm". The frame draws both with the same `◆ … (y/N)`
+    /// grammar and the same rail, and nothing else about them is shared.
+    pub adopt_confirm: Option<Connection>,
     /// What the last management action did, rendered as the lines above the
     /// rows.
     pub trace: Option<crate::manage::Trace>,
@@ -316,8 +324,6 @@ pub struct FrameFlow {
     /// would mean the renderer had to know which command opened the map,
     /// which is exactly the coupling this shape removes.
     pub form: Option<FormFlow>,
-    /// The first-run import offer, while one is open (#38).
-    pub import_offer: Option<ImportOfferFlow>,
 }
 
 /// The form map as far as the frame can see it.
@@ -355,10 +361,12 @@ pub struct FormFlow {
 
 impl From<&crate::manage::ManageState> for FrameFlow {
     fn from(state: &crate::manage::ManageState) -> Self {
-        let (confirming, form, import_offer) = match &state.phase {
+        let (confirming, adopt_confirm, form) = match &state.phase {
             crate::manage::Phase::ConfirmDelete { target } => (Some(target.clone()), None, None),
+            crate::manage::Phase::ConfirmAdopt { target } => (None, Some(target.clone()), None),
             crate::manage::Phase::List => (None, None, None),
             crate::manage::Phase::Form(map) => (
+                None,
                 None,
                 Some(FormFlow {
                     rows: map.rows(),
@@ -369,46 +377,16 @@ impl From<&crate::manage::ManageState> for FrameFlow {
                     header: map.header(),
                     error: map.error.clone(),
                 }),
-                None,
-            ),
-            crate::manage::Phase::ConfirmImport { count, path } => (
-                None,
-                None,
-                Some(ImportOfferFlow {
-                    count: *count,
-                    path: path.clone(),
-                }),
             ),
         };
 
         Self {
             confirming,
+            adopt_confirm,
             trace: state.trace.clone(),
             form,
-            import_offer,
         }
     }
-}
-
-/// The first-run import offer as far as the frame can see it (#38).
-///
-/// The frame does not run the offer — [`crate::manage`] answers it and
-/// the frame runner in `main.rs` decides when an empty set with an
-/// importable file deserves the ask. This is the projection of the ask
-/// itself: how many Connections the scan found, and the file it found
-/// them in. The frame turns that into the header question and nothing
-/// else — `count` is what the scan said, not a promise about what the
-/// write will return. The number the user is *then* told arrived comes
-/// back through [`crate::manage::Trace::Imported`], earned from the
-/// store rather than carried forward from here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImportOfferFlow {
-    /// What the scan found at `path`: the stanzas that could become
-    /// Connections.
-    pub count: usize,
-    /// The file the offer is about — the one shown in the question and
-    /// the one a `y` writes from, so the two can never disagree.
-    pub path: String,
 }
 
 /// The lines the flow draws between the header and the rows, capped at the
@@ -455,11 +433,17 @@ fn trace_lines(trace: &Option<crate::manage::Trace>, t: &Theme) -> Vec<Line<'sta
         Trace::Deleted { .. } | Trace::DeleteFailed { .. } | Trace::Declined { .. } => {
             delete_trace_lines(trace, t)
         }
-        Trace::Added { .. } | Trace::Edited { .. } | Trace::EditFailed { .. } => {
-            write_trace_lines(trace, t)
-        }
-        Trace::Imported { .. } | Trace::ImportDeclined => import_trace_lines(trace, t),
+        Trace::Added { .. }
+        | Trace::Adopted { .. }
+        | Trace::Edited { .. }
+        | Trace::EditFailed { .. } => write_trace_lines(trace, t),
         Trace::AddAbandoned | Trace::EditAbandoned => abandoned_trace_lines(trace, t),
+        // Not a family, because there is nothing for a family to assemble: no
+        // question was asked, so no settled line comes first, and no write
+        // happened, so no verb is owed. One variant, one wording, one plain
+        // note — the same `◇` the abandoned notes use, for the one thing they
+        // have in common, which is that nothing was written.
+        Trace::ReadOnly { .. } => Some(vec![plain_note_line(READ_ONLY_NOTE, t)]),
     }
     // Not a silent empty note: every variant is routed above, and the frame
     // tests word every one of them, so a family that does not recognise what
@@ -499,52 +483,22 @@ fn delete_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Lin
 /// user pressed Enter on a Connection the store does not have, and a
 /// `◇ edited` over a list still showing the old row would contradict the
 /// rows underneath it.
+///
+/// `Adopted` is the write the confirm asked about, and it still belongs here:
+/// the ask settled itself by leaving the frame, and what is owed is the plain
+/// fact that a row was written. The copy carries no folder — a stanza has
+/// none — so the note reads `◇ adopted build-box`, verb and alias and nothing
+/// in between.
 fn write_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Line<'static>>> {
     use crate::manage::Trace;
     let (verb, connection) = match trace {
         Trace::Added { connection } => ("added", connection),
+        Trace::Adopted { connection } => ("adopted", connection),
         Trace::Edited { connection } => ("edited", connection),
         Trace::EditFailed { connection } => (EDIT_FAILED_NOTE, connection),
         _ => return None,
     };
     Some(vec![note_line(verb, connection, t)])
-}
-
-/// The import family (#38).
-///
-/// The offer was asked on the header, not here, so there is no settled
-/// question to record — only the write that happened, or the refusal of it.
-/// The refused note is what makes the empty list underneath read as
-/// *declined* rather than as a screen that never asked anything.
-fn import_trace_lines(trace: &crate::manage::Trace, t: &Theme) -> Option<Vec<Line<'static>>> {
-    use crate::manage::Trace;
-    match trace {
-        Trace::Imported { imported, failed } => {
-            Some(vec![plain_note_line(&import_note(*imported, *failed), t)])
-        }
-        Trace::ImportDeclined => Some(vec![plain_note_line(IMPORT_DECLINED_NOTE, t)]),
-        _ => None,
-    }
-}
-
-/// `imported 12 connections`, with the skipped count alongside when there is
-/// one — and it is called *skipped*, not *failed*: the offer's number came
-/// from a scan that already left those stanzas out, so they are not a
-/// shortfall of what the user was promised. The live PTY run for #38 caught
-/// `1 failed` reading as "one of your three failed" when nothing of the three
-/// had — the skipped stanza was never one of them. The word carries the
-/// difference.
-fn import_note(imported: usize, failed: usize) -> String {
-    let noun = if imported == 1 {
-        "connection"
-    } else {
-        "connections"
-    };
-    if failed > 0 {
-        format!("imported {imported} {noun}, {failed} skipped")
-    } else {
-        format!("imported {imported} {noun}")
-    }
 }
 
 /// The abandoned family: a sequence backed out of with nothing written.
@@ -815,13 +769,26 @@ const EDIT_FAILED_NOTE: &str = "edit failed — no such Connection:";
 /// did not happen — that is the whole rule this note exists to keep.
 const DELETE_FAILED_NOTE: &str = "delete failed — no such Connection:";
 
-/// The note a declined import offer leaves.
+/// The note a management chord leaves over a Config Host.
 ///
-/// The decline half of [`ADD_ABANDONED_NOTE`], shorter because there was
-/// no half-filled form to account for: nothing was written, and the one
-/// thing the note has to carry is that the ask was *heard* — the empty
-/// list under it reads as refused, not as never-offered.
-const IMPORT_DECLINED_NOTE: &str = "import declined";
+/// The row came from `~/.ssh/config`, which sshm reads and never writes, so
+/// `Ctrl+X` and `Ctrl+E` stop rather than opening a confirm or a form: either
+/// one would be a UI promising a change sshm must not make. The wording names
+/// the provenance and not the Connection, because the provenance is the
+/// reason — and the row it is about is still on the glass underneath, wearing
+/// its `[ssh-config]` tag.
+///
+/// The second half names `Enter` because a refusal that only says *no* leaves
+/// the user nowhere to go: adopting is the one action the row does support,
+/// and the note is where they find out it exists. It is a note and not a hint
+/// rail entry because the rail is the same over every row and this belongs to
+/// the row under the cursor.
+///
+/// A note and not a settle: nothing was asked and nothing was written, so
+/// there is no answer to record and no frame to close. The frame stays open
+/// on the list, which is what makes the refusal legible as *refused* rather
+/// than as a command that ran.
+const READ_ONLY_NOTE: &str = "read-only — from ssh-config · Enter adopts";
 
 /// The `■` line: the confirm's question, answered.
 ///
@@ -969,8 +936,9 @@ pub type MatchResult = (usize, i64, Vec<usize>);
 
 /// Pure fuzzy filter over `&[Connection]` + `SkimMatcherV2` + query.
 ///
-/// Searches alias, host, user, and **folder** fields. For each connection, the
-/// field yielding the highest `fuzzy_match` score is used for the highlight
+/// Searches alias, host, user, and the bracketed prefix — the **folder** for a
+/// stored row, the `[ssh-config]` tag for a config row. For each connection,
+/// the field yielding the highest `fuzzy_match` score is used for the highlight
 /// indices. Results are sorted by score descending (best match first), with
 /// original index as tiebreaker.
 ///
@@ -1000,7 +968,7 @@ pub fn compute_matches(
             ("alias", &conn.alias),
             ("host", &conn.host),
             ("user", &conn.user),
-            ("folder", conn.folder.as_deref().unwrap_or("")),
+            ("folder", row_prefix(conn).unwrap_or("")),
         ];
 
         let offsets = compute_field_offsets(conn);
@@ -1032,6 +1000,35 @@ pub fn compute_matches(
     results
 }
 
+/// The word a row carries in its bracketed prefix when it came from
+/// `~/.ssh/config` rather than from sshm's store.
+///
+/// One constant because two things have to agree on it: the frame draws it, and
+/// the user types it — searching `ssh-config` is how the config hosts are listed
+/// on their own. It is a constant and not a string a user could type into the
+/// Folder field, because a stored row wearing this word would claim to be
+/// something sshm must not let it edit.
+pub const SSH_CONFIG_TAG: &str = "ssh-config";
+
+/// The bracketed prefix a row carries, if it carries one: the `[ssh-config]`
+/// tag for a config row, otherwise its folder.
+///
+/// Provenance outranks the folder rather than sitting next to it. A config row
+/// has no folder to show — folders are sshm's own data, and a stanza has nothing
+/// to fill one in from — and the tag is the fact the row is being shown for, so
+/// a row that is both would have to draw one of them anyway. The rule is written
+/// once here so the drawn row, the row's geometry and the matcher's haystack
+/// cannot disagree about which word a row leads with.
+///
+/// `None` means no brackets at all: a stored row with no folder, which is the
+/// common case and stays compact.
+pub fn row_prefix(conn: &Connection) -> Option<&str> {
+    if conn.source == Source::SshConfig {
+        return Some(SSH_CONFIG_TAG);
+    }
+    conn.folder.as_deref().filter(|f| !f.is_empty())
+}
+
 /// The display text of a frame row (without the rail or cursor) — the single
 /// source of truth for what a row says.
 ///
@@ -1039,18 +1036,22 @@ pub fn compute_matches(
 ///   `[folder] alias (user@host:port)` when folder is present,
 ///   `alias (user@host:port)` when it is not.
 ///
+/// The brackets hold [`row_prefix`], so a row merged from `~/.ssh/config` reads
+/// `[ssh-config] alias (user@host:port)` — the same slot a folder occupies,
+/// filled from provenance instead.
+///
 /// [`compute_field_offsets`] indexes into this string and [`row_line`] draws
 /// its content spans as slices of it, so the text the matcher scores and the
 /// text the user reads are the same bytes. A row is not formatted anywhere
 /// else.
 pub fn build_row_text(conn: &Connection) -> String {
-    let folder = conn.folder.as_deref().unwrap_or("");
-    if folder.is_empty() {
+    let prefix = row_prefix(conn).unwrap_or("");
+    if prefix.is_empty() {
         format!("{} ({}@{}:{})", conn.alias, conn.user, conn.host, conn.port)
     } else {
         format!(
             "[{}] {} ({}@{}:{})",
-            folder, conn.alias, conn.user, conn.host, conn.port
+            prefix, conn.alias, conn.user, conn.host, conn.port
         )
     }
 }
@@ -1063,7 +1064,8 @@ pub fn build_row_text(conn: &Connection) -> String {
 /// drawn as a raw span.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RowSegments {
-    /// `[folder]` — absent when the Connection has no folder.
+    /// `[folder]`, or `[ssh-config]` on a config row — absent when the row
+    /// carries neither ([`row_prefix`]).
     folder: Option<Range<usize>>,
     /// The alias.
     alias: Range<usize>,
@@ -1074,14 +1076,14 @@ struct RowSegments {
 /// The row's geometry: where each drawn segment sits inside
 /// [`build_row_text`]'s output.
 ///
-/// One function owns the `[folder] alias (user@host:port)` layout.
+/// One function owns the `[prefix] alias (user@host:port)` layout.
 /// [`compute_field_offsets`] derives the matcher's field offsets from these
 /// ranges and [`row_line`] cuts its spans out of the row text at them, so the
 /// text the highlight indices count into and the text the frame draws are the
 /// same bytes. Before this, `row_line` formatted the row a second time by
 /// hand and nothing joined the two — see the note on [`row_line`].
 fn row_segments(conn: &Connection) -> RowSegments {
-    let folder = conn.folder.as_deref().filter(|f| !f.is_empty());
+    let folder = row_prefix(conn);
     let port = conn.port.to_string();
 
     // `[folder] ` is the folder name wrapped in brackets plus a space; a row
@@ -1107,9 +1109,13 @@ fn row_segments(conn: &Connection) -> RowSegments {
 /// The boundaries come from [`row_segments`], the one place the row's layout
 /// is written down, so these offsets cannot land on a different row than the
 /// one [`row_line`] draws.
+///
+/// The `"folder"` field is the bracketed prefix, so on a config row it indexes
+/// the `[ssh-config]` tag: the tag is searchable exactly the way a folder is,
+/// which is what makes typing `ssh-config` list the config hosts.
 pub fn compute_field_offsets(conn: &Connection) -> Vec<(&str, usize, usize)> {
     let segs = row_segments(conn);
-    let folder = conn.folder.as_deref().unwrap_or("");
+    let folder = row_prefix(conn).unwrap_or("");
     let port = conn.port.to_string();
     let mut offsets: Vec<(&str, usize, usize)> = Vec::new();
 
@@ -1405,13 +1411,12 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// tail gets dropped, so what is listed first is what survives (user story 23).
 ///
 /// **The rail lists only keys that actually work in this build.** That rule
-/// cut `Ctrl+A add` and `Ctrl+E edit` from the manage rail: `Ctrl+A`
-/// answered its own chord with "not built yet", and `Ctrl+E` left the frame
-/// byte-identical to Enter, so each advertised an action that does not
-/// happen. The chords stay wired — `manage::step` still routes both, and
-/// `Ctrl+A` still answers visibly — they are just not *hinted* until #37
-/// gives them the behaviour their labels promise. `Ctrl+X delete` stays
-/// because it really deletes.
+/// kept `Ctrl+A add` and `Ctrl+E edit` off the manage rail before #37:
+/// `Ctrl+A` answered its own chord with "not built yet", and `Ctrl+E` left
+/// the frame byte-identical to Enter, so each advertised an action that did
+/// not happen. #37 wired the chords to real handlers and the hints earned
+/// their place; the rule is what decides they keep it. `Ctrl+X delete` was
+/// always on the rail because it always deleted.
 ///
 /// The rule is the frame's own and it cuts both ways: `assert_advertised_
 /// chords_are_live` in `frame_test.rs` fails if a chord is hinted without a
@@ -1420,9 +1425,7 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// not the one that happens.
 ///
 /// While the delete confirm is open the rail changes to the answers that
-/// confirm actually reads, in the same order: the way out first. The import
-/// offer wears the same rail — same answers, same order, because it is
-/// the same kind of ask with the same conservative answer set.
+/// confirm actually reads, in the same order: the way out first.
 ///
 /// The rail is fitted with the shared drop-from-the-end rule
 /// ([`fit_hints_with`], the same one [`fit_hints`] is built on), against the
@@ -1435,7 +1438,11 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
     const FORM_SUBMIT: &[&str] = &["Esc back", "Enter save", "↑↓ move", "Ctrl+C quit"];
     const CONFIRMING: &[&str] = &["Esc back", "y confirm", "N abort", "Ctrl+C quit"];
 
-    let hints: &[&str] = if flow.confirming.is_some() || flow.import_offer.is_some() {
+    // While a confirm is open the rail changes to the answers that confirm
+    // actually reads, in the same order: the way out first. Both asks read the
+    // same four keys, so one hint set serves both — and the adopt ask would be
+    // lying about `N abort` if it inherited the list's rail instead.
+    let hints: &[&str] = if flow.confirming.is_some() || flow.adopt_confirm.is_some() {
         CONFIRMING
     } else if let Some(form) = &flow.form {
         // The rail names what Enter means on the row the cursor is on:
@@ -1471,10 +1478,13 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
             // would cut `Ctrl+E` — the one hint this ticket exists to
             // make discoverable — first. Between the two keys that claim
             // "edit", the rail keeps the one that keeps its promise:
-            // `Ctrl+E` changes `connections.json`, while Enter only
-            // leaves the frame with the selection routed to the emit
-            // path, which writes nothing. Enter still works; it is just
-            // not what the manage frame's user is here to do.
+            // `Ctrl+E` changes `connections.json`, while Enter's job is
+            // to leave the frame with the selection routed to the emit
+            // path. Over a row sshm already owns that writes nothing; over
+            // a config row it may ask to adopt a copy, which is a copy in
+            // rather than an edit of what the store holds — and it asks
+            // before it writes. Enter still works; it is just not what the
+            // manage frame's user is here to do.
             FrameMode::Manage => &[
                 "Esc cancel",
                 "↑↓ navigate",
@@ -1523,37 +1533,24 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
         return Line::from(spans);
     }
 
-    // The import offer: the question *is* the header, same position and
-    // grammar as the delete confirm's — one line, one ask (#38). The
-    // count and the path are the two facts the answer is about, so they
-    // are bold; the words that only glue them together recede, exactly as
-    // the folder prefix does in the delete question. The path is shown
-    // in the form the user recognises (see [`display_import_path`]),
-    // display-only: the write still goes to the raw path the phase
-    // carries.
-    if let Some(offer) = &flow.import_offer {
+    // The adopt ask, in the same `◆ … (y/N)` grammar as the delete: one line,
+    // one question whose answer writes a file. It names the alias the row
+    // underneath already wears and the destination in plain words — "sshm's
+    // store" — because the row it asks about is a stanza the user wrote by
+    // hand, and the only thing worth decoding is where the copy would go.
+    //
+    // No folder prefix, unlike the delete: a Config Host has no folder and the
+    // ask is about the row as it stands.
+    if let Some(target) = &flow.adopt_confirm {
         let dim = Style::default().fg(t.fg_muted);
         let bold = Style::default().fg(t.fg).add_modifier(Modifier::BOLD);
-
-        let home = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned));
-        let shown = display_import_path(&offer.path, home.as_deref());
-        // One offered Connection reads "Import 1 connection", not
-        // "Import 1 connections" — the same plural the note keeps, so
-        // the ask and the answer agree on the noun.
-        let noun = if offer.count == 1 {
-            "connection"
-        } else {
-            "connections"
-        };
 
         return Line::from(vec![
             Span::styled("◆", Style::default().fg(t.accent)),
             Span::raw(" "),
-            Span::styled("Import ", bold),
-            Span::styled(offer.count.to_string(), bold),
-            Span::styled(format!(" {noun} from "), dim),
-            Span::styled(shown, bold),
-            Span::styled("? ", bold),
+            Span::styled("Adopt ", bold),
+            Span::styled(target.alias.clone(), bold),
+            Span::styled(" into sshm's store? ", bold),
             Span::styled("(y/N)", dim),
         ]);
     }
@@ -1591,36 +1588,6 @@ fn header_line(mode: FrameMode, flow: &FrameFlow, t: &Theme) -> Line<'static> {
             Style::default().fg(t.fg).add_modifier(Modifier::BOLD),
         ),
     ])
-}
-
-/// The import offer's path in the form the user recognises: a home-dir
-/// prefix shown as `~/`, the way they type it (#38).
-///
-/// Pure on purpose: `home` is a parameter, not a call to
-/// `dirs::home_dir()`, so the rule is pinned against a fake home rather
-/// than the machine the test happens to run on. The header passes the
-/// real home; the tests pass a made-up one.
-///
-/// The cut falls at a **path boundary**, never at a string prefix:
-/// `/home/anyoneelse` merely starts with `/home/anyone` and is not
-/// inside it, so it stays raw — mangling it would point the user at a
-/// file that does not exist. With no home to explain the path, the raw
-/// path is shown: a `~` standing for nothing is worse than the long
-/// form. Display-only either way — the write goes to the raw path the
-/// phase carries, never to the abbreviation.
-pub fn display_import_path(path: &str, home: Option<&str>) -> String {
-    let Some(home) = home.filter(|h| !h.is_empty()) else {
-        return path.to_string();
-    };
-
-    if path == home {
-        return "~".to_string();
-    }
-
-    match path.strip_prefix(home) {
-        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
-        _ => path.to_string(),
-    }
 }
 
 /// The caret the add map draws for itself.

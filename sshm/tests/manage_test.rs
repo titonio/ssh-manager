@@ -26,12 +26,12 @@
 //! wrong, and the only gate in the whole form is the `▶` row.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use sshm::config::{Connection, ImportReport};
+use sshm::config::{Connection, Source};
 use sshm::connections::ConnectionDraft;
 use sshm::inline::InlineOutcome;
 use sshm::manage::{
-    self, step, DeleteOutcome, EditOutcome, Effect, FormCursor, FormField, FormMap, ImportOutcome,
-    ManageState, MapRow, Phase, RowGlyph, Trace,
+    self, step, DeleteOutcome, EditOutcome, Effect, FormCursor, FormField, FormMap, ManageState,
+    MapRow, Phase, RowGlyph, Trace,
 };
 
 /// The port's refusal sentence, spelled once. The dash in `1–65535` is an
@@ -41,6 +41,11 @@ const PORT_REFUSAL: &str = "port must be 1\u{2013}65535 (e.g. 22)";
 
 /// What `refusal_line` puts between two problems.
 const JOIN: &str = " \u{b7} ";
+
+/// The refusal for the one folder name sshm keeps for itself, spelled once for
+/// the same reason the port's is: the quotes and the wording are easy to retype
+/// wrong, and a test that retypes them badly passes for the wrong reason.
+const RESERVED_FOLDER_REFUSAL: &str = "folder \"ssh-config\" is reserved for ssh-config rows";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures
@@ -56,6 +61,7 @@ fn web01() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("prod".into()),
+        source: Source::Stored,
     }
 }
 
@@ -69,6 +75,7 @@ fn web02() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("prod".into()),
+        source: Source::Stored,
     }
 }
 
@@ -291,28 +298,6 @@ fn a_capital_letter_declines_the_delete_and_filters_like_any_other_printable() {
     assert!(
         step.effects.is_empty(),
         "and nothing is deleted: {:?}",
-        step.effects
-    );
-}
-
-/// The same rule one phase over: the first-run import offer declines on any
-/// printable and passes it to the filter, capitals included.
-#[test]
-fn a_capital_letter_declines_the_import_offer_and_filters_like_any_other_printable() {
-    let step = step(&offered(), shifted('W'), None);
-
-    assert_eq!(
-        step.state.phase,
-        Phase::List,
-        "a printable declines the offer"
-    );
-    assert_eq!(
-        step.state.query, "W",
-        "and the declined letter reaches the filter, capital or not"
-    );
-    assert!(
-        step.effects.is_empty(),
-        "and nothing is imported: {:?}",
         step.effects
     );
 }
@@ -1686,6 +1671,70 @@ fn a_whitespace_only_optional_field_settles_as_absent_too() {
     assert_eq!(draft.folder, "", "and the settled draft trims them away");
 }
 
+/// `ssh-config` is the word the frame draws for a Config Host, so a stored row
+/// filed under it would wear that tag and claim to be a row sshm must not edit.
+/// The Folder row refuses it the way the Port row refuses a port that is not a
+/// number: `!` where it was typed, and the `▶` row says the same sentence.
+#[test]
+fn a_folder_named_ssh_config_is_rejected() {
+    let at_folder = goto(&filled_add(), FormCursor::Field(FormField::Folder));
+    let cleared = backspace_n(&at_folder, "prod".chars().count());
+    let typed = type_str(&cleared, "ssh-config");
+
+    assert_eq!(
+        glyph_of(&typed, FormField::Folder),
+        RowGlyph::Invalid,
+        "the Folder row shows `!` for the reserved name"
+    );
+    assert_eq!(
+        row(&form(&typed).rows(), FormField::Folder).glyph.char(),
+        '!',
+        "and the glyph the map draws for that row is the Invalid one"
+    );
+    assert_eq!(
+        problems_of(&typed),
+        vec![("Folder", RESERVED_FOLDER_REFUSAL.to_string())],
+        "the problem names the row and the rule"
+    );
+    assert!(
+        !form(&typed).ready(),
+        "and the reserved name blocks the ▶ row: {:?}",
+        form(&typed).problems()
+    );
+
+    let refused = submit(&typed);
+    assert_eq!(
+        error_of(&refused.state),
+        Some(RESERVED_FOLDER_REFUSAL),
+        "the ▶ row refuses with the same sentence"
+    );
+    assert!(
+        refused.effects.is_empty(),
+        "a refusal asks the driver for nothing: {:?}",
+        refused.effects
+    );
+    assert!(
+        matches!(refused.state.phase, Phase::Form(_)),
+        "and the form stays open with what was typed still in it"
+    );
+}
+
+/// The rule is about the word, not the spelling: `SSH-Config` would draw the
+/// same tag to an eye scanning the list, so it is refused too.
+#[test]
+fn a_folder_named_ssh_config_is_rejected_whatever_the_spelling() {
+    let at_folder = goto(&filled_add(), FormCursor::Field(FormField::Folder));
+    let cleared = backspace_n(&at_folder, "prod".chars().count());
+    let typed = type_str(&cleared, "SSH-Config");
+
+    assert_eq!(
+        glyph_of(&typed, FormField::Folder),
+        RowGlyph::Invalid,
+        "the reserved name is refused in any casing"
+    );
+    assert!(!form(&typed).ready());
+}
+
 #[test]
 fn an_answered_optional_field_settles_as_itself() {
     let at_key = goto(&filled_add(), FormCursor::Field(FormField::Key));
@@ -2664,6 +2713,7 @@ fn clearing_an_optional_field_makes_it_absent() {
         port: 22,
         key_path: Some("~/.ssh/id_ed25519".into()),
         folder: Some("prod".into()),
+        source: Source::Stored,
     };
 
     let on_key = goto(&edit_state(&with_key), FormCursor::Field(FormField::Key));
@@ -2888,432 +2938,434 @@ fn the_submit_row_says_which_connection_it_will_write() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Slice 12 — the first-run import offer (#38)
+// The read-only refusal: a Config Host is not sshm's to change
 //
-// The offer is the one place the manage frame asks the user to authorize a
-// write they did not type out field by field, so it is held to the same
-// discipline as the delete confirm: the keystroke is an *ask*, and the
-// `◇ imported` note is a claim about `connections.json` that only the
-// store can earn. The tests below keep those two halves apart.
+// A row merged from `~/.ssh/config` is on the list to be found and connected
+// to, never to be edited: sshm does not write that file. So `Ctrl+X` and
+// `Ctrl+E` over such a row stop at a `◇` note instead of opening the confirm
+// or the map.
+//
+// A note, not a settle: the refusal says nothing about `connections.json` —
+// nothing was written and nothing was asked for — so the frame stays open on
+// the same list, with the filter and the cursor exactly where the user left
+// them. The alternative, closing the frame, would make a refusal read like
+// the answer to a command that ran.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// The path the ticket's worked example offers to import from.
-const OFFER_PATH: &str = "/home/deploy/.ssh/config";
-
-/// The frame sitting on the first-run offer: twelve importable
-/// Connections found at [`OFFER_PATH`], nothing written yet.
-///
-/// The list is empty here by definition — that is what makes it a
-/// first run — so every keystroke below is driven with `selected: None`.
-/// That is the point: the offer cannot depend on a cursor, because there
-/// is nothing to point at.
-fn offered() -> ManageState {
-    ManageState {
-        phase: Phase::ConfirmImport {
-            count: 12,
-            path: OFFER_PATH.to_string(),
-        },
-        ..ManageState::new()
-    }
-}
-
-/// `y` asks for the import and returns to the list — and asks for *one*
-/// import, of the path the offer named.
-///
-/// The count travels in the phase rather than the effect because the
-/// count is what the scan found, not what the write will deliver; the
-/// effect names only the file, and the report that comes back says how
-/// many arrived.
 #[test]
-fn answering_y_at_the_import_offer_asks_for_exactly_one_import_of_the_offered_path() {
-    let step = step(&offered(), plain('y'), None);
+fn ctrl_x_over_a_config_row_refuses_with_a_read_only_note() {
+    let step = step(&ManageState::new(), ctrl('x'), Some(&gpu_server()));
 
-    assert_eq!(
-        step.effects,
-        vec![Effect::Import {
-            path: OFFER_PATH.to_string()
-        }],
-        "`y` must ask for exactly one import, of the path the offer named"
-    );
     assert_eq!(
         step.state.phase,
         Phase::List,
-        "the offer is over once it has been answered"
+        "a config row never opens the confirm: there is nothing to confirm, \
+         because nothing may be deleted"
     );
     assert_eq!(
-        step.state.trace, None,
-        "the keystroke must not pre-commit an `imported` note. The state \
-         machine owns no disk: the claim is earned by the store's answer, \
-         folded in by `settle_import`"
-    );
-}
-
-/// `y` at the offer clears the note on the glass, exactly as it does at the
-/// delete confirm.
-///
-/// The note above the rows is about an action that has finished, and the
-/// moment the offer is answered the frame is waiting on the store: nothing
-/// has been imported. A note left standing under the list would be read as
-/// the answer to the offer — a user who sees a stale line under a question
-/// they just said yes to cannot tell whether the file was written, and if
-/// the store refused, the frame would be describing a write that never
-/// happened. The fixture hands the step a state that carries a note from an
-/// earlier ask, because the rule is about the answer: whatever was on the
-/// glass goes with the answer, and `◇ imported` arrives later, through
-/// `settle_import`, only if the store really wrote.
-#[test]
-fn answering_y_at_the_import_offer_clears_the_note_on_the_glass() {
-    let with_note = ManageState {
-        trace: Some(Trace::Declined {
-            connection: web01(),
+        step.state.trace,
+        Some(Trace::ReadOnly {
+            connection: gpu_server()
         }),
-        ..offered()
-    };
-
-    let step = step(&with_note, plain('y'), None);
-
-    assert_eq!(
-        step.effects,
-        vec![Effect::Import {
-            path: OFFER_PATH.to_string()
-        }],
-        "clearing the note is not skipping the import: it must still be asked \
-         for, once, of the offered path"
+        "the chord is answered with the note that says why it stopped"
     );
-    assert_eq!(
-        step.state.trace, None,
-        "whatever note was on the glass when the offer was answered must go \
-         with the answer: the frame has imported nothing yet"
+    assert!(
+        step.effects.is_empty(),
+        "a refusal asks the store for nothing: {:?}",
+        step.effects
     );
 }
 
-/// Shift is allowed on the answer, exactly as it is on the delete
-/// confirm: `Y` is the same yes, and a user with the shift down must not
-/// be silently read as having typed some other printable.
 #[test]
-fn a_capital_y_answers_the_import_offer_like_a_lowercase_one() {
-    let step = step(&offered(), plain('Y'), None);
+fn ctrl_e_over_a_config_row_refuses_with_a_read_only_note() {
+    let step = step(&ManageState::new(), ctrl('e'), Some(&gpu_server()));
 
     assert_eq!(
-        step.effects,
-        vec![Effect::Import {
-            path: OFFER_PATH.to_string()
-        }],
-        "`Y` must ask for the same import `y` does"
+        step.state.phase,
+        Phase::List,
+        "a config row never opens the map: a form the user could fill in and \
+         submit would promise a write sshm will not perform"
     );
-    assert_eq!(step.state.trace, None);
+    assert_eq!(
+        step.state.trace,
+        Some(Trace::ReadOnly {
+            connection: gpu_server()
+        }),
+        "the chord is answered with the note that says why it stopped"
+    );
+    assert!(
+        step.effects.is_empty(),
+        "a refusal asks the store for nothing: {:?}",
+        step.effects
+    );
 }
 
-/// The effect carries the path it was offered with, not a path it
-/// resolved for itself.
-///
-/// This is the whole reason the path lives in the phase: the user was
-/// shown one file, so the write has to be about that file. An effect
-/// that re-derived `~/.ssh/config` at the driver could import something
-/// the user never agreed to.
+/// The refusal is a note over the list the user was already looking at, so it
+/// replaces the note and nothing else: the filter they typed and the row they
+/// had stopped on come back with it.
 #[test]
-fn the_import_effect_carries_the_path_the_offer_was_made_at() {
-    let elsewhere = ManageState {
-        phase: Phase::ConfirmImport {
-            count: 3,
-            path: "/etc/ssh/ssh_config".into(),
-        },
+fn the_read_only_refusal_leaves_the_list_the_user_was_reading() {
+    let browsing = ManageState {
+        query: "gpu".into(),
+        selection: 4,
+        trace: Some(Trace::AddAbandoned),
         ..ManageState::new()
     };
 
-    let step = step(&elsewhere, plain('y'), None);
+    let step = step(&browsing, ctrl('x'), Some(&gpu_server()));
+
+    assert_eq!(step.state.query, "gpu", "the filter is the user's");
+    assert_eq!(step.state.selection, 4, "and so is the row they left");
+    assert!(
+        !matches!(step.state.trace, Some(Trace::AddAbandoned)),
+        "the stale note is replaced, not stacked: {:?}",
+        step.state.trace
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Adopt: Enter on a Config Host copies it into sshm's store
+//
+// A Config Host is the user's own stanza: sshm reads it and never writes it,
+// which is why `Ctrl+X` and `Ctrl+E` refuse above. The one thing worth doing
+// to such a row is *copying* it — adopting it — so Enter, the key that means
+// "this one", asks whether to take a copy into sshm's store. The ask is a
+// confirm like the delete confirm, because the answer writes a file; and it is
+// scoped to the row Enter was pressed over, for the same reason a delete is.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn enter_over_a_config_row_asks_to_adopt_it() {
+    let step = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    );
 
     assert_eq!(
-        step.effects,
-        vec![Effect::Import {
-            path: "/etc/ssh/ssh_config".into()
-        }],
-        "the import must name the file the user was shown, not the default one"
+        step.state.phase,
+        Phase::ConfirmAdopt {
+            target: gpu_server()
+        },
+        "Enter on a config row asks rather than picking: the row is not sshm's \
+         to connect out of, and the copy is a write"
     );
-}
-
-/// `n` declines, and a decline writes nothing.
-///
-/// The trace is the whole point of the arm: the user needs to see that
-/// the offer was heard and refused, rather than the empty frame silently
-/// carrying on as if nothing had been asked.
-#[test]
-fn answering_n_at_the_import_offer_declines_and_writes_nothing() {
-    for ch in ['n', 'N'] {
-        let step = step(&offered(), plain(ch), None);
-
-        assert!(
-            step.effects.is_empty(),
-            "`{ch}` must ask for nothing: {:?}",
-            step.effects
-        );
-        assert_eq!(
-            step.state.phase,
-            Phase::List,
-            "and must put the frame back on the list"
-        );
-        assert_eq!(
-            step.state.trace,
-            Some(Trace::ImportDeclined),
-            "with the decline left as the note"
-        );
-    }
-}
-
-/// Esc abandons the offer the same way `n` does: nothing written, the
-/// decline on the record.
-#[test]
-fn esc_at_the_import_offer_declines_it() {
-    let step = step(&offered(), key(KeyCode::Esc), None);
-
     assert!(
         step.effects.is_empty(),
-        "Esc must ask for nothing: {:?}",
+        "an ask writes nothing: the store is asked only after the answer \
+         arrives: {:?}",
         step.effects
     );
+}
+
+/// The ask is scoped to the row Enter was pressed over, exactly as a delete is:
+/// the cursor is free to move afterwards and the target is not.
+#[test]
+fn the_adopt_ask_is_scoped_to_the_row_enter_was_pressed_over() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
+
+    let moved = step(&asking, key(KeyCode::Down), Some(&web01()));
+
+    assert_eq!(
+        moved.state.phase,
+        Phase::ConfirmAdopt {
+            target: gpu_server()
+        },
+        "movement does not move the target: the ask is about the row the key \
+         was pressed over"
+    );
+    assert!(moved.effects.is_empty());
+}
+
+#[test]
+fn answering_y_asks_for_exactly_one_adopt_and_returns_to_the_list() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
+
+    let step = step(&asking, plain('y'), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List, "the ask is over");
+    assert_eq!(
+        step.state.trace, None,
+        "whether anything was adopted is a fact about the disk, and the disk \
+         has not been asked yet"
+    );
+    assert_eq!(
+        step.effects,
+        vec![Effect::Adopt {
+            target: gpu_server()
+        }],
+        "one adopt, of the captured target"
+    );
+}
+
+#[test]
+fn answering_n_declines_the_adopt_and_leaves_nothing_to_report() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
+
+    let step = step(&asking, plain('n'), Some(&gpu_server()));
+
     assert_eq!(step.state.phase, Phase::List);
-    assert_eq!(step.state.trace, Some(Trace::ImportDeclined));
+    assert_eq!(
+        step.state.trace, None,
+        "nothing was asked of the store and nothing was written, so there is \
+         no answer to record"
+    );
+    assert!(step.effects.is_empty());
 }
 
-/// The safety rule the delete confirm runs on, restated for the offer:
-/// a user who carries on typing is searching, not importing.
-///
-/// The offer appears unasked the first time `sshm manage` opens on an
-/// empty set. A user who never meant to answer it and starts typing a
-/// filter must end up with a filtered list and a declined import — not
-/// with twelve Connections they did not ask for.
 #[test]
-fn a_stray_printable_at_the_import_offer_declines_it_and_filters() {
-    for ch in ['w', 'd', 'x', 'a', 'e', ' '] {
-        let step = step(&offered(), plain(ch), None);
+fn escape_declines_the_adopt_and_leaves_nothing_to_report() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
 
-        assert!(
-            step.effects.is_empty(),
-            "`{ch:?}` must not ask for an import: {:?}",
-            step.effects
-        );
-        assert_eq!(
-            step.state.phase,
-            Phase::List,
-            "`{ch:?}` must leave the offer"
-        );
-        assert_eq!(
-            step.state.query,
-            ch.to_string(),
-            "and the character must land in the filter rather than be wasted"
-        );
-        assert_eq!(step.state.trace, Some(Trace::ImportDeclined));
-    }
+    let step = step(&asking, key(KeyCode::Esc), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List);
+    assert_eq!(step.state.trace, None);
+    assert!(step.effects.is_empty());
 }
 
-/// Movement is inert while the offer is open, as it is at the delete
-/// confirm. There is nothing to move onto — the set is empty — and a key
-/// that silently died would read as a broken keybinding, so the rule is
-/// simply that the offer is untouched.
 #[test]
-fn movement_does_not_happen_while_the_import_offer_is_open() {
-    for code in [
-        KeyCode::Down,
-        KeyCode::Up,
-        KeyCode::Enter,
-        KeyCode::Backspace,
-        KeyCode::Left,
-        KeyCode::Right,
-    ] {
-        let step = step(&offered(), key(code), None);
+fn ctrl_c_inside_an_adopt_confirm_cancels_without_adopting() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
+    )
+    .state;
 
-        assert_eq!(
-            step.state,
-            offered(),
-            "{code:?} must leave the offer exactly as it was"
-        );
-        assert!(step.effects.is_empty(), "{code:?} must ask for nothing");
-    }
-}
-
-/// Ctrl+C at the offer is a cancel, not an answer.
-///
-/// It must not import, and it must not be reported as a decline either:
-/// the frame is leaving, and the exit is the only thing the driver is
-/// asked to do.
-#[test]
-fn ctrl_c_at_the_import_offer_cancels_without_importing() {
-    let step = step(&offered(), ctrl('c'), None);
+    let step = step(&asking, ctrl('c'), Some(&gpu_server()));
 
     assert_eq!(
         step.effects,
         vec![Effect::Exit(InlineOutcome::Cancelled)],
-        "Ctrl+C must leave the frame and ask for nothing else"
+        "Ctrl+C leaves the frame; it does not adopt on the way out"
     );
 }
 
-/// The classification of `Store::import_ssh_config`'s answer is the
-/// whole contract between the driver and this module, so it is pinned
-/// here rather than left to be re-derived at the call site.
-///
-/// A report with failures alongside imports is still `Imported`: nine
-/// Connections really arrived, and the three that did not are carried as
-/// a count so the note can say `3 skipped` rather than hiding them.
+/// The filter is live right through the ask, exactly as it is through a delete
+/// confirm: a user who hits Enter by accident and carries on typing ends up
+/// searching, not adopting.
 #[test]
-fn the_import_report_classifies_into_the_two_outcomes() {
-    assert_eq!(
-        ImportOutcome::from_report(Ok(ImportReport {
-            imported: 12,
-            failures: vec![],
-        })),
-        ImportOutcome::Imported {
-            imported: 12,
-            failed: 0
-        },
-        "a clean report is a clean import"
-    );
-
-    assert_eq!(
-        ImportOutcome::from_report(Ok(ImportReport {
-            imported: 9,
-            failures: vec![
-                "wildcard host \"*.example.com\"".into(),
-                "wildcard host \"test?\"".into(),
-                "wildcard host \"*.lan\"".into(),
-            ],
-        })),
-        ImportOutcome::Imported {
-            imported: 9,
-            failed: 3
-        },
-        "a partial import is still an import, with the failures counted"
-    );
-
-    assert_eq!(
-        ImportOutcome::from_report(Err("disk on fire".into())),
-        ImportOutcome::Failed("disk on fire".into()),
-        "and a store that refused is a failure, not an import of nothing"
-    );
-}
-
-/// A real import earns the note, and the frame comes back showing the
-/// list that was written.
-///
-/// The filter is cleared and the cursor goes to the top for the same
-/// reason `settle_add` does it: the user just said yes to twelve new
-/// Connections, and a stale filter left over from before the offer would
-/// hide every one of them under `No matches` while a note above claimed
-/// they had arrived.
-#[test]
-fn an_import_the_store_wrote_earns_the_imported_note() {
-    let stale = ManageState {
-        query: "web".into(),
-        selection: 7,
-        ..offered()
-    };
-    let answered = step(&stale, plain('y'), None);
-
-    let settled = manage::settle_import(
-        &answered.state,
-        ImportOutcome::Imported {
-            imported: 12,
-            failed: 0,
-        },
+fn a_printable_inside_the_adopt_confirm_declines_and_filters() {
+    let asking = step(
+        &ManageState::new(),
+        key(KeyCode::Enter),
+        Some(&gpu_server()),
     )
-    .expect("an import the store performed settles onto the list");
+    .state;
+
+    let step = step(&asking, plain('g'), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List, "the ask is gone");
+    assert_eq!(step.state.query, "g", "and the character was not wasted");
+    assert_eq!(
+        step.state.trace, None,
+        "a decline that is also a filter has nothing to report"
+    );
+    assert!(step.effects.is_empty());
+}
+
+/// Enter over a stored row keeps its old meaning: the frame closes with that
+/// Connection. Adopt is what a *config* row's Enter means, and nothing else.
+#[test]
+fn enter_over_a_stored_row_still_picks_it() {
+    let step = step(&ManageState::new(), key(KeyCode::Enter), Some(&web01()));
 
     assert_eq!(
-        settled.trace,
-        Some(Trace::Imported {
-            imported: 12,
-            failed: 0
-        })
+        step.effects,
+        vec![Effect::Exit(InlineOutcome::Picked(web01()))],
+        "a stored row is sshm's own: Enter takes it, it does not offer a copy"
     );
+    assert_eq!(step.state.phase, Phase::List);
+}
+
+/// Opening the ask does not erase what happened last; answering it does.
+///
+/// The note above the list is the answer to the last question the frame asked,
+/// so while the ask is open the previous action's note is still on the glass —
+/// it is still the last thing that happened. But an answer to *this* question
+/// is not that old claim: leaving `◇ added web-01` above a row the user has
+/// just said yes to would be reporting the wrong event, and the driver replaces
+/// it either way, so the state the ask hands back must not be holding on to it.
+#[test]
+fn answering_y_clears_the_note_the_previous_action_left() {
+    let stale = ManageState {
+        trace: Some(Trace::Added {
+            connection: web01(),
+        }),
+        ..ManageState::new()
+    };
+    let asking = step(&stale, key(KeyCode::Enter), Some(&gpu_server())).state;
+    assert_eq!(
+        asking.trace,
+        Some(Trace::Added {
+            connection: web01()
+        }),
+        "the ask opens over the note that was already there"
+    );
+
+    let step = step(&asking, plain('y'), Some(&gpu_server()));
+
+    assert_eq!(
+        step.state.trace, None,
+        "the answer is a question put to the store, not the note that came \
+         before it"
+    );
+}
+
+/// A declined adopt has nothing to say, and that includes the note left over
+/// from whatever happened before the ask.
+///
+/// The frame's note is the answer to the last question it asked. The last
+/// question was this one, the answer was no, and there is nothing to report —
+/// so the glass goes back to being a list and nothing else, rather than
+/// wearing an old claim as though it were the newest thing on screen.
+#[test]
+fn declining_the_adopt_clears_the_note_the_previous_action_left() {
+    let stale = ManageState {
+        trace: Some(Trace::Added {
+            connection: web01(),
+        }),
+        ..ManageState::new()
+    };
+    let asking = step(&stale, key(KeyCode::Enter), Some(&gpu_server())).state;
+
+    let step = step(&asking, key(KeyCode::Esc), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List);
+    assert_eq!(step.state.trace, None);
+}
+
+/// The decline hands back the list the user was reading.
+///
+/// Their filter and their cursor are theirs: the ask borrowed the frame for a
+/// moment and gives it back as it was, which is the same promise the delete
+/// confirm makes. A decline that reset the search box would be a side effect
+/// nobody asked for, and one nobody would think to look for.
+#[test]
+fn declining_the_adopt_hands_back_the_list_the_user_was_reading() {
+    let filtered = ManageState {
+        query: "gpu".into(),
+        selection: 4,
+        ..ManageState::new()
+    };
+    let asking = step(&filtered, key(KeyCode::Enter), Some(&gpu_server())).state;
+
+    let step = step(&asking, plain('n'), Some(&gpu_server()));
+
+    assert_eq!(step.state.phase, Phase::List);
+    assert_eq!(step.state.query, "gpu", "the filter is still the filter");
+    assert_eq!(step.state.selection, 4, "and the cursor is where it was");
+    assert!(step.effects.is_empty());
+}
+
+// ── settle_adopt: the note is the store's to give ───────────────────────────
+
+#[test]
+fn an_adopt_the_store_wrote_earns_the_adopted_note() {
+    let adopted = Connection {
+        id: "minted-1".into(),
+        source: Source::Stored,
+        ..gpu_server()
+    };
+    let list = vec![web01(), adopted.clone()];
+
+    let settled = manage::settle_adopt(&ManageState::new(), &list, Ok(adopted.clone()))
+        .expect("a Connection the store wrote settles back onto the list");
+
     assert_eq!(settled.phase, Phase::List);
     assert_eq!(
-        settled.query, "",
-        "the filter must be cleared so the imported Connections are visible"
-    );
-    assert_eq!(settled.selection, 0, "and the cursor starts at the top");
-}
-
-/// The partial case keeps both numbers on the note.
-///
-/// `◇ imported 9 connections, 3 skipped` rather than the clean wording:
-/// a user who was promised an import is owed to know which half did not
-/// show up, and a note that rounded three failures away would be a small
-/// lie about their file.
-#[test]
-fn a_partial_import_reports_both_halves() {
-    let answered = step(&offered(), plain('y'), None);
-
-    let settled = manage::settle_import(
-        &answered.state,
-        ImportOutcome::Imported {
-            imported: 9,
-            failed: 3,
-        },
-    )
-    .expect("a partial import is still a real import");
-
-    assert_eq!(
         settled.trace,
-        Some(Trace::Imported {
-            imported: 9,
-            failed: 3
+        Some(Trace::Adopted {
+            connection: adopted
         })
     );
+    assert_eq!(
+        settled.selection, 1,
+        "the cursor lands on the row the store just made"
+    );
 }
 
-/// A store that refused the import collapses the frame rather than
-/// leaving a note on it.
-///
-/// Same rule as a refused add or delete: a live list the store cannot
-/// vouch for is worse than no list, and the frame has no honest thing to
-/// show underneath a failed write.
+/// The adopted row is a *new* row in a list that was filtered: a filter the
+/// user typed before the ask would otherwise hide the row the note names.
 #[test]
-fn an_import_the_store_refused_collapses_the_frame() {
-    let answered = step(&offered(), plain('y'), None);
+fn an_adopt_clears_a_filter_that_would_hide_the_new_row() {
+    let adopted = Connection {
+        id: "minted-1".into(),
+        source: Source::Stored,
+        ..gpu_server()
+    };
+    let filtered = ManageState {
+        query: "web".into(),
+        ..ManageState::new()
+    };
 
-    let outcome = manage::settle_import(
-        &answered.state,
-        ImportOutcome::Failed("Permission denied (os error 13)".into()),
+    let settled = {
+        let list = vec![adopted.clone()];
+        manage::settle_adopt(&filtered, &list, Ok(adopted))
+    }
+    .expect("settles");
+
+    assert_eq!(
+        settled.query, "",
+        "the list is refreshed and shows the resulting Connection"
+    );
+}
+
+#[test]
+fn a_refused_adopt_is_reported_as_a_failure() {
+    let outcome = manage::settle_adopt(
+        &ManageState::new(),
+        &[],
+        Err("read-only file system".into()),
     );
 
     assert_eq!(
         outcome,
-        Err("Permission denied (os error 13)".into()),
-        "the store's own message must survive to be reported, not be swallowed"
-    );
-    assert!(
-        !matches!(answered.state.trace, Some(Trace::Imported { .. })),
-        "and nothing on the pre-settle state may read as imported: {:?}",
-        answered.state.trace
-    );
-}
-
-/// A declined offer never reaches the settle path, so it can never be
-/// dressed up as an import.
-///
-/// The decline is terminal at the step: no effect leaves, which means
-/// `settle_import` is never called with anything about it. Pinned here
-/// because the honest note (`import declined`) and the earned note
-/// (`imported 12 connections`) must never be interchangeable.
-#[test]
-fn a_declined_offer_leaves_nothing_for_the_settle_path_to_claim() {
-    let declined = step(&offered(), key(KeyCode::Esc), None);
-
-    assert!(declined.effects.is_empty());
-    assert_eq!(
-        declined.state.trace,
-        Some(Trace::ImportDeclined),
-        "the decline is the note, not a stand-in for an import"
-    );
-    assert!(
-        !matches!(declined.state.trace, Some(Trace::Imported { .. })),
-        "and it must not read as an import: {:?}",
-        declined.state.trace
+        Err("read-only file system".to_string()),
+        "a store that refused the write is the caller's to collapse, not a \
+         note to paint over the list"
     );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// A Config Host: a `Host` stanza merged in from `~/.ssh/config`, so sshm may
+/// show it and connect to it and may not change it.
+fn gpu_server() -> Connection {
+    Connection {
+        id: "cfg-gpu-server".into(),
+        alias: "gpu-server".into(),
+        host: "gpu.example.com".into(),
+        user: "root".into(),
+        port: 22,
+        key_path: None,
+        folder: None,
+        source: Source::SshConfig,
+    }
+}
 
 /// The add map, opened with `Ctrl+A` and with the cursor parked on `at`.
 fn add_at(at: FormCursor) -> ManageState {

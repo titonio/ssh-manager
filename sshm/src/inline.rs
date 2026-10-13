@@ -98,20 +98,6 @@ pub enum Settle {
         /// The store's own reason, carried through verbatim.
         message: String,
     },
-    /// An import the store refused (#38).
-    ///
-    /// The store refused the write; the frame collapses rather than
-    /// showing a list it cannot vouch for — the same contract
-    /// [`Settle::Error`] and [`Settle::AddFailed`] hold, for the same
-    /// reason. There is no Connection to name here: the ask was about a
-    /// file, not a row, and a line that invented one would claim an
-    /// object the set never received. So the line carries the store's
-    /// reason alone — `◆ import failed: <reason>` — dim where the other
-    /// failure traces are dim, the `◆` carrying the state.
-    ImportFailed {
-        /// The store's own reason, carried through verbatim.
-        message: String,
-    },
 }
 
 /// One row of the frame, as an instruction to the driver.
@@ -238,20 +224,6 @@ pub fn settle_trace(settle: &Settle, canvas: Canvas) -> Vec<Line<'static>> {
             // shape for it would be a second grammar.
             let mut line = connection_trace("error", &TraceSubject::from(draft), &t);
             push_reason(&mut line, message, canvas.fit_width(), &t);
-            vec![fit_line(line, canvas.fit_width())]
-        }
-        Settle::ImportFailed { message } => {
-            // No `connection_trace` here: an import is about a file,
-            // not a row, and there is no Connection to name. The line
-            // keeps the failure grammar the other traces use — accent
-            // glyph, dim text, the store's own reason cut to the
-            // canvas — so a refused import reads as the same class of
-            // failure even though it names nothing.
-            let mut line = Line::from(vec![icon(t.accent), Span::styled(" import failed: ", dim)]);
-            let reason = fit_reason(message, line.width(), canvas.fit_width());
-            if !reason.is_empty() {
-                line.spans.push(Span::styled(reason, dim));
-            }
             vec![fit_line(line, canvas.fit_width())]
         }
     }
@@ -636,9 +608,9 @@ pub enum InlineOutcome {
 /// genuinely needs a terminal.
 ///
 /// This entry point opens the frame on a query-seeded list. A caller that
-/// needs the frame to open on some other step — the first-run import offer,
-/// which is a phase the command decides on before any keystroke exists —
-/// goes through [`run_inline_with_state`] instead.
+/// needs the frame to open on some other step — one the command decides on
+/// before any keystroke exists — goes through [`run_inline_with_state`]
+/// instead.
 pub fn run_inline<W: Write>(
     out: &mut W,
     store: &mut dyn Store,
@@ -655,15 +627,13 @@ pub fn run_inline<W: Write>(
     )
 }
 
-/// [`run_inline`], opened on a caller-supplied [`ManageState`] (#38).
+/// [`run_inline`], opened on a caller-supplied [`ManageState`].
 ///
-/// The first-run import offer is not a keystroke: it is a step the frame
-/// opens *on*, decided by the command before the driver starts. Seeding
-/// it through this entry point is what lets the offer travel as the same
-/// `ManageState` every later keystroke produces — the driver does not grow
-/// a flag to re-derive, and `run_inline` keeps its own meaning. The
-/// behaviour from here is identical to [`run_inline`]'s: the state is
-/// where the two differ, and only at the start.
+/// The frame opens on whatever step the command hands it, seeded as the
+/// same `ManageState` every later keystroke produces — the driver grows no
+/// flag to re-derive it, and `run_inline` keeps its own meaning. The
+/// behaviour from here is identical to [`run_inline`]'s: the state is where
+/// the two differ, and only at the start.
 ///
 /// `note` is the cached update note (#39), read once by the command at the
 /// edge before the driver starts and handed down here as data. The driver
@@ -914,10 +884,10 @@ fn perform<W: Write>(
         Effect::Exit(outcome) => settle(live, paint.canvas, outcome).map(Some),
         Effect::Delete { target } => perform_delete(live, store, state, target, paint),
         Effect::Add { draft } => perform_add(live, store, state, draft, paint),
+        Effect::Adopt { target } => perform_adopt(live, store, state, target, paint),
         Effect::Update { target, draft } => {
             perform_update(live, store, state, target, draft, paint)
         }
-        Effect::Import { path } => perform_import(live, store, state, path, paint),
     }
 }
 
@@ -961,6 +931,33 @@ fn perform_add<W: Write>(
     }
 }
 
+/// [`Store::adopt`] is the only implementation of "copy a Config Host into the
+/// store", so the `◇ adopted` note can only ever report what the store
+/// answered — the same discipline [`perform_add`] is written under.
+///
+/// The failure collapses through [`settle_error`] and not [`settle_add_error`]:
+/// an adopt has a Connection to name — the row the ask was about — where an add
+/// has only a draft, and a line that invented a draft here would be describing
+/// input the user never typed.
+///
+/// [`Store::adopt`]: crate::connections::Store::adopt
+fn perform_adopt<W: Write>(
+    live: &mut LiveFrame<'_, W>,
+    store: &mut dyn Store,
+    state: &mut ManageState,
+    target: Connection,
+    paint: &Paint<'_>,
+) -> io::Result<Option<InlineOutcome>> {
+    let adopted = store.adopt(&target);
+    match manage::settle_adopt(state, store.all(), adopted) {
+        Ok(next) => {
+            *state = next;
+            Ok(None)
+        }
+        Err(message) => settle_error(live, paint.canvas, &target, message).map(Some),
+    }
+}
+
 /// `Ok(None)` means the Connection was not there to change, and the frame says
 /// so instead of claiming an edit the editor never landed.
 fn perform_update<W: Write>(
@@ -978,25 +975,6 @@ fn perform_update<W: Write>(
             Ok(None)
         }
         Err(message) => settle_error(live, paint.canvas, &target, message).map(Some),
-    }
-}
-
-/// An import is about a file, not a row: the `◇ imported` note reports how
-/// many stanzas the store wrote, not how many the scan promised.
-fn perform_import<W: Write>(
-    live: &mut LiveFrame<'_, W>,
-    store: &mut dyn Store,
-    state: &mut ManageState,
-    path: String,
-    paint: &Paint<'_>,
-) -> io::Result<Option<InlineOutcome>> {
-    let outcome = manage::ImportOutcome::from_report(store.import_ssh_config(&path));
-    match manage::settle_import(state, outcome) {
-        Ok(next) => {
-            *state = next;
-            Ok(None)
-        }
-        Err(message) => settle_import_error(live, paint.canvas, message).map(Some),
     }
 }
 
@@ -1216,27 +1194,6 @@ fn settle_add_error<W: Write>(
     Err(io::Error::other(message))
 }
 
-/// Collapse the frame on a refused **import** and hand the shell back with
-/// an error, mirroring [`settle_error`] and [`settle_add_error`].
-///
-/// The trace names no Connection: the offer was about a file, and the
-/// store refused the write, so there is nothing in the set to point at
-/// and nothing on disk changed. The frame collapses rather than showing a
-/// list it cannot vouch for — the same reason a refused delete collapses,
-/// with more force here, because the whole list the user is looking at
-/// would have been the import's supposed result.
-fn settle_import_error<W: Write>(
-    live: &mut LiveFrame<'_, W>,
-    canvas: Canvas,
-    message: String,
-) -> io::Result<InlineOutcome> {
-    let trace = Settle::ImportFailed {
-        message: message.clone(),
-    };
-    live.collapse(&settle_trace(&trace, canvas))?;
-    Err(io::Error::other(message))
-}
-
 /// Hide the cursor while the frame is live.
 const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
 
@@ -1289,7 +1246,7 @@ impl Drop for RawModeGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ImportReport;
+    use crate::config::Source;
     use crate::theme::ColorSupport;
     use std::collections::VecDeque;
 
@@ -1313,6 +1270,7 @@ mod tests {
             port: 22,
             key_path: None,
             folder: Some("prod".into()),
+            source: Source::Stored,
         }
     }
 
@@ -1320,6 +1278,21 @@ mod tests {
         Connection {
             alias: "web-02".into(),
             ..web01()
+        }
+    }
+
+    /// A Config Host: a row merged in from `~/.ssh/config`, which is the only
+    /// kind of row an adopt is ever asked about.
+    fn config_host(alias: &str) -> Connection {
+        Connection {
+            id: format!("ssh-config:{alias}"),
+            alias: alias.to_string(),
+            host: "gpu.example.com".into(),
+            user: "root".into(),
+            port: 22,
+            key_path: None,
+            folder: None,
+            source: Source::SshConfig,
         }
     }
 
@@ -1341,7 +1314,6 @@ mod tests {
         connections: Vec<Connection>,
         asked: Vec<String>,
         refuse: Option<String>,
-        imported: usize,
     }
 
     fn ledger(connections: Vec<Connection>) -> Ledger {
@@ -1349,7 +1321,6 @@ mod tests {
             connections,
             asked: Vec::new(),
             refuse: None,
-            imported: 0,
         }
     }
 
@@ -1380,6 +1351,7 @@ mod tests {
                 port: draft.port.parse().unwrap_or(22),
                 key_path: none_if_blank(&draft.key_path).map(str::to_string),
                 folder: none_if_blank(&draft.folder).map(str::to_string),
+                source: Source::Stored,
             };
             self.connections.push(conn.clone());
             Ok(conn)
@@ -1402,15 +1374,25 @@ mod tests {
             Ok(Some(self.connections[at].clone()))
         }
 
-        fn import_ssh_config(&mut self, path: &str) -> Result<ImportReport, String> {
-            self.asked.push(format!("import {path}"));
+        fn adopt(&mut self, target: &Connection) -> Result<Connection, String> {
+            self.asked.push(format!("adopt {}", target.alias));
             if let Some(reason) = &self.refuse {
                 return Err(reason.clone());
             }
-            Ok(ImportReport {
-                imported: self.imported,
-                failures: Vec::new(),
-            })
+            if target.source != Source::SshConfig {
+                return Err(format!(
+                    "adopt refused: {} is already in sshm's store",
+                    target.alias
+                ));
+            }
+            let conn = Connection {
+                id: format!("minted-{}", self.connections.len()),
+                folder: None,
+                source: Source::Stored,
+                ..target.clone()
+            };
+            self.connections.push(conn.clone());
+            Ok(conn)
         }
     }
 
@@ -1793,6 +1775,40 @@ mod tests {
     }
 
     #[test]
+    fn an_adopt_effect_writes_through_the_store_and_names_the_new_row() {
+        let mut store = ledger(vec![config_host("gpu-server")]);
+        let target = store.all()[0].clone();
+
+        let (answer, state, glass) = perform_effect(Effect::Adopt { target }, &mut store);
+
+        assert!(answer.expect("the store took the adopt").is_none());
+        assert_eq!(store.asked, vec!["adopt gpu-server".to_string()]);
+        let copy = store.connections[1].clone();
+        assert_eq!(copy.source, Source::Stored, "the copy is sshm's own");
+        assert_eq!(
+            state.trace,
+            Some(manage::Trace::Adopted { connection: copy }),
+            "the note reports the row the store wrote, not the stanza it came \
+             from, and it is earned by that answer rather than by the `y`"
+        );
+        assert_eq!(state.selection, 1, "and the cursor lands on the new row");
+        assert!(plain(&glass).is_empty(), "an adopt repaints nothing here");
+    }
+
+    #[test]
+    fn a_refused_adopt_collapses_the_frame_and_leaves_an_error() {
+        let mut store = ledger(vec![config_host("gpu-server")]);
+        store.refuse = Some("read-only file system".into());
+        let target = store.all()[0].clone();
+
+        let (answer, _, glass) = perform_effect(Effect::Adopt { target }, &mut store);
+
+        let err = answer.expect_err("a refused adopt is a failed command");
+        assert!(format!("{err}").contains("read-only file system"));
+        assert!(plain(&glass).contains("error"), "the glass says so too");
+    }
+
+    #[test]
     fn an_update_effect_keeps_the_id_and_reports_the_change() {
         let mut store = ledger(vec![web01()]);
         let (answer, _, glass) = perform_effect(
@@ -1827,50 +1843,6 @@ mod tests {
         let err = answer.expect_err("a refused edit is a failed command");
         assert!(format!("{err}").contains("no space left"));
         assert!(plain(&glass).contains("error"));
-    }
-
-    #[test]
-    fn an_import_effect_writes_the_stanzas_and_reports_the_count() {
-        let mut store = ledger(Vec::new());
-        store.imported = 3;
-        let (answer, state, _) = perform_effect(
-            Effect::Import {
-                path: "/home/dev/.ssh/config".into(),
-            },
-            &mut store,
-        );
-
-        assert!(answer.expect("the store took the import").is_none());
-        assert_eq!(
-            store.asked,
-            vec!["import /home/dev/.ssh/config".to_string()]
-        );
-        assert!(
-            matches!(
-                state.trace,
-                Some(manage::Trace::Imported { imported: 3, .. })
-            ),
-            "the note reports what the store wrote"
-        );
-    }
-
-    #[test]
-    fn a_refused_import_collapses_the_frame_and_leaves_an_error() {
-        let mut store = ledger(Vec::new());
-        store.refuse = Some("permission denied".into());
-        let (answer, _, glass) = perform_effect(
-            Effect::Import {
-                path: "/home/dev/.ssh/config".into(),
-            },
-            &mut store,
-        );
-
-        let err = answer.expect_err("a refused import is a failed command");
-        assert!(format!("{err}").contains("permission denied"));
-        assert!(
-            plain(&glass).contains("import failed"),
-            "the glass says what failed: {glass}"
-        );
     }
 
     #[test]
@@ -1951,6 +1923,47 @@ mod tests {
             driven.settled(),
             &InlineOutcome::Picked(web02()),
             "`2` matches only web-02, so that is the row Enter takes"
+        );
+    }
+
+    /// Enter over a config row in the pick frame is still just a pick.
+    ///
+    /// The adopt ask belongs to the manage frame: the routing sends a pick
+    /// frame's keys to `pick_key`, which never looks at a row's provenance.
+    /// Nothing above this line proves that, because every pick test above uses
+    /// stored rows — so the invariant lived only in the `match paint.mode`
+    /// arm it routes through. It is worth pinning because the two frames share
+    /// the list, the cursor and the Enter key, and a `source` check that
+    /// wandered into the shared path would turn `sshm`'s own picker into a
+    /// question: a picker that asks instead of answering is a script that
+    /// hangs, and the ask would not even be the picker's to ask.
+    #[test]
+    fn enter_over_a_config_row_in_the_pick_frame_still_picks_it() {
+        let gpu = config_host("gpu-server");
+        let mut store = ledger(vec![gpu.clone()]);
+        let driven = drive_script(
+            vec![key(KeyCode::Enter)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(gpu),
+            "the pick frame takes the row under the cursor whatever it was merged from"
+        );
+        assert!(
+            store.asked.is_empty(),
+            "and it asks the store for nothing — no adopt, no write: {:?}",
+            store.asked
+        );
+        let glass = plain(&driven.glass);
+        assert!(glass.contains("picked"), "the trace is a pick: {glass}");
+        assert!(
+            !glass.contains("Adopt"),
+            "and not an ask about the stanza: {glass}"
         );
     }
 
