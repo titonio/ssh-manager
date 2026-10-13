@@ -32,7 +32,7 @@
 //! untouched: this module only says which lines the frame should be showing.
 
 use crate::config::{Connection, Source};
-use crate::connections::ConnectionDraft;
+use crate::connections::{self, ConnectionDraft};
 use crate::inline::InlineOutcome;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -182,6 +182,19 @@ impl FormField {
                 Ok(0) | Err(_) => Err("port must be 1–65535 (e.g. 22)".to_string()),
                 Ok(port) => Ok(port.to_string()),
             },
+            // The one folder name sshm keeps for itself: a stored row filed
+            // under `ssh-config` would draw the tag a Config Host draws and
+            // read as a row nobody may edit. The store refuses the same draft
+            // ([`crate::connections::is_reserved_folder`]); asking it here is
+            // what puts the `!` on the row where it was typed instead of
+            // letting the write fail three keystrokes later.
+            FormField::Folder => {
+                if connections::is_reserved_folder(value) {
+                    Err(connections::reserved_folder_refusal(value))
+                } else {
+                    Ok(value.to_string())
+                }
+            }
             _ => Ok(value.to_string()),
         }
     }

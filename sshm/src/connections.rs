@@ -72,8 +72,38 @@ fn none_if_blank(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// Whether `folder` is the name sshm keeps for itself.
+///
+/// The frame draws `[ssh-config]` for a row that came from `~/.ssh/config`,
+/// from its provenance ([`crate::frame::SSH_CONFIG_TAG`]). A stored Connection
+/// filed under that same word would draw the same prefix and read as a row sshm
+/// must not edit, so the name is not available to a folder — and it is refused
+/// whatever its casing, because a user scanning the list reads the word, not
+/// its bytes.
+pub fn is_reserved_folder(folder: &str) -> bool {
+    folder.eq_ignore_ascii_case(crate::frame::SSH_CONFIG_TAG)
+}
+
+/// The refusal every writer gives for a reserved folder, in the words the user
+/// sees.
+///
+/// One sentence because three writers ask the question — this module, the Form
+/// Map, and `sshm add` — and a fourth wording would be a fourth thing to keep
+/// in step with the rule.
+pub fn reserved_folder_refusal(folder: &str) -> String {
+    format!("folder \"{folder}\" is reserved for ssh-config rows")
+}
+
 /// Add a Connection built from `draft`, persist the set, and return it.
+///
+/// A folder is checked before anything is built or written: a draft naming the
+/// reserved name describes a row that may not exist, and writing half of it and
+/// then saying so would leave the user's file holding the impersonation.
 pub fn add(config: &mut Config, draft: &ConnectionDraft) -> Result<Connection, String> {
+    if is_reserved_folder(&draft.folder) {
+        return Err(reserved_folder_refusal(&draft.folder));
+    }
+
     let conn = connection_from(draft);
     config.add_connection(conn.clone());
     config.save()?;
@@ -87,11 +117,19 @@ pub fn add(config: &mut Config, draft: &ConnectionDraft) -> Result<Connection, S
 /// deliberately knows nothing about lists, filters or cursors. An id that is not
 /// in the set is `Ok(None)`: nothing changed, so nothing is written, and a caller
 /// never reports an edit to a Connection that does not exist.
+///
+/// The reserved folder is refused ahead of that lookup, because it is a fact
+/// about the draft and not about the row it targets: a draft naming the reserved
+/// name describes a row that may not exist whichever id it carries.
 pub fn edit(
     config: &mut Config,
     existing_id: &str,
     draft: &ConnectionDraft,
 ) -> Result<Option<Connection>, String> {
+    if is_reserved_folder(&draft.folder) {
+        return Err(reserved_folder_refusal(&draft.folder));
+    }
+
     if !config.connections.iter().any(|c| c.id == existing_id) {
         return Ok(None);
     }

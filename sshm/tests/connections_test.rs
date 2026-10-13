@@ -881,3 +881,135 @@ fn config_host(alias: &str, host: &str, user: &str) -> Connection {
 fn aliases(rows: &[Connection]) -> Vec<&str> {
     rows.iter().map(|c| c.alias.as_str()).collect()
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The reserved folder name — `ssh-config` is the frame's word, not the user's
+//
+// A stored row filed under `ssh-config` would draw the same `[ssh-config]`
+// prefix a Config Host draws, and so would claim to be a row sshm must not
+// edit. The name is therefore refused wherever a folder is written, and
+// refused whatever its spelling: `SSH-Config` reads as the same word to a user
+// scanning the list, which is exactly the impersonation the rule exists to stop.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A draft filed under `folder` — the one field this rule is about.
+fn filed(alias: &str, folder: &str) -> ConnectionDraft {
+    ConnectionDraft {
+        folder: folder.to_string(),
+        ..draft(alias, "10.0.0.4", "deploy", "22")
+    }
+}
+
+#[test]
+#[serial_test::serial]
+fn adding_to_the_reserved_folder_is_refused_and_writes_nothing() {
+    let home = TempHome::new();
+    let mut config = Config::new();
+
+    let refusal = connections::add(&mut config, &filed("web-01", "SSH-Config"))
+        .expect_err("the reserved folder is not a folder a stored row may wear");
+
+    assert!(
+        refusal.contains("SSH-Config"),
+        "the refusal names the folder it refused: {refusal}"
+    );
+    assert!(
+        refusal.contains("reserved"),
+        "and says why it refused: {refusal}"
+    );
+    assert!(config.connections.is_empty(), "a refusal adds nothing");
+    assert!(
+        home.stored_aliases().is_empty(),
+        "and a refusal writes nothing to the user's file"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn editing_a_folder_to_the_reserved_name_is_refused_and_changes_nothing() {
+    let home = TempHome::new();
+    let mut config = Config::new();
+    let kept = connections::add(&mut config, &draft("web-01", "10.0.0.4", "deploy", "22"))
+        .expect("the fixture's stored row");
+
+    let refusal = connections::edit(&mut config, &kept.id, &filed("web-01", "SSH-Config"))
+        .expect_err("an edit may not file a row under the reserved name either");
+
+    assert!(
+        refusal.contains("SSH-Config"),
+        "the refusal names the folder it refused: {refusal}"
+    );
+    assert_eq!(
+        config.connections[0].folder, None,
+        "the row keeps the folder it had — here, none"
+    );
+    let on_disk = std::fs::read_to_string(home.path().join(".ssh").join("connections.json"))
+        .expect("the set was already on disk before the refusal");
+    assert!(
+        !on_disk.contains("SSH-Config"),
+        "a refusal writes nothing: the user's file holds no reserved folder\n{on_disk}"
+    );
+    assert!(
+        on_disk.contains("web-01"),
+        "and the row they had is still there\n{on_disk}"
+    );
+}
+
+#[test]
+#[serial_test::serial]
+fn the_live_store_refuses_the_reserved_folder_on_both_halves_of_its_seam() {
+    let (home, mut store) = live_store_with_a_config_host();
+    let kept = store
+        .add(&draft("web-01", "10.0.0.4", "deploy", "22"))
+        .expect("the fixture's stored row");
+
+    let refusal = store
+        .add(&filed("web-02", "ssh-config"))
+        .expect_err("the frame writes through this seam, so the seam refuses");
+    assert!(refusal.contains("reserved"), "got: {refusal}");
+
+    let refusal = store
+        .update(&kept.id, &filed("web-01", "SSH-CONFIG"))
+        .expect_err("and it refuses on the edit half too, whatever the casing");
+    assert!(refusal.contains("reserved"), "got: {refusal}");
+
+    assert_eq!(
+        home.stored_aliases(),
+        vec!["web-01".to_string()],
+        "neither refusal wrote anything"
+    );
+}
+
+/// The rule is about one word, not about folders: `prod` is the user's own and
+/// stays theirs. This is also the test that says the refusal is not a blanket
+/// refusal of every folder.
+#[test]
+#[serial_test::serial]
+fn an_ordinary_folder_is_still_an_ordinary_folder() {
+    let _home = TempHome::new();
+    assert!(
+        !connections::is_reserved_folder("prod"),
+        "`prod` belongs to the user"
+    );
+    assert!(
+        !connections::is_reserved_folder(""),
+        "no folder at all is not the reserved one"
+    );
+    assert!(
+        !connections::is_reserved_folder("ssh-configs"),
+        "a folder that merely starts with the reserved name is a different word"
+    );
+    assert!(
+        connections::is_reserved_folder("ssh-config"),
+        "the reserved name itself, as the frame spells it"
+    );
+    assert!(
+        connections::is_reserved_folder("SSH-Config"),
+        "and any spelling of it, because the list is read by eye"
+    );
+
+    let mut config = Config::new();
+    let added = connections::add(&mut config, &filed("web-01", "prod"))
+        .expect("`prod` is still a folder a stored row may wear");
+    assert_eq!(added.folder.as_deref(), Some("prod"));
+}

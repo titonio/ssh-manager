@@ -491,7 +491,7 @@ fn run_add_command(
 /// The Connection `sshm add` describes, or the refusal it owes the user.
 ///
 /// Two flags are required and the rest have defaults; the id is minted here
-/// because nothing else can. Pure, so the two refusals are assertable without
+/// because nothing else can. Pure, so the refusals are assertable without
 /// touching anyone's `connections.json`.
 fn build_add_connection(
     alias: Option<String>,
@@ -503,6 +503,19 @@ fn build_add_connection(
 ) -> Result<config::Connection, String> {
     let alias = alias.ok_or("Error: --alias is required")?;
     let host = host.ok_or("Error: user@host is required")?;
+    // `sshm add` writes through `config` directly rather than through
+    // `connections::add`, so the reserved-folder rule has to be asked here as
+    // well: the same question and the same sentence, asked of the one module
+    // that owns the rule, so the CLI cannot file a row the store would refuse.
+    if let Some(folder) = folder
+        .as_deref()
+        .filter(|folder| connections::is_reserved_folder(folder))
+    {
+        return Err(format!(
+            "Error: {}",
+            connections::reserved_folder_refusal(folder)
+        ));
+    }
 
     Ok(config::Connection {
         id: uuid::Uuid::new_v4().to_string(),
@@ -1360,6 +1373,45 @@ pub mod tests {
             !conn.id.is_empty(),
             "the id is minted here, as nothing else can"
         );
+    }
+
+    /// `sshm add` writes through `config` directly rather than through
+    /// `connections`, so the reserved-folder rule has to be asked here too: a
+    /// stored row filed under `ssh-config` would draw the frame's own
+    /// `[ssh-config]` tag and claim to be a row sshm must not edit. The
+    /// refusal is the CLI's ordinary one — a line on stderr and a non-zero
+    /// exit, which is what an `Err` from here becomes in `main`.
+    #[test]
+    fn add_refuses_a_folder_reserved_for_ssh_config_rows() {
+        let refusal = build_add_connection(
+            Some("web".into()),
+            Some("deploy@10.0.0.4".into()),
+            None,
+            22,
+            None,
+            Some("SSH-Config".into()),
+        )
+        .expect_err("the reserved folder is not one a stored row may wear");
+
+        assert!(
+            refusal.contains("SSH-Config"),
+            "the refusal names the folder it refused: {refusal}"
+        );
+        assert!(
+            refusal.contains("reserved"),
+            "and says why it refused: {refusal}"
+        );
+
+        let filed = build_add_connection(
+            Some("web".into()),
+            Some("deploy@10.0.0.4".into()),
+            None,
+            22,
+            None,
+            Some("prod".into()),
+        )
+        .expect("an ordinary folder is still an ordinary folder");
+        assert_eq!(filed.folder.as_deref(), Some("prod"));
     }
 
     /// A failed check is the same: non-zero, and no frame. This is the

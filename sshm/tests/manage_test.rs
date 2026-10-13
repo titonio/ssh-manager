@@ -42,6 +42,11 @@ const PORT_REFUSAL: &str = "port must be 1\u{2013}65535 (e.g. 22)";
 /// What `refusal_line` puts between two problems.
 const JOIN: &str = " \u{b7} ";
 
+/// The refusal for the one folder name sshm keeps for itself, spelled once for
+/// the same reason the port's is: the quotes and the wording are easy to retype
+/// wrong, and a test that retypes them badly passes for the wrong reason.
+const RESERVED_FOLDER_REFUSAL: &str = "folder \"ssh-config\" is reserved for ssh-config rows";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Fixtures
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1664,6 +1669,70 @@ fn a_whitespace_only_optional_field_settles_as_absent_too() {
     let added = submit(&typed);
     let draft = only_add(&added);
     assert_eq!(draft.folder, "", "and the settled draft trims them away");
+}
+
+/// `ssh-config` is the word the frame draws for a Config Host, so a stored row
+/// filed under it would wear that tag and claim to be a row sshm must not edit.
+/// The Folder row refuses it the way the Port row refuses a port that is not a
+/// number: `!` where it was typed, and the `▶` row says the same sentence.
+#[test]
+fn a_folder_named_ssh_config_is_rejected() {
+    let at_folder = goto(&filled_add(), FormCursor::Field(FormField::Folder));
+    let cleared = backspace_n(&at_folder, "prod".chars().count());
+    let typed = type_str(&cleared, "ssh-config");
+
+    assert_eq!(
+        glyph_of(&typed, FormField::Folder),
+        RowGlyph::Invalid,
+        "the Folder row shows `!` for the reserved name"
+    );
+    assert_eq!(
+        row(&form(&typed).rows(), FormField::Folder).glyph.char(),
+        '!',
+        "and the glyph the map draws for that row is the Invalid one"
+    );
+    assert_eq!(
+        problems_of(&typed),
+        vec![("Folder", RESERVED_FOLDER_REFUSAL.to_string())],
+        "the problem names the row and the rule"
+    );
+    assert!(
+        !form(&typed).ready(),
+        "and the reserved name blocks the ▶ row: {:?}",
+        form(&typed).problems()
+    );
+
+    let refused = submit(&typed);
+    assert_eq!(
+        error_of(&refused.state),
+        Some(RESERVED_FOLDER_REFUSAL),
+        "the ▶ row refuses with the same sentence"
+    );
+    assert!(
+        refused.effects.is_empty(),
+        "a refusal asks the driver for nothing: {:?}",
+        refused.effects
+    );
+    assert!(
+        matches!(refused.state.phase, Phase::Form(_)),
+        "and the form stays open with what was typed still in it"
+    );
+}
+
+/// The rule is about the word, not the spelling: `SSH-Config` would draw the
+/// same tag to an eye scanning the list, so it is refused too.
+#[test]
+fn a_folder_named_ssh_config_is_rejected_whatever_the_spelling() {
+    let at_folder = goto(&filled_add(), FormCursor::Field(FormField::Folder));
+    let cleared = backspace_n(&at_folder, "prod".chars().count());
+    let typed = type_str(&cleared, "SSH-Config");
+
+    assert_eq!(
+        glyph_of(&typed, FormField::Folder),
+        RowGlyph::Invalid,
+        "the reserved name is refused in any casing"
+    );
+    assert!(!form(&typed).ready());
 }
 
 #[test]
