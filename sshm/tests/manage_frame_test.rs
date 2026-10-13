@@ -463,17 +463,17 @@ fn a_read_only_refusal_notes_the_note_over_the_list_it_refused_to_change() {
 
     assert_eq!(
         note(&frame),
-        "◇ read-only — from ssh-config",
+        "◇ read-only — from ssh-config · Enter adopts",
         "the note names the provenance, because that is the reason the chord \
-         stopped; the row it names is already on the glass underneath"
+         stopped, and the one thing the row still offers; the row it names is \
+         already on the glass underneath"
     );
     assert!(
         text.iter().any(|l| l.contains("[ssh-config] gpu-server")),
         "the refused row is still drawn: {text:?}"
     );
     assert!(
-        text.iter()
-            .any(|l| l.contains("web-02") || l.contains("[prod] web-01")),
+        text.iter().any(|l| l.contains("[prod] web-01")),
         "the rest of the list is still drawn: {text:?}"
     );
     assert_eq!(
@@ -528,7 +528,7 @@ fn the_read_only_note_is_a_muted_note_that_survives_monochrome() {
     );
     let joined = frame_text(&mono).join("\n");
     assert!(
-        joined.contains("◇ read-only — from ssh-config"),
+        joined.contains("◇ read-only — from ssh-config · Enter adopts"),
         "the whole note is words, so colour off must not cost a word: {joined}"
     );
 }

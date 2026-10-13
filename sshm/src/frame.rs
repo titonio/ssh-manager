@@ -778,11 +778,17 @@ const DELETE_FAILED_NOTE: &str = "delete failed — no such Connection:";
 /// reason — and the row it is about is still on the glass underneath, wearing
 /// its `[ssh-config]` tag.
 ///
+/// The second half names `Enter` because a refusal that only says *no* leaves
+/// the user nowhere to go: adopting is the one action the row does support,
+/// and the note is where they find out it exists. It is a note and not a hint
+/// rail entry because the rail is the same over every row and this belongs to
+/// the row under the cursor.
+///
 /// A note and not a settle: nothing was asked and nothing was written, so
 /// there is no answer to record and no frame to close. The frame stays open
 /// on the list, which is what makes the refusal legible as *refused* rather
 /// than as a command that ran.
-const READ_ONLY_NOTE: &str = "read-only — from ssh-config";
+const READ_ONLY_NOTE: &str = "read-only — from ssh-config · Enter adopts";
 
 /// The `■` line: the confirm's question, answered.
 ///

@@ -9,7 +9,7 @@ shell — no alternate screen, no takeover — built with Rust and Ratatui.
 
 - **Connection Management**: Add, edit, and remove SSH server connections
 - **Fuzzy Search**: Quickly find connections using fuzzy matching
-- **Live ssh-config hosts**: every `Host` in `~/.ssh/config` appears in the picker tagged `[ssh-config]` and connects like any Connection; adopt one into the store to folder or edit it
+- **Live ssh-config hosts**: every `Host` in `~/.ssh/config` appears in the picker tagged `[ssh-config]` and connects like any Connection; press Enter on one in `sshm manage` to adopt it into the store, where you can folder or edit it
 - **Organized by Folders**: Group connections into folders for better organization
 - **Custom SSH Keys**: Support for custom private key paths
 - **Non-Standard Ports**: Configure custom SSH ports (default: 22)
@@ -187,12 +187,12 @@ every mode; anything else is ignored.
 | `Backspace` | Remove the last query character |
 | `↑` / `k` | Move the cursor up |
 | `↓` / `j` | Move the cursor down |
-| `Enter` | Resolve the selection along the command's emit axis: run `ssh`, insert the alias, or route to the edit path |
+| `Enter` | Resolve the selection along the command's emit axis: run `ssh`, insert the alias, or route to the edit path. Over a `[ssh-config]` row in `sshm manage` it asks whether to adopt that host into the store |
 | `Esc` / `Ctrl-C` | Cancel, leave the shell buffer untouched (exit 130) |
 
-The management chords the design calls for (`Ctrl+A` / `Ctrl+E` / `Ctrl+X`) are
-#36's work — no handler reads them yet, so the frame hints nothing that names
-them.
+The management chords — `Ctrl+A` add, `Ctrl+E` edit, `Ctrl+X` delete — belong to
+`sshm manage`, and the frame's hint rail names them. Over a `[ssh-config]` row
+they refuse with a note: sshm reads `~/.ssh/config` and never writes it.
 
 Opening the frame from the shell:
 
@@ -209,6 +209,10 @@ The application stores its configuration in:
 - **Linux**: `~/.ssh/connections.json`
 - **macOS**: `~/.ssh/connections.json`
 - **Windows**: `%USERPROFILE%\.ssh\connections.json`
+
+The `[ssh-config]` rows come from `~/.ssh/config`, read afresh every time a
+frame opens. sshm reads that one file and never writes it, and it does not
+follow `Include` directives — a host defined in an included file is not listed.
 
 ### Config File Format
 
