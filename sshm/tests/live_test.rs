@@ -240,6 +240,7 @@ fn a_stored_connection_hides_the_stanza_that_describes_the_same_host_and_user() 
 fn a_wildcard_pattern_is_a_rule_about_many_hosts_and_contributes_no_row() {
     let merged = merged_from(
         "Host *\n  User default\n\nHost *.example.com\n  User wildcard\n\n\
+         Host web-?\n  User wildcard\n\n\
          Host real\n  HostName 10.0.0.3\n  User deploy\n",
         &[],
     );
@@ -247,7 +248,113 @@ fn a_wildcard_pattern_is_a_rule_about_many_hosts_and_contributes_no_row() {
     assert_eq!(
         aliases(&merged),
         vec!["real"],
-        "the globs are skipped and the concrete stanza survives"
+        "the globs are skipped — `?` is a wildcard too — and the concrete \
+         stanza survives"
+    );
+}
+
+/// A `Match` block closes the stanza it follows, and contributes nothing.
+///
+/// sshm cannot evaluate `Match` criteria at list time, so the honest answer for
+/// a `Match` block is that it draws no row — but the block also *ends* the
+/// stanza above it. Read as a continuation instead, a trailing
+/// `Match host db.example.com`'s `User` landed in `Host web`'s stanza, and
+/// since adopt persists the parsed fields, that wrong user would become a
+/// permanent row in `connections.json`. A mis-parse is no longer a skipped
+/// import row.
+#[test]
+fn a_match_block_closes_the_stanza_it_follows_and_contributes_nothing() {
+    let merged = merged_from(
+        "Host web\n  HostName web.example.com\n  User webuser\n\n\
+         Match host db.example.com\n  User dbuser\n",
+        &[],
+    );
+
+    assert_eq!(
+        aliases(&merged),
+        vec!["web"],
+        "the Match block names no target, so it draws no row of its own"
+    );
+    assert_eq!(
+        merged[0].user, "webuser",
+        "the stanza keeps the user it was written with: a Match block's `User` \
+         belongs to the Match, not to the row above it"
+    );
+}
+
+/// A negation and a character class are rules about many hosts, not targets.
+///
+/// The glob rule was written for `*` and `?`, but OpenSSH's `Host` line also
+/// accepts `!pattern` negation and `[...]` classes, and a row named `!bastion`
+/// or `web[0-9]` is a hostname `ssh` cannot be pointed at: it would be
+/// selectable, connectable and adoptable, which is the rule the glob already
+/// exists to keep.
+#[test]
+fn a_negated_or_classed_pattern_is_a_rule_about_many_hosts_and_contributes_no_row() {
+    let merged = merged_from(
+        "Host * !bastion\n  User default\n\nHost web[0-9]\n  User ci\n\n\
+         Host plain\n  User deploy\n",
+        &[],
+    );
+
+    assert_eq!(
+        aliases(&merged),
+        vec!["plain"],
+        "the negation and the class are skipped and the concrete stanza survives"
+    );
+}
+
+/// A `!` in the middle of a pattern is a literal character, not a negation.
+///
+/// OpenSSH only reads a leading `!` as negation, so `web!1` is one machine with
+/// an odd name and it keeps its row; a filter that looked for `!` anywhere would
+/// silently drop a real host.
+#[test]
+fn a_bang_in_the_middle_of_a_pattern_is_a_literal_and_keeps_its_row() {
+    let merged = merged_from("Host web!1\n  User deploy\n", &[]);
+
+    assert_eq!(aliases(&merged), vec!["web!1"]);
+}
+
+/// `Keyword=value` is the same line as `Keyword value`.
+///
+/// OpenSSH's `strdelim` ends a keyword at `=` as well as at whitespace, and
+/// generated configs are written that way. Read on whitespace alone,
+/// `User=root` is an unknown keyword `user=root` and the field is silently
+/// dropped — which adopt then persists as a row with no user.
+#[test]
+fn an_equals_sign_after_the_keyword_is_a_separator_not_part_of_the_value() {
+    let merged = merged_from(
+        "Host web\n  User=root\n  Port=2222\n  IdentityFile=~/.ssh/id_web\n",
+        &[],
+    );
+
+    assert_eq!(aliases(&merged), vec!["web"]);
+    assert_eq!(merged[0].user, "root", "`User=root` is a user, not a note");
+    assert_eq!(merged[0].port, 2222);
+    assert_eq!(merged[0].key_path.as_deref(), Some("~/.ssh/id_web"));
+}
+
+/// The `=` may sit on either side of the whitespace: `Host = web` is one
+/// pattern, not two.
+///
+/// Read as a value, the lone `=` becomes a pattern named `=` and the file
+/// appears to hold a machine nobody can name — and an adopt would offer to
+/// persist it.
+#[test]
+fn an_equals_sign_alone_after_host_names_one_row_not_two() {
+    let spaced = merged_from("Host = web\n  User deploy\n", &[]);
+    assert_eq!(
+        aliases(&spaced),
+        vec!["web"],
+        "`Host = web` names one machine"
+    );
+
+    let tight = merged_from("Host= web\n  User deploy\n", &[]);
+    assert_eq!(
+        aliases(&tight),
+        vec!["web"],
+        "and so does `Host= web`, with the `=` against the keyword"
     );
 }
 

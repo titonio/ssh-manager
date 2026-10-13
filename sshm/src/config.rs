@@ -220,8 +220,18 @@ impl Stanza {
 fn directive(line: &str) -> Option<(String, String)> {
     let line = line.trim();
     let mut parts = line.split_whitespace();
-    let keyword = parts.next()?.to_lowercase();
-    let mut value = String::new();
+    // OpenSSH's `strdelim` ends a keyword at `=` as well as at whitespace, so
+    // `User=root` is the same line as `User root` and generated configs are
+    // written that way. Reading the keyword up to the first whitespace instead
+    // turns `User=root` into an unknown keyword `user=root`, and a dropped
+    // field is a field adopt then persists as missing.
+    let first = parts.next()?;
+    let (keyword, attached) = match first.split_once('=') {
+        Some((keyword, value)) => (keyword, Some(value)),
+        None => (first, None),
+    };
+    let keyword = keyword.to_lowercase();
+    let mut value = attached.unwrap_or_default().to_string();
     for part in parts {
         if part.starts_with('#') {
             break;
@@ -231,6 +241,14 @@ fn directive(line: &str) -> Option<(String, String)> {
         }
         value.push_str(part);
     }
+    // The separator may sit on its own instead — `Host = web` — where it is a
+    // separator and not the first pattern: a row named `=` is a machine nobody
+    // can name, so the `=` goes and the value starts after it.
+    let value = value
+        .strip_prefix('=')
+        .unwrap_or(&value)
+        .trim_start()
+        .to_string();
     if value.is_empty() {
         return None;
     }
@@ -258,8 +276,13 @@ pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
             continue;
         };
         // A `Host` line closes the stanza before it: the entry the user was
-        // reading is complete the moment the next one starts.
-        if keyword == "host" {
+        // reading is complete the moment the next one starts. A `Match` line
+        // closes it for the same reason and then contributes nothing, because
+        // its keywords belong to the Match criteria and not to the stanza
+        // above: leaving the stanza open would hand a trailing `Match` block's
+        // `User` or `IdentityFile` to the previous Host, and adopt would
+        // persist that wrong value into the store.
+        if keyword == "host" || keyword == "match" {
             entries.extend(stanza.take());
         }
         stanza.set(&keyword, &value);
@@ -270,15 +293,27 @@ pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
     entries
 }
 
+/// Whether `pattern` is a pattern *set* rather than the name of one machine.
+///
+/// OpenSSH matches a `Host` line with shell-style globs, and the set forms are
+/// `*`, `?`, the `[...]` character class, and a **leading** `!` for negation —
+/// a `!` anywhere else is a literal character in the glob. None of these can be
+/// handed to `ssh`: `Host * !bastion` is a rule about every host except one,
+/// and `web[0-9]` is ten machines, so a row drawn from either would be
+/// selectable, connectable and adoptable while naming nothing.
+fn is_pattern_set(pattern: &str) -> bool {
+    pattern.contains(['*', '?', '[', ']']) || pattern.starts_with('!')
+}
+
 /// The rows a frame lists: sshm's own Connections with the usable `Host`
 /// stanzas of `~/.ssh/config` merged into one flat list.
 ///
 /// Three rules, and each one protects something the user would notice:
 ///
 /// * **A glob is not a target.** `Host *` is a rule about many hosts and `ssh`
-///   cannot be pointed at one of them, so a pattern containing `*` or `?`
-///   contributes nothing: a row names exactly one machine, never a rule about
-///   many.
+///   cannot be pointed at one of them, so a pattern that [`is_pattern_set`]
+///   says is a set — a wildcard, a character class, or a negation — contributes
+///   nothing: a row names exactly one machine, never a rule about many.
 /// * **A stored Connection wins.** A stanza is hidden when its target — the
 ///   `HostName` if the stanza has one, otherwise the pattern — and its user
 ///   match a stored Connection, or a stanza earlier in this same file. Two
@@ -303,7 +338,7 @@ pub fn merge_ssh_config(stored: &[Connection], entries: &[SshConfigEntry]) -> Ve
     let mut config_rows: Vec<Connection> = Vec::new();
 
     for entry in entries {
-        if entry.host.contains('*') || entry.host.contains('?') {
+        if is_pattern_set(&entry.host) {
             continue;
         }
 
