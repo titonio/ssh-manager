@@ -9,7 +9,7 @@ shell — no alternate screen, no takeover — built with Rust and Ratatui.
 
 - **Connection Management**: Add, edit, and remove SSH server connections
 - **Fuzzy Search**: Quickly find connections using fuzzy matching
-- **Import from SSH Config**: Automatically import existing connections from `~/.ssh/config`
+- **Live ssh-config hosts**: every `Host` in `~/.ssh/config` appears in the picker tagged `[ssh-config]` and connects like any Connection; adopt one into the store to folder or edit it
 - **Organized by Folders**: Group connections into folders for better organization
 - **Custom SSH Keys**: Support for custom private key paths
 - **Non-Standard Ports**: Configure custom SSH ports (default: 22)
@@ -268,7 +268,7 @@ ssh-manager/
 │   │   ├── emit.rs          # The emit axis: what Enter means per command
 │   │   ├── theme.rs         # Colour tokens (Clack palette, colour support, ANSI serializer)
 │   │   ├── config.rs        # Configuration management
-│   │   ├── connections.rs   # The Connection manager: add, edit, delete, import
+│   │   ├── connections.rs   # The Connection manager: add, edit, delete, adopt
 │   │   ├── ssh.rs           # SSH command building and execution
 │   │   └── update.rs        # Update checking
 │   ├── Cargo.toml           # Rust dependencies
