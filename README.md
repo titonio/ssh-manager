@@ -191,8 +191,9 @@ every mode; anything else is ignored.
 | `Esc` / `Ctrl-C` | Cancel, leave the shell buffer untouched (exit 130) |
 
 The management chords — `Ctrl+A` add, `Ctrl+E` edit, `Ctrl+X` delete — belong to
-`sshm manage`, and the frame's hint rail names them. Over a `[ssh-config]` row
-they refuse with a note: sshm reads `~/.ssh/config` and never writes it.
+`sshm manage`, and the frame's hint rail names them. Over a `[ssh-config]` row,
+`Ctrl+E` and `Ctrl+X` refuse with a note: sshm reads `~/.ssh/config` and never
+writes it. `Ctrl+A` still adds — a new Connection is sshm's own to write.
 
 Opening the frame from the shell:
 

@@ -1411,13 +1411,12 @@ fn state_line(text: &str, t: &Theme) -> Line<'static> {
 /// tail gets dropped, so what is listed first is what survives (user story 23).
 ///
 /// **The rail lists only keys that actually work in this build.** That rule
-/// cut `Ctrl+A add` and `Ctrl+E edit` from the manage rail: `Ctrl+A`
-/// answered its own chord with "not built yet", and `Ctrl+E` left the frame
-/// byte-identical to Enter, so each advertised an action that does not
-/// happen. The chords stay wired — `manage::step` still routes both, and
-/// `Ctrl+A` still answers visibly — they are just not *hinted* until #37
-/// gives them the behaviour their labels promise. `Ctrl+X delete` stays
-/// because it really deletes.
+/// kept `Ctrl+A add` and `Ctrl+E edit` off the manage rail before #37:
+/// `Ctrl+A` answered its own chord with "not built yet", and `Ctrl+E` left
+/// the frame byte-identical to Enter, so each advertised an action that did
+/// not happen. #37 wired the chords to real handlers and the hints earned
+/// their place; the rule is what decides they keep it. `Ctrl+X delete` was
+/// always on the rail because it always deleted.
 ///
 /// The rule is the frame's own and it cuts both ways: `assert_advertised_
 /// chords_are_live` in `frame_test.rs` fails if a chord is hinted without a

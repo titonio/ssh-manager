@@ -45,8 +45,8 @@ Each of these is mine; the user never decided them. A later builder may keep or
 change them, but must not silently drop the behaviour they protect.
 
 * **Config hosts are read-only inside sshm.** Add, Edit and Delete never touch
-  `~/.ssh/config`. Acting on a config row (delete chord, edit chord, or Enter
-  in manage mode) leaves a `◇` trace note — `◇ read-only — from ssh-config` —
+  `~/.ssh/config`. Acting on a config row (delete chord, edit chord) leaves a
+  `◇` trace note — `◇ read-only — from ssh-config · Enter adopts` —
   instead of a form or a confirm, and **the frame stays open**: this is a note
   in the `◇ added` / `◇ edited` grammar, not a settle, so a refusal never
   ends the manage session or picks an exit code. The picker and `sshm pick`

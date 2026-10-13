@@ -85,7 +85,9 @@ fn none_if_blank(value: &str) -> Option<String> {
 /// carries the shell's spaces, and a row filed under them draws the frame's own
 /// prefix just the same.
 pub fn is_reserved_folder(folder: &str) -> bool {
-    folder.trim().eq_ignore_ascii_case(crate::frame::SSH_CONFIG_TAG)
+    folder
+        .trim()
+        .eq_ignore_ascii_case(crate::frame::SSH_CONFIG_TAG)
 }
 
 /// The refusal every writer gives for a reserved folder, in the words the user

@@ -243,16 +243,16 @@ fn directive(line: &str) -> Option<(String, String)> {
     }
     // The separator may sit on its own instead — `Host = web` — where it is a
     // separator and not the first pattern: a row named `=` is a machine nobody
-    // can name, so the `=` goes and the value starts after it.
-    let value = value
-        .strip_prefix('=')
-        .unwrap_or(&value)
-        .trim_start()
-        .to_string();
+    // can name, so the `=` goes and the value starts after it. A value that
+    // then begins with `#` (`User=#root`, `Host =#x`) is OpenSSH's comment
+    // starting where the value should be: the line has no value and OpenSSH
+    // sets nothing, so neither does the stanza.
+    let value = value.strip_prefix('=').unwrap_or(&value).trim_start();
+    let value = if value.starts_with('#') { "" } else { value };
     if value.is_empty() {
         return None;
     }
-    Some((keyword, value))
+    Some((keyword, value.to_string()))
 }
 
 /// Parse an ssh_config file into one entry per Host pattern it names.
@@ -295,12 +295,15 @@ pub fn parse_ssh_config(path: &str) -> Vec<SshConfigEntry> {
 
 /// Whether `pattern` is a pattern *set* rather than the name of one machine.
 ///
-/// OpenSSH matches a `Host` line with shell-style globs, and the set forms are
-/// `*`, `?`, the `[...]` character class, and a **leading** `!` for negation —
-/// a `!` anywhere else is a literal character in the glob. None of these can be
-/// handed to `ssh`: `Host * !bastion` is a rule about every host except one,
-/// and `web[0-9]` is ten machines, so a row drawn from either would be
-/// selectable, connectable and adoptable while naming nothing.
+/// OpenSSH matches a `Host` line with globs of `*`, `?` and a **leading** `!`
+/// for negation — a `!` anywhere else is a literal character in the glob.
+/// None of these can be handed to `ssh`: `Host * !bastion` is a rule about
+/// every host except one, so a row drawn from either would be selectable,
+/// connectable and adoptable while naming nothing. Brackets are kept out too:
+/// ssh_config has no `[...]` character class — OpenSSH matches a bracketed
+/// pattern literally — but a bracketed token is not a hostname anyone can
+/// resolve either, so a row named `web[0-9]` would promise a machine that
+/// does not exist.
 fn is_pattern_set(pattern: &str) -> bool {
     pattern.contains(['*', '?', '[', ']']) || pattern.starts_with('!')
 }

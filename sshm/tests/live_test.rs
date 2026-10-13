@@ -282,15 +282,16 @@ fn a_match_block_closes_the_stanza_it_follows_and_contributes_nothing() {
     );
 }
 
-/// A negation and a character class are rules about many hosts, not targets.
+/// A negation and a bracketed pattern name no reachable machine.
 ///
 /// The glob rule was written for `*` and `?`, but OpenSSH's `Host` line also
-/// accepts `!pattern` negation and `[...]` classes, and a row named `!bastion`
-/// or `web[0-9]` is a hostname `ssh` cannot be pointed at: it would be
-/// selectable, connectable and adoptable, which is the rule the glob already
-/// exists to keep.
+/// accepts `!pattern` negation, and a row named `!bastion` is a hostname
+/// `ssh` cannot be pointed at. Brackets are not a character class in
+/// ssh_config — OpenSSH matches `web[0-9]` literally — but a bracketed
+/// token is no resolvable hostname either, so listing it would be the rule
+/// the glob already exists to keep.
 #[test]
-fn a_negated_or_classed_pattern_is_a_rule_about_many_hosts_and_contributes_no_row() {
+fn a_negated_or_bracketed_pattern_is_a_rule_about_many_hosts_and_contributes_no_row() {
     let merged = merged_from(
         "Host * !bastion\n  User default\n\nHost web[0-9]\n  User ci\n\n\
          Host plain\n  User deploy\n",
@@ -355,6 +356,27 @@ fn an_equals_sign_alone_after_host_names_one_row_not_two() {
         aliases(&tight),
         vec!["web"],
         "and so does `Host= web`, with the `=` against the keyword"
+    );
+
+    let padded = merged_from("Host = web\n  User = deploy\n", &[]);
+    assert_eq!(
+        padded[0].user, "deploy",
+        "the value starts after the separator, not at the space behind it"
+    );
+}
+
+/// A `#` glued to the `=` is OpenSSH's comment starting where the value
+/// should be: `User=#root` has no value, and OpenSSH errors on the line and
+/// sets nothing. Reading `#root` as the user would persist a user named
+/// `#root` through an adopt — a person nobody named.
+#[test]
+fn a_comment_glued_to_the_separator_leaves_the_field_unset() {
+    let merged = merged_from("Host web\n  User=#root\n", &[]);
+
+    assert_eq!(aliases(&merged), vec!["web"]);
+    assert_eq!(
+        merged[0].user, "",
+        "the line has no value, so the stanza keeps none"
     );
 }
 
