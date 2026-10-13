@@ -94,6 +94,7 @@ fn adopted_box() -> Connection {
 fn wide() -> Canvas {
     Canvas::new(120, 24, ColorSupport::Truecolor)
 }
+
 fn line_text(line: &Line<'static>) -> String {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
 }

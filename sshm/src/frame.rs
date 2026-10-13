@@ -1473,10 +1473,13 @@ fn hint_rail_line(mode: FrameMode, flow: &FrameFlow, width: usize, t: &Theme) ->
             // would cut `Ctrl+E` — the one hint this ticket exists to
             // make discoverable — first. Between the two keys that claim
             // "edit", the rail keeps the one that keeps its promise:
-            // `Ctrl+E` changes `connections.json`, while Enter only
-            // leaves the frame with the selection routed to the emit
-            // path, which writes nothing. Enter still works; it is just
-            // not what the manage frame's user is here to do.
+            // `Ctrl+E` changes `connections.json`, while Enter's job is
+            // to leave the frame with the selection routed to the emit
+            // path. Over a row sshm already owns that writes nothing; over
+            // a config row it may ask to adopt a copy, which is a copy in
+            // rather than an edit of what the store holds — and it asks
+            // before it writes. Enter still works; it is just not what the
+            // manage frame's user is here to do.
             FrameMode::Manage => &[
                 "Esc cancel",
                 "↑↓ navigate",

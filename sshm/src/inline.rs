@@ -1926,6 +1926,47 @@ mod tests {
         );
     }
 
+    /// Enter over a config row in the pick frame is still just a pick.
+    ///
+    /// The adopt ask belongs to the manage frame: the routing sends a pick
+    /// frame's keys to `pick_key`, which never looks at a row's provenance.
+    /// Nothing above this line proves that, because every pick test above uses
+    /// stored rows — so the invariant lived only in the `match paint.mode`
+    /// arm it routes through. It is worth pinning because the two frames share
+    /// the list, the cursor and the Enter key, and a `source` check that
+    /// wandered into the shared path would turn `sshm`'s own picker into a
+    /// question: a picker that asks instead of answering is a script that
+    /// hangs, and the ask would not even be the picker's to ask.
+    #[test]
+    fn enter_over_a_config_row_in_the_pick_frame_still_picks_it() {
+        let gpu = config_host("gpu-server");
+        let mut store = ledger(vec![gpu.clone()]);
+        let driven = drive_script(
+            vec![key(KeyCode::Enter)],
+            &mut store,
+            canvas(),
+            ManageState::new(),
+            FrameMode::Pick,
+        );
+
+        assert_eq!(
+            driven.settled(),
+            &InlineOutcome::Picked(gpu),
+            "the pick frame takes the row under the cursor whatever it was merged from"
+        );
+        assert!(
+            store.asked.is_empty(),
+            "and it asks the store for nothing — no adopt, no write: {:?}",
+            store.asked
+        );
+        let glass = plain(&driven.glass);
+        assert!(glass.contains("picked"), "the trace is a pick: {glass}");
+        assert!(
+            !glass.contains("Adopt"),
+            "and not an ask about the stanza: {glass}"
+        );
+    }
+
     /// A chord is not a letter. `Ctrl+A` means *add* in the manage frame and
     /// nothing in the pick frame, but it must never mean *type an `a`*: a chord
     /// swallowed as text filters the list to something the user never typed,

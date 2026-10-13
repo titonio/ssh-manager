@@ -93,8 +93,11 @@ fn answering_y_writes_the_copy_and_retires_the_row_it_came_from() {
     // Wait for the frame to have settled into its after shape, rather than for
     // the first byte of it. The repaint is a row diff: the note row and the
     // list row are written separately, so a grid read the moment the note
-    // lands can still be showing the row the copy retired.
-    pty.wait_until(
+    // lands can still be showing the row the copy retired. The second half of
+    // the predicate is an absence, which is exactly the case `wait_until_settled`
+    // is for: a half-painted frame shows an absence the test does not mean, and
+    // the grid assertions below would then be reading a frame still mid-change.
+    pty.wait_until_settled(
         "the adopted row and the note about it",
         DEFAULT_TIMEOUT,
         |screen| {
