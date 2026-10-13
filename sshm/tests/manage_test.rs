@@ -3315,8 +3315,109 @@ fn a_declined_offer_leaves_nothing_for_the_settle_path_to_claim() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// The read-only refusal: a Config Host is not sshm's to change
+//
+// A row merged from `~/.ssh/config` is on the list to be found and connected
+// to, never to be edited: sshm does not write that file. So `Ctrl+X` and
+// `Ctrl+E` over such a row stop at a `◇` note instead of opening the confirm
+// or the map.
+//
+// A note, not a settle: the refusal says nothing about `connections.json` —
+// nothing was written and nothing was asked for — so the frame stays open on
+// the same list, with the filter and the cursor exactly where the user left
+// them. The alternative, closing the frame, would make a refusal read like
+// the answer to a command that ran.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ctrl_x_over_a_config_row_refuses_with_a_read_only_note() {
+    let step = step(&ManageState::new(), ctrl('x'), Some(&gpu_server()));
+
+    assert_eq!(
+        step.state.phase,
+        Phase::List,
+        "a config row never opens the confirm: there is nothing to confirm, \
+         because nothing may be deleted"
+    );
+    assert_eq!(
+        step.state.trace,
+        Some(Trace::ReadOnly {
+            connection: gpu_server()
+        }),
+        "the chord is answered with the note that says why it stopped"
+    );
+    assert!(
+        step.effects.is_empty(),
+        "a refusal asks the store for nothing: {:?}",
+        step.effects
+    );
+}
+
+#[test]
+fn ctrl_e_over_a_config_row_refuses_with_a_read_only_note() {
+    let step = step(&ManageState::new(), ctrl('e'), Some(&gpu_server()));
+
+    assert_eq!(
+        step.state.phase,
+        Phase::List,
+        "a config row never opens the map: a form the user could fill in and \
+         submit would promise a write sshm will not perform"
+    );
+    assert_eq!(
+        step.state.trace,
+        Some(Trace::ReadOnly {
+            connection: gpu_server()
+        }),
+        "the chord is answered with the note that says why it stopped"
+    );
+    assert!(
+        step.effects.is_empty(),
+        "a refusal asks the store for nothing: {:?}",
+        step.effects
+    );
+}
+
+/// The refusal is a note over the list the user was already looking at, so it
+/// replaces the note and nothing else: the filter they typed and the row they
+/// had stopped on come back with it.
+#[test]
+fn the_read_only_refusal_leaves_the_list_the_user_was_reading() {
+    let browsing = ManageState {
+        query: "gpu".into(),
+        selection: 4,
+        trace: Some(Trace::AddAbandoned),
+        ..ManageState::new()
+    };
+
+    let step = step(&browsing, ctrl('x'), Some(&gpu_server()));
+
+    assert_eq!(step.state.query, "gpu", "the filter is the user's");
+    assert_eq!(step.state.selection, 4, "and so is the row they left");
+    assert!(
+        !matches!(step.state.trace, Some(Trace::AddAbandoned)),
+        "the stale note is replaced, not stacked: {:?}",
+        step.state.trace
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Test helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// A Config Host: a `Host` stanza merged in from `~/.ssh/config`, so sshm may
+/// show it and connect to it and may not change it.
+fn gpu_server() -> Connection {
+    Connection {
+        id: "cfg-gpu-server".into(),
+        alias: "gpu-server".into(),
+        host: "gpu.example.com".into(),
+        user: "root".into(),
+        port: 22,
+        key_path: None,
+        folder: None,
+        source: Source::SshConfig,
+    }
+}
 
 /// The add map, opened with `Ctrl+A` and with the cursor parked on `at`.
 fn add_at(at: FormCursor) -> ManageState {

@@ -88,6 +88,27 @@ fn conns() -> Vec<Connection> {
     vec![prod_server(), dev_box()]
 }
 
+/// A Config Host: a `Host` stanza merged in from `~/.ssh/config`, so the row
+/// wears the `[ssh-config]` tag and no management chord can change it.
+fn gpu_server() -> Connection {
+    Connection {
+        id: "cfg-gpu-server".into(),
+        alias: "gpu-server".into(),
+        host: "gpu.example.com".into(),
+        user: "root".into(),
+        port: 22,
+        key_path: None,
+        folder: None,
+        source: Source::SshConfig,
+    }
+}
+
+/// The merged list: one Config Host above two stored Connections, which is the
+/// shape the read-only note is drawn over.
+fn merged() -> Vec<Connection> {
+    vec![gpu_server(), prod_server(), dev_box()]
+}
+
 /// One unmodified keystroke.
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -1613,6 +1634,48 @@ fn dump_frames_for_review() {
                     import_offer: None,
                     confirming: None,
                     trace: Some(sshm::manage::Trace::EditAbandoned),
+                    form: None,
+                },
+            ),
+        ),
+        // The refusal a chord leaves over a Config Host: the note is the whole
+        // of what happens, and the tagged row underneath it is untouched.
+        // Dumped over the merged list, in both colour modes, because the note
+        // has to read as a note — the same glyph and recession as `◇ added` —
+        // with the colour on and off, and the `[ssh-config]` tag is the half
+        // of the story the note does not repeat.
+        (
+            "frame-manage-read-only",
+            build_frame_with_flow(
+                &merged(),
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    import_offer: None,
+                    confirming: None,
+                    trace: Some(sshm::manage::Trace::ReadOnly {
+                        connection: gpu_server(),
+                    }),
+                    form: None,
+                },
+            ),
+        ),
+        (
+            "frame-manage-read-only-mono",
+            build_frame_with_flow(
+                &merged(),
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, mono),
+                &FrameFlow {
+                    import_offer: None,
+                    confirming: None,
+                    trace: Some(sshm::manage::Trace::ReadOnly {
+                        connection: gpu_server(),
+                    }),
                     form: None,
                 },
             ),

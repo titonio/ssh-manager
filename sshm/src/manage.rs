@@ -31,7 +31,7 @@
 //! The frame's constant height and the settle-collapse are #34's and are
 //! untouched: this module only says which lines the frame should be showing.
 
-use crate::config::{self, Connection};
+use crate::config::{self, Connection, Source};
 use crate::connections::ConnectionDraft;
 use crate::inline::InlineOutcome;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -743,6 +743,26 @@ pub enum Trace {
     /// exists so the empty list underneath it reads as *heard and
     /// refused* rather than as a screen that never asked anything.
     ImportDeclined,
+    /// `Ctrl+X` or `Ctrl+E` over a Config Host: sshm will not change it, and
+    /// the note says so in place of a confirm or a form.
+    ///
+    /// A refusal, not a settle. Nothing was asked of the store and nothing
+    /// was written, so the keystroke is honest about it on its own — the
+    /// discipline [`Trace::Deleted`] is held to, where only the store's answer
+    /// earns the note. What it replaces is the sequence the chord would
+    /// otherwise have opened: a confirm over a row that can never be deleted,
+    /// or a form whose `▶` row promises a write sshm does not perform.
+    ///
+    /// The wording names the provenance rather than the Connection, because
+    /// the reason for the refusal is where the row came from — and the row is
+    /// still on the glass underneath the note, tagged `[ssh-config]`. The
+    /// Connection travels with the variant all the same, because every other
+    /// trace says which row it is about, and a refusal that cannot name its
+    /// row is a note nothing can pin to the keystroke that raised it.
+    ReadOnly {
+        /// The Config Host the chord was pressed over.
+        connection: Connection,
+    },
 }
 
 /// Everything the manage frame's interaction consists of.
@@ -1219,6 +1239,13 @@ fn list_step(state: &ManageState, key: KeyEvent, selected: Option<&Connection>) 
 /// pressed the chord, whatever the cursor gets up to in between. With nothing
 /// under the cursor they ask for nothing, because the frame will not invent a
 /// target to change.
+///
+/// A Config Host gets neither sequence. `Ctrl+X` over a row merged from
+/// `~/.ssh/config` would ask the user to confirm a delete sshm must not
+/// perform, and `Ctrl+E` would hand them a form whose submit row promises a
+/// write to a file sshm never writes; either one is a UI that lies. Both stop
+/// at [`Trace::ReadOnly`] instead, on the list, with the filter and the cursor
+/// untouched — the refusal is a note about the row, not a different screen.
 fn list_chord_step(
     state: &ManageState,
     key: KeyEvent,
@@ -1234,8 +1261,24 @@ fn list_chord_step(
         })
     };
 
+    // A refusal is `opened` with no sequence to open: it replaces the note and
+    // nothing else, so the phase rides along from `..state.clone()` — which is
+    // `Phase::List`, because a chord is only read on the list. Spelling the
+    // phase out here would be a claim no test could check, and the mutation
+    // sweep proves it by deleting the line and losing nothing; what the tests
+    // do check is that the frame is still on the list afterwards.
+    let refused = |target: &Connection| {
+        Step::state_only(ManageState {
+            trace: Some(Trace::ReadOnly {
+                connection: target.clone(),
+            }),
+            ..state.clone()
+        })
+    };
+
     if is_chord(key, 'x') {
         return Some(match selected {
+            Some(target) if target.source == Source::SshConfig => refused(target),
             Some(target) => opened(Phase::ConfirmDelete {
                 target: target.clone(),
             }),
@@ -1245,6 +1288,7 @@ fn list_chord_step(
 
     if is_chord(key, 'e') {
         return Some(match selected {
+            Some(target) if target.source == Source::SshConfig => refused(target),
             Some(target) => Step::state_only(ManageState {
                 phase: Phase::Form(Box::new(FormMap::from_connection(target))),
                 // The note from the last action is cleared the same way

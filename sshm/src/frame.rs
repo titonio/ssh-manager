@@ -460,6 +460,12 @@ fn trace_lines(trace: &Option<crate::manage::Trace>, t: &Theme) -> Vec<Line<'sta
         }
         Trace::Imported { .. } | Trace::ImportDeclined => import_trace_lines(trace, t),
         Trace::AddAbandoned | Trace::EditAbandoned => abandoned_trace_lines(trace, t),
+        // Not a family, because there is nothing for a family to assemble: no
+        // question was asked, so no settled line comes first, and no write
+        // happened, so no verb is owed. One variant, one wording, one plain
+        // note — the same `◇` the abandoned notes use, for the one thing they
+        // have in common, which is that nothing was written.
+        Trace::ReadOnly { .. } => Some(vec![plain_note_line(READ_ONLY_NOTE, t)]),
     }
     // Not a silent empty note: every variant is routed above, and the frame
     // tests word every one of them, so a family that does not recognise what
@@ -822,6 +828,21 @@ const DELETE_FAILED_NOTE: &str = "delete failed — no such Connection:";
 /// thing the note has to carry is that the ask was *heard* — the empty
 /// list under it reads as refused, not as never-offered.
 const IMPORT_DECLINED_NOTE: &str = "import declined";
+
+/// The note a management chord leaves over a Config Host.
+///
+/// The row came from `~/.ssh/config`, which sshm reads and never writes, so
+/// `Ctrl+X` and `Ctrl+E` stop rather than opening a confirm or a form: either
+/// one would be a UI promising a change sshm must not make. The wording names
+/// the provenance and not the Connection, because the provenance is the
+/// reason — and the row it is about is still on the glass underneath, wearing
+/// its `[ssh-config]` tag.
+///
+/// A note and not a settle: nothing was asked and nothing was written, so
+/// there is no answer to record and no frame to close. The frame stays open
+/// on the list, which is what makes the refusal legible as *refused* rather
+/// than as a command that ran.
+const READ_ONLY_NOTE: &str = "read-only — from ssh-config";
 
 /// The `■` line: the confirm's question, answered.
 ///

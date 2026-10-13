@@ -53,6 +53,21 @@ fn conns() -> Vec<Connection> {
     vec![web01(), web02()]
 }
 
+/// A Config Host: a `Host` stanza merged in from `~/.ssh/config`, so sshm may
+/// show it and connect to it and may not change it.
+fn gpu_server() -> Connection {
+    Connection {
+        id: "cfg-gpu-server".into(),
+        alias: "gpu-server".into(),
+        host: "gpu.example.com".into(),
+        user: "root".into(),
+        port: 22,
+        key_path: None,
+        folder: None,
+        source: Source::SshConfig,
+    }
+}
+
 fn wide() -> Canvas {
     Canvas::new(120, 24, ColorSupport::Truecolor)
 }
@@ -399,6 +414,99 @@ fn the_abandoned_edit_notes_that_nothing_was_saved() {
         note.trim_start_matches('│').trim(),
         "◇ edit abandoned — nothing saved",
         "the edit's abandonment says the same thing as the add's, about the edit"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The read-only refusal over a Config Host
+//
+// `Ctrl+X` and `Ctrl+E` over a row merged from `~/.ssh/config` stop at a `◇`
+// note: the frame does not open a confirm or a map for a row sshm may not
+// write. The note is in the `◇ added` / `◇ edited` grammar — same glyph,
+// same recession — and the list underneath it is the list the user was
+// already reading, which is what makes the refusal read as *heard and
+// refused* rather than as a screen that did nothing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The refusal says why the chord stopped, and the frame stays open on the
+/// list: the config row and its stored neighbour are both still drawn.
+#[test]
+fn a_read_only_refusal_notes_the_note_over_the_list_it_refused_to_change() {
+    let list = vec![gpu_server(), web01()];
+    let refused = step(&ManageState::new(), ctrl('x'), Some(&gpu_server()));
+
+    let frame = render_list(&list, &refused.state);
+    let text = frame_text(&frame);
+
+    assert_eq!(
+        note(&frame),
+        "◇ read-only — from ssh-config",
+        "the note names the provenance, because that is the reason the chord \
+         stopped; the row it names is already on the glass underneath"
+    );
+    assert!(
+        text.iter().any(|l| l.contains("[ssh-config] gpu-server")),
+        "the refused row is still drawn: {text:?}"
+    );
+    assert!(
+        text.iter()
+            .any(|l| l.contains("web-02") || l.contains("[prod] web-01")),
+        "the rest of the list is still drawn: {text:?}"
+    );
+    assert_eq!(
+        frame.lines().len(),
+        FRAME_LINES,
+        "a refusal is a note inside the frame, not a new frame"
+    );
+    assert_eq!(
+        line_text(&frame.lines()[0]),
+        "◆ Manage Connections",
+        "the header is still the list's: no confirm was asked and no map opened"
+    );
+    assert!(
+        !text.iter().any(|l| l.contains('▶')),
+        "no form map is on the glass, got {text:?}"
+    );
+}
+
+/// The note is a `◇` note like every other one: the `fg_muted` role carries
+/// it — no literal hue, and no `DIM`, which Windows Terminal ignores
+/// (microsoft/terminal#6703, issue #42) — and the words survive monochrome,
+/// where the colour is gone and only the glyph and the sentence are left.
+#[test]
+fn the_read_only_note_is_a_muted_note_that_survives_monochrome() {
+    let refused = step(&ManageState::new(), ctrl('e'), Some(&gpu_server()));
+    let frame = render_list(&[gpu_server()], &refused.state);
+
+    let glyph = line_with(&frame, '◇')
+        .spans
+        .iter()
+        .find(|s| s.content.contains('◇'))
+        .expect("the ◇ glyph span");
+    assert_eq!(
+        glyph.style.fg,
+        Some(sshm::theme::Theme::clack().fg_muted),
+        "the note is a *muted* note: {:?}",
+        glyph.style
+    );
+    assert!(
+        !glyph.style.add_modifier.contains(Modifier::DIM),
+        "the note must not carry DIM: {:?}",
+        glyph.style
+    );
+
+    let mono = build_frame_with_flow(
+        &[gpu_server()],
+        &refused.state.query,
+        refused.state.selection,
+        FrameMode::Manage,
+        Canvas::new(120, 24, ColorSupport::Monochrome),
+        &FrameFlow::from(&refused.state),
+    );
+    let joined = frame_text(&mono).join("\n");
+    assert!(
+        joined.contains("◇ read-only — from ssh-config"),
+        "the whole note is words, so colour off must not cost a word: {joined}"
     );
 }
 
