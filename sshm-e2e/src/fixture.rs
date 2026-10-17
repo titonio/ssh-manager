@@ -139,7 +139,7 @@ impl Fixture {
         self.store_path().exists()
     }
 
-    /// Seed `~/.ssh/config` for the first-run import offer.
+    /// Seed `~/.ssh/config` so the live merge has stanzas to read.
     pub fn with_ssh_config(self, text: &str) -> io::Result<Self> {
         fs::write(self.ssh_dir().join("config"), text)?;
         Ok(self)

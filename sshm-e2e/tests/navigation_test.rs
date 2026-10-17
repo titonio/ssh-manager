@@ -245,6 +245,9 @@ fn the_no_match_state_shows_what_was_typed_and_leaves_on_escape() {
 /// change into a hundred-line diff, and the styling has its own test below that
 /// names the roles. What this catches is layout — row order, the hint rail's
 /// wording, how tall the frame is, where the rail sits.
+///
+/// The seed is deliberately not in the order the frame lists: the list is sorted
+/// by alias, so a golden that shows `cache-01` first is the proof of it.
 #[test]
 fn the_picker_with_connections_is_a_committed_screen() {
     let fixture = seeded_fixture(&["web-01", "db-01", "cache-01"]);

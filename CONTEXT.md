@@ -8,6 +8,14 @@ A terminal UI for managing SSH connections, built with Rust and Ratatui.
 A single SSH server the user can connect to — an alias, host, user, port, optional key path, and folder. The unit the whole app organizes around.
 _Avoid_: entry, server, host (host is a field of a Connection, not the Connection itself)
 
+**Config Host**:
+A `Host` stanza from `~/.ssh/config` shown live and read-only in the frame, tagged `[ssh-config]`. It is not stored and never edited: adopting it mints a stored Connection.
+_Avoid_: imported host, ssh entry
+
+**Adopt**:
+The per-row act of copying a Config Host into the store — a copy in, asked before it writes, after which the row is an ordinary Connection and the config row retires.
+_Avoid_: import (retired word), copy, clone
+
 **Inline Picker**:
 The inline, filter-as-you-type selector that lists Connections below the cursor
 (line, not fullscreen) and emits the chosen one to the shell. It is the one

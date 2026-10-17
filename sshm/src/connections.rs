@@ -1,7 +1,7 @@
 //! The Connection manager.
 //!
-//! Every change to the Connection set lives here: add, edit, delete and the
-//! `~/.ssh/config` import. Each operation mutates the set, persists it when
+//! Every change to the Connection set lives here: add, edit and delete.
+//! Each operation mutates the set, persists it when
 //! something actually changed, and reports what came back, so a surface can
 //! render its own trace without re-implementing the rules.
 //!
@@ -13,7 +13,7 @@
 //! and the manage paths that will are #36/#37. The seam is exercised by
 //! `tests/connections_test.rs` until they land.
 
-use crate::config::{Config, Connection, ImportReport};
+use crate::config::{Config, Connection, Source};
 
 /// The field values a Connection is built from while the user adds or edits one.
 ///
@@ -49,6 +49,12 @@ impl ConnectionDraft {
 ///
 /// A blank optional field is *absent*, not an empty string: a Connection with
 /// `key_path: Some("")` would hand ssh `-i ""`.
+///
+/// The provenance is `Stored` and not carried from the draft, because a draft
+/// is what the user typed into sshm's own form: whatever it describes is about
+/// to become part of sshm's store, and only the code that merges a
+/// `~/.ssh/config` stanza sets [`Source::SshConfig`]. A draft that could carry
+/// provenance would let a form write a row that claims to be read-only.
 fn connection_from(draft: &ConnectionDraft) -> Connection {
     Connection {
         id: uuid::Uuid::new_v4().to_string(),
@@ -58,6 +64,7 @@ fn connection_from(draft: &ConnectionDraft) -> Connection {
         port: draft.port.parse().unwrap_or(22),
         key_path: none_if_blank(&draft.key_path),
         folder: none_if_blank(&draft.folder),
+        source: Source::Stored,
     }
 }
 
@@ -65,8 +72,44 @@ fn none_if_blank(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// Whether `folder` is the name sshm keeps for itself.
+///
+/// The frame draws `[ssh-config]` for a row that came from `~/.ssh/config`,
+/// from its provenance ([`crate::frame::SSH_CONFIG_TAG`]). A stored Connection
+/// filed under that same word would draw the same prefix and read as a row sshm
+/// must not edit, so the name is not available to a folder — and it is refused
+/// whatever its casing, because a user scanning the list reads the word, not
+/// its bytes.
+///
+/// The padding goes first for the same reason: `sshm add --folder " ssh-config "`
+/// carries the shell's spaces, and a row filed under them draws the frame's own
+/// prefix just the same.
+pub fn is_reserved_folder(folder: &str) -> bool {
+    folder
+        .trim()
+        .eq_ignore_ascii_case(crate::frame::SSH_CONFIG_TAG)
+}
+
+/// The refusal every writer gives for a reserved folder, in the words the user
+/// sees.
+///
+/// One sentence because three writers ask the question — this module, the Form
+/// Map, and `sshm add` — and a fourth wording would be a fourth thing to keep
+/// in step with the rule.
+pub fn reserved_folder_refusal(folder: &str) -> String {
+    format!("folder \"{folder}\" is reserved for ssh-config rows")
+}
+
 /// Add a Connection built from `draft`, persist the set, and return it.
+///
+/// A folder is checked before anything is built or written: a draft naming the
+/// reserved name describes a row that may not exist, and writing half of it and
+/// then saying so would leave the user's file holding the impersonation.
 pub fn add(config: &mut Config, draft: &ConnectionDraft) -> Result<Connection, String> {
+    if is_reserved_folder(&draft.folder) {
+        return Err(reserved_folder_refusal(&draft.folder));
+    }
+
     let conn = connection_from(draft);
     config.add_connection(conn.clone());
     config.save()?;
@@ -80,11 +123,19 @@ pub fn add(config: &mut Config, draft: &ConnectionDraft) -> Result<Connection, S
 /// deliberately knows nothing about lists, filters or cursors. An id that is not
 /// in the set is `Ok(None)`: nothing changed, so nothing is written, and a caller
 /// never reports an edit to a Connection that does not exist.
+///
+/// The reserved folder is refused ahead of that lookup, because it is a fact
+/// about the draft and not about the row it targets: a draft naming the reserved
+/// name describes a row that may not exist whichever id it carries.
 pub fn edit(
     config: &mut Config,
     existing_id: &str,
     draft: &ConnectionDraft,
 ) -> Result<Option<Connection>, String> {
+    if is_reserved_folder(&draft.folder) {
+        return Err(reserved_folder_refusal(&draft.folder));
+    }
+
     if !config.connections.iter().any(|c| c.id == existing_id) {
         return Ok(None);
     }
@@ -110,6 +161,50 @@ pub fn remove(config: &mut Config, id: &str) -> Result<Option<Connection>, Strin
     config.remove_connection(id);
     config.save()?;
     Ok(removed)
+}
+
+/// The draft an adopt writes from `target`, or the reason it cannot be adopted.
+///
+/// The copy carries the stanza's own fields and nothing else: an adopted
+/// Connection lands **unfiled**, because a `Host` stanza has no folder and
+/// inventing one would put the new row somewhere the user never put it. The
+/// id and the provenance are not copied at all — [`connection_from`] mints a
+/// fresh id and sets [`Source::Stored`], which is the whole point of an adopt:
+/// what comes back is sshm's own, so it can be edited and deleted like
+/// anything else in the store.
+fn adopted_draft(target: &Connection) -> Result<ConnectionDraft, String> {
+    if target.source != Source::SshConfig {
+        return Err(format!(
+            "adopt refused: {} is already in sshm's store",
+            target.alias
+        ));
+    }
+    Ok(ConnectionDraft {
+        folder: String::new(),
+        ..ConnectionDraft::from_connection(target)
+    })
+}
+
+/// Copy the Config Host `target` into the store, persist the set, and return
+/// the Connection that was written.
+///
+/// The only implementation of "adopt a Connection", and it is a thin one: the
+/// draft is checked, then handed to [`add`], so an adopt mints its id, sets its
+/// provenance and writes the file exactly the way a hand-typed add does. There
+/// is no second write path for the frame to get wrong.
+pub fn adopt(config: &mut Config, target: &Connection) -> Result<Connection, String> {
+    let draft = adopted_draft(target)?;
+    add(config, &draft)
+}
+
+/// Why a stored store refuses every adopt, in the words the frame shows.
+///
+/// A [`Config`] holds only rows that are already sshm's own — nothing in it
+/// came from `~/.ssh/config`, so there is nothing in it to copy in. The
+/// refusal is not an error the user caused; it is the shape of that store,
+/// which is why it is worded about the store and not about the row.
+fn nothing_to_adopt() -> String {
+    "adopt refused: sshm's store holds no ssh-config rows".to_string()
 }
 
 /// The live set of Connections a frame lists, and the seam a manage action
@@ -158,21 +253,20 @@ pub trait Store {
         draft: &ConnectionDraft,
     ) -> Result<Option<Connection>, String>;
 
-    /// Fold the Host stanzas of the ssh config at `path` into the set and
-    /// persist the result (#38).
+    /// Copy the Config Host `target` into the set, persist it, and return the
+    /// Connection that was written.
     ///
-    /// The import half of the seam the first-run offer's `◇ imported 12
-    /// connections` note rests on. The offer counts what would arrive
-    /// before asking; this is the answer to having asked, so it returns
-    /// the same accounting — including the stanzas that could not become
-    /// Connections, which the trace reports as `3 skipped` rather than
-    /// hiding. Per-entry failures never abort: the fold happens in memory
-    /// and is written once, so a partial import is still a real import
-    /// and a failed write leaves the on-disk set exactly as it was.
+    /// The adopt half of the seam the frame's `◇ adopted` note rests on. A
+    /// Config Host is the user's own stanza — sshm reads `~/.ssh/config` and
+    /// never writes it — so the one thing a frame may do with one is offer a
+    /// copy of it into sshm's store, where it can be edited and deleted like
+    /// anything else.
     ///
-    /// Nothing is written when nothing was imported — the same rule every
-    /// other method on this trait holds.
-    fn import_ssh_config(&mut self, path: &str) -> Result<ImportReport, String>;
+    /// `Err` unless `target` really is a config row: a Connection already in
+    /// the store has nothing to adopt, and a store that wrote a second copy of
+    /// it would be duplicating a row the user owns and hiding the copy behind
+    /// it under the collision rule.
+    fn adopt(&mut self, target: &Connection) -> Result<Connection, String>;
 }
 
 impl Store for Config {
@@ -196,12 +290,10 @@ impl Store for Config {
         edit(self, existing_id, draft)
     }
 
-    fn import_ssh_config(&mut self, path: &str) -> Result<ImportReport, String> {
-        let report = crate::config::import_from_ssh_config_with_path(self, path);
-        if report.imported > 0 {
-            self.save()?;
-        }
-        Ok(report)
+    /// Always a refusal: a stored store holds only rows that are already
+    /// sshm's own, so there is nothing in it to copy in.
+    fn adopt(&mut self, _target: &Connection) -> Result<Connection, String> {
+        Err(nothing_to_adopt())
     }
 }
 
@@ -234,6 +326,14 @@ impl Store for Ephemeral {
     }
 
     fn add(&mut self, draft: &ConnectionDraft) -> Result<Connection, String> {
+        // The same refusal as the persisted store, for the same reason: a row
+        // filed under the frame's own word draws `[ssh-config]` without being
+        // one, and a harness that admitted it would be showing the user a row
+        // the real store would have refused.
+        if is_reserved_folder(&draft.folder) {
+            return Err(reserved_folder_refusal(&draft.folder));
+        }
+
         // Built through the same `connection_from` the persisted path
         // uses, so the row the harness shows is the row the real store
         // would have written. Only the durability is absent.
@@ -247,6 +347,12 @@ impl Store for Ephemeral {
         existing_id: &str,
         draft: &ConnectionDraft,
     ) -> Result<Option<Connection>, String> {
+        // Refused ahead of the lookup, as the persisted path does: the folder is
+        // a fact about the draft, not about the row it targets.
+        if is_reserved_folder(&draft.folder) {
+            return Err(reserved_folder_refusal(&draft.folder));
+        }
+
         // Same discipline as `add`: built through `connection_from`, with
         // the *existing* id kept. A new id here would make the harness's
         // edited row a different Connection from the one the real store
@@ -263,38 +369,12 @@ impl Store for Ephemeral {
         Ok(Some(conn))
     }
 
-    fn import_ssh_config(&mut self, path: &str) -> Result<ImportReport, String> {
-        // Folded through the same `import_from_ssh_config_with_path` the
-        // persisted store uses, so the rows the harness shows are the
-        // rows the real store would have written — same wildcards
-        // refused, same already-held Connections skipped. The set really
-        // grows. Only the durability is absent: nothing is saved.
-        let mut scratch = Config {
-            connections: std::mem::take(&mut self.connections),
-        };
-        let report = crate::config::import_from_ssh_config_with_path(&mut scratch, path);
-        self.connections = scratch.connections;
-        Ok(report)
+    fn adopt(&mut self, target: &Connection) -> Result<Connection, String> {
+        // The same rule and the same construction as the persisted path, with
+        // only the durability absent: the visual harness has to be able to show
+        // an adopt, and a harness that admitted a row the real store refuses
+        // would be demoing a write that cannot happen.
+        let draft = adopted_draft(target)?;
+        self.add(&draft)
     }
-}
-
-/// Import Connections from the user's `~/.ssh/config`, persist the set,
-/// and report what came across. Connections already in the set are left
-/// alone, so importing twice adds nothing the second time — and when
-/// nothing is added, nothing is written.
-///
-/// A stanza that cannot become a Connection (a globbed Host pattern) is a
-/// reported failure, not a failed import: the good Connections still
-/// arrive and are persisted. The caller renders both halves — `◇ imported
-/// 9 connections, 3 skipped` — because a user who was promised an import
-/// is owed to know which half did not show up.
-///
-/// A home directory that cannot be resolved is an `Err`, not a panic: a
-/// surface shows the string it is given, it has no crash to recover from.
-pub fn import(config: &mut Config) -> Result<ImportReport, String> {
-    let report = crate::config::import_from_ssh_config(config)?;
-    if report.imported > 0 {
-        config.save()?;
-    }
-    Ok(report)
 }

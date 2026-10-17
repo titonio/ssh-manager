@@ -16,9 +16,10 @@ use sshm_e2e::{vt100, Pty, DEFAULT_TIMEOUT};
 
 /// Open `sshm manage` on one seeded Connection and press Ctrl+A.
 ///
-/// One seeded row rather than an empty store: on an empty store the first-run
-/// import offer would be standing in front of the list, and this file is about
-/// the form. The offer is what #62 is for.
+/// One seeded row rather than an empty store: the form's fields, cursor and
+/// Submit Row are only worth pinning against a list with something in it, and
+/// an empty store now opens on whatever `~/.ssh/config` contributes — a
+/// fixture's config is not what this file is about.
 fn open_form() -> (sshm_e2e::Fixture, Pty) {
     let fixture = seeded_fixture(&["web-01"]);
     let mut pty = Pty::spawn(sshm_binary(), &["manage"], &fixture).expect("spawn sshm manage");

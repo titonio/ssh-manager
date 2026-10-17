@@ -13,7 +13,7 @@
 //! The outcome is reported on stderr, off the UI stream: the product path will
 //! route it per its emit mode instead.
 
-use sshm::config::Connection;
+use sshm::config::{Connection, Source};
 use sshm::connections::Ephemeral;
 use sshm::frame::FrameMode;
 use sshm::inline::run_inline;
@@ -64,6 +64,7 @@ fn fixture() -> Vec<Connection> {
             port,
             key_path: None,
             folder: folder.map(str::to_string),
+            source: Source::Stored,
         })
         .collect()
 }

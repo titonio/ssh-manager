@@ -44,7 +44,7 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
-use sshm::config::Connection;
+use sshm::config::{Connection, Source};
 use sshm::frame::{
     build_frame, build_frame_with_flow, build_frame_with_note, Canvas, Frame, FrameFlow, FrameMode,
     FRAME_LINES, VISIBLE_ROWS,
@@ -67,6 +67,7 @@ fn prod_server() -> Connection {
         port: 22,
         key_path: None,
         folder: Some("production".into()),
+        source: Source::Stored,
     }
 }
 
@@ -79,11 +80,57 @@ fn dev_box() -> Connection {
         port: 2222,
         key_path: None,
         folder: None,
+        source: Source::Stored,
     }
 }
 
 fn conns() -> Vec<Connection> {
     vec![prod_server(), dev_box()]
+}
+
+/// A Config Host: a `Host` stanza merged in from `~/.ssh/config`, so the row
+/// wears the `[ssh-config]` tag and no management chord can change it.
+fn gpu_server() -> Connection {
+    Connection {
+        id: "cfg-gpu-server".into(),
+        alias: "gpu-server".into(),
+        host: "gpu.example.com".into(),
+        user: "root".into(),
+        port: 22,
+        key_path: None,
+        folder: None,
+        source: Source::SshConfig,
+    }
+}
+
+/// The merged list: one Config Host above two stored Connections, which is the
+/// shape the read-only note is drawn over.
+fn merged() -> Vec<Connection> {
+    vec![gpu_server(), prod_server(), dev_box()]
+}
+
+/// A Config Host named `build-box`, for the adopt frames: the ask is quoted
+/// with this alias, and the copy it offers has no folder to prefix.
+fn build_box() -> Connection {
+    Connection {
+        id: "ssh-config:build-box".into(),
+        alias: "build-box".into(),
+        host: "build.example.com".into(),
+        user: "ci".into(),
+        port: 2222,
+        key_path: None,
+        folder: None,
+        source: Source::SshConfig,
+    }
+}
+
+/// The stored copy an adopt of `build_box()` hands back.
+fn adopted_box() -> Connection {
+    Connection {
+        id: "minted-1".into(),
+        source: Source::Stored,
+        ..build_box()
+    }
 }
 
 /// One unmodified keystroke.
@@ -1500,8 +1547,8 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: Some(c[0].clone()),
+                    adopt_confirm: None,
                     trace: None,
                     form: None,
                 },
@@ -1516,8 +1563,8 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::Deleted {
                         connection: c[0].clone(),
                     }),
@@ -1534,8 +1581,8 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::DeleteFailed {
                         connection: c[0].clone(),
                     }),
@@ -1552,8 +1599,8 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::Edited {
                         connection: c[0].clone(),
                     }),
@@ -1570,8 +1617,8 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::EditFailed {
                         connection: c[0].clone(),
                     }),
@@ -1592,8 +1639,8 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::AddAbandoned),
                     form: None,
                 },
@@ -1608,107 +1655,126 @@ fn dump_frames_for_review() {
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
+                    adopt_confirm: None,
                     trace: Some(sshm::manage::Trace::EditAbandoned),
                     form: None,
                 },
             ),
         ),
-        // The #38 import grammar: the offer asks on the header with the
-        // count and the file it scanned, the `◇` notes report what the
-        // answer actually did (earned from the store, not carried from
-        // the ask), and the decline is the note that makes the empty
-        // CTA underneath read as *heard and refused* rather than as a
-        // screen that never asked anything.
+        // The refusal a chord leaves over a Config Host: the note is the whole
+        // of what happens, and the tagged row underneath it is untouched.
+        // Dumped over the merged list, in both colour modes, because the note
+        // has to read as a note — the same glyph and recession as `◇ added` —
+        // with the colour on and off, and the `[ssh-config]` tag is the half
+        // of the story the note does not repeat.
         (
-            "frame-import-offer-80",
+            "frame-manage-read-only",
             build_frame_with_flow(
-                &[],
+                &merged(),
                 "",
                 0,
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: Some(sshm::frame::ImportOfferFlow {
-                        count: 12,
-                        path: "/home/dev/.ssh/config".into(),
-                    }),
                     confirming: None,
-                    trace: None,
+                    adopt_confirm: None,
+                    trace: Some(sshm::manage::Trace::ReadOnly {
+                        connection: gpu_server(),
+                    }),
                     form: None,
                 },
             ),
         ),
         (
-            "frame-import-offer-80-mono",
+            "frame-manage-read-only-mono",
             build_frame_with_flow(
-                &[],
+                &merged(),
                 "",
                 0,
                 FrameMode::Manage,
                 Canvas::new(80, 24, mono),
                 &FrameFlow {
-                    import_offer: Some(sshm::frame::ImportOfferFlow {
-                        count: 12,
-                        path: "/home/dev/.ssh/config".into(),
-                    }),
                     confirming: None,
+                    adopt_confirm: None,
+                    trace: Some(sshm::manage::Trace::ReadOnly {
+                        connection: gpu_server(),
+                    }),
+                    form: None,
+                },
+            ),
+        ),
+        // The adopt ask and the note it leaves. The ask is the delete confirm's
+        // `◆ … (y/N)` grammar pointed at a different question — so the read is
+        // whether it still reads as *a confirm* and not as a new kind of
+        // screen — and the note is a write note over a list whose config row
+        // has just left. Dumped at 80 columns in both colour modes: the ask
+        // carries more words than the delete's, and the confirm rail has to
+        // survive that next to it.
+        (
+            "frame-manage-adopt-confirm",
+            build_frame_with_flow(
+                &[build_box(), prod_server(), dev_box()],
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, truecolor),
+                &FrameFlow {
+                    confirming: None,
+                    adopt_confirm: Some(build_box()),
                     trace: None,
                     form: None,
                 },
             ),
         ),
         (
-            "frame-imported-80",
+            "frame-manage-adopt-confirm-mono",
             build_frame_with_flow(
-                &c,
+                &[build_box(), prod_server(), dev_box()],
+                "",
+                0,
+                FrameMode::Manage,
+                Canvas::new(80, 24, mono),
+                &FrameFlow {
+                    confirming: None,
+                    adopt_confirm: Some(build_box()),
+                    trace: None,
+                    form: None,
+                },
+            ),
+        ),
+        (
+            "frame-manage-adopted",
+            build_frame_with_flow(
+                &[adopted_box(), prod_server(), dev_box()],
                 "",
                 0,
                 FrameMode::Manage,
                 Canvas::new(80, 24, truecolor),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
-                    trace: Some(sshm::manage::Trace::Imported {
-                        imported: 12,
-                        failed: 0,
+                    adopt_confirm: None,
+                    trace: Some(sshm::manage::Trace::Adopted {
+                        connection: adopted_box(),
                     }),
                     form: None,
                 },
             ),
         ),
         (
-            "frame-imported-partial-80",
+            "frame-manage-adopted-mono",
             build_frame_with_flow(
-                &c,
+                &[adopted_box(), prod_server(), dev_box()],
                 "",
                 0,
                 FrameMode::Manage,
-                Canvas::new(80, 24, truecolor),
+                Canvas::new(80, 24, mono),
                 &FrameFlow {
-                    import_offer: None,
                     confirming: None,
-                    trace: Some(sshm::manage::Trace::Imported {
-                        imported: 9,
-                        failed: 3,
+                    adopt_confirm: None,
+                    trace: Some(sshm::manage::Trace::Adopted {
+                        connection: adopted_box(),
                     }),
-                    form: None,
-                },
-            ),
-        ),
-        (
-            "frame-import-declined-80",
-            build_frame_with_flow(
-                &[],
-                "",
-                0,
-                FrameMode::Manage,
-                Canvas::new(80, 24, truecolor),
-                &FrameFlow {
-                    import_offer: None,
-                    confirming: None,
-                    trace: Some(sshm::manage::Trace::ImportDeclined),
                     form: None,
                 },
             ),
@@ -1779,28 +1845,6 @@ fn dump_frames_for_review() {
             .iter()
             .map(|l| sshm::theme::ansi::line_to_ansi(l))
             .collect::<String>(),
-    )
-    .unwrap_or_else(|e| panic!("write {path}: {e}"));
-    eprintln!("wrote {path}");
-
-    // The `◆ import failed: <reason>` settle (#38) is the same
-    // single-line shape, so it is dumped the same way: the trace lines'
-    // ANSI joined by newlines, through the same `line_to_ansi` the
-    // frames' `to_ansi` writes with.
-    let import_failed_line = sshm::inline::settle_trace(
-        &sshm::inline::Settle::ImportFailed {
-            message: "disk on fire: read-only filesystem".into(),
-        },
-        Canvas::new(80, 24, truecolor),
-    );
-    let path = format!("{dir}/frame-import-failed-settle.ansi");
-    std::fs::write(
-        &path,
-        import_failed_line
-            .iter()
-            .map(|l| sshm::theme::ansi::line_to_ansi(l))
-            .collect::<Vec<_>>()
-            .join("\n"),
     )
     .unwrap_or_else(|e| panic!("write {path}: {e}"));
     eprintln!("wrote {path}");

@@ -1,12 +1,6 @@
 // The bin is a thin CLI over the library: it uses the same modules the tests
 // drive, rather than compiling a second private copy of them.
-use sshm::{
-    config, connections, emit,
-    frame::FrameMode,
-    inline,
-    manage::{ManageState, Phase},
-    ssh, update,
-};
+use sshm::{config, connections, emit, inline, live, manage::ManageState, ssh, update};
 
 use std::io::{self, Write};
 
@@ -139,9 +133,11 @@ fn run_main(
 ///
 /// Bare `sshm`, `sshm pick` and `sshm manage` all open the same inline
 /// frame; they differ only in the [`Emit`] they hand it, which is what
-/// Enter then means (#35). The frame is handed the whole `Config` as a
+/// Enter then means (#35). The frame is handed a [`live::LiveStore`] as a
 /// [`Store`]: a manage delete must persist through the one implementation
-/// `connections.rs` owns, so the seam carries the live set, not a snapshot.
+/// `connections.rs` owns, and the list must hold the `Host` stanzas of
+/// `~/.ssh/config` as they stand when the frame opens — so the seam carries
+/// the live set, not a snapshot of one file.
 ///
 /// `read_note_fn` is the cache-only update-note reader (#39). Each frame
 /// path calls it exactly once, before the frame opens, and hands the result
@@ -181,14 +177,14 @@ fn dispatch(
     // the frame. The note is read from cache here, once, before the frame
     // opens (#39).
     if let Some(Commands::Pick { query }) = cli.command {
-        let mut config = config::Config::load();
-        return run_frame_fn(Emit::Insert, &mut config, query.unwrap_or_default(), note);
+        let mut store = live::LiveStore::new(config::Config::load(), config::ssh_config_path());
+        return run_frame_fn(Emit::Insert, &mut store, query.unwrap_or_default(), note);
     }
 
     // `sshm manage` — the edit emit, in the manage frame.
     if let Some(Commands::Manage) = cli.command {
-        let mut config = config::Config::load();
-        return run_frame_fn(Emit::Edit, &mut config, String::new(), note);
+        let mut store = live::LiveStore::new(config::Config::load(), config::ssh_config_path());
+        return run_frame_fn(Emit::Edit, &mut store, String::new(), note);
     }
 
     // `sshm check-update` / `-c` — purely a question (#46). It reports
@@ -218,8 +214,8 @@ fn dispatch(
     // Bare `sshm` — the execute emit. There is no fullscreen to fall
     // through to: the frame is the whole surface now. The note was read
     // once above, before the frame opens (#39).
-    let mut config = config::Config::load();
-    run_frame_fn(Emit::Execute, &mut config, String::new(), note)
+    let mut store = live::LiveStore::new(config::Config::load(), config::ssh_config_path());
+    run_frame_fn(Emit::Execute, &mut store, String::new(), note)
 }
 
 /// The commands that answer before the cached update note is read: shell
@@ -349,33 +345,6 @@ fn retryable_text(reason: &str) -> String {
     format!("update failed: {reason}")
 }
 
-/// The first-run import offer's predicate (#38): what an import from
-/// `ssh_config_path` would add, if the store is empty and the answer is
-/// not nothing.
-///
-/// `Some(count)` is the whole decision the frame runner makes before
-/// manage opens. Two conditions, both honest:
-///
-/// * the Connection set is empty — a user who already has Connections
-///   was never a first run, and offering to bulk-write over a set they
-///   built by hand is not this feature;
-/// * the file has at least one importable stanza — an absent or
-///   all-wildcard `~/.ssh/config` has nothing to offer, and offering
-///   zero is offering nothing.
-///
-/// The path is a parameter rather than a resolved home dir so the
-/// predicate is testable against a fixture with no `HOME` faking: the
-/// caller owns the one honest answer to "where is the user's ssh
-/// config", and this owns the answer to "is there something to offer
-/// at a given path".
-fn first_run_import_offer(store: &dyn connections::Store, ssh_config_path: &str) -> Option<usize> {
-    if !store.all().is_empty() {
-        return None;
-    }
-    let count = config::count_importable(store.all(), ssh_config_path);
-    (count > 0).then_some(count)
-}
-
 /// The real frame command: open the shared inline frame, resolve the
 /// outcome along the emit axis, and perform the resulting action.
 ///
@@ -399,8 +368,7 @@ fn run_frame_command(
 ///
 /// The only lines in this command that touch a terminal, kept apart from
 /// [`finish_frame`], which decides what the answer does to the process. The
-/// frame is always the same driver opened on some state; the only question
-/// this answers is which state it opens on.
+/// frame always opens on the list, seeded with the caller's query.
 fn frame_outcome(
     emit: Emit,
     store: &mut dyn connections::Store,
@@ -408,37 +376,8 @@ fn frame_outcome(
     note: Option<String>,
 ) -> io::Result<inline::InlineOutcome> {
     let mut frame_out = open_frame_stream()?;
-    let initial =
-        opening_offer(store, emit.frame_mode()).unwrap_or_else(|| ManageState::with_query(query));
+    let initial = ManageState::with_query(query);
     inline::run_inline_with_state(&mut frame_out, store, initial, emit.frame_mode(), note)
-}
-
-/// The step manage opens on when there is something to import (#38), or
-/// `None` for every frame that opens on its list.
-///
-/// The first-run import offer belongs to manage only: the pick frame asks no
-/// questions, and an import is a write. When manage opens on an empty set
-/// with importable stanzas in `~/.ssh/config`, the frame opens on the offer
-/// instead of the list — seeded as a `ManageState`, because the offer is a
-/// step the frame answers, not a flag the driver re-derives.
-fn opening_offer(store: &dyn connections::Store, mode: FrameMode) -> Option<ManageState> {
-    if mode != FrameMode::Manage {
-        return None;
-    }
-
-    let (count, path) = importable_ssh_config(store)?;
-    Some(ManageState {
-        phase: Phase::ConfirmImport { count, path },
-        ..Default::default()
-    })
-}
-
-/// The file a first run could import from, with how many stanzas it holds:
-/// `None` when there is no such file, or it has nothing to offer.
-fn importable_ssh_config(store: &dyn connections::Store) -> Option<(usize, String)> {
-    let path = config::ssh_config_path().filter(|path| path.exists())?;
-    let path = path.to_string_lossy().into_owned();
-    first_run_import_offer(store, &path).map(|count| (count, path))
 }
 
 /// What the frame's answer means for the process: hand the terminal over to
@@ -552,7 +491,7 @@ fn run_add_command(
 /// The Connection `sshm add` describes, or the refusal it owes the user.
 ///
 /// Two flags are required and the rest have defaults; the id is minted here
-/// because nothing else can. Pure, so the two refusals are assertable without
+/// because nothing else can. Pure, so the refusals are assertable without
 /// touching anyone's `connections.json`.
 fn build_add_connection(
     alias: Option<String>,
@@ -564,6 +503,19 @@ fn build_add_connection(
 ) -> Result<config::Connection, String> {
     let alias = alias.ok_or("Error: --alias is required")?;
     let host = host.ok_or("Error: user@host is required")?;
+    // `sshm add` writes through `config` directly rather than through
+    // `connections::add`, so the reserved-folder rule has to be asked here as
+    // well: the same question and the same sentence, asked of the one module
+    // that owns the rule, so the CLI cannot file a row the store would refuse.
+    if let Some(folder) = folder
+        .as_deref()
+        .filter(|folder| connections::is_reserved_folder(folder))
+    {
+        return Err(format!(
+            "Error: {}",
+            connections::reserved_folder_refusal(folder)
+        ));
+    }
 
     Ok(config::Connection {
         id: uuid::Uuid::new_v4().to_string(),
@@ -573,6 +525,7 @@ fn build_add_connection(
         port,
         key_path,
         folder,
+        source: config::Source::Stored,
     })
 }
 
@@ -1344,6 +1297,7 @@ pub mod tests {
             port: 22,
             key_path: None,
             folder: Some("prod".into()),
+            source: config::Source::Stored,
         }
     }
 
@@ -1380,50 +1334,6 @@ pub mod tests {
             },
             "a cancel leaves the way a cancelled command leaves"
         );
-    }
-
-    /// The first-run offer is a manage step and nothing else: the pick frame
-    /// asks no questions, and an import is a write (#38).
-    #[test]
-    fn the_import_offer_never_opens_a_pick_frame() {
-        assert!(
-            opening_offer(&EmptyStore, FrameMode::Pick).is_none(),
-            "a pick never opens on an import"
-        );
-    }
-
-    /// A store with nothing in it, for the paths that only ask what it holds.
-    /// The mutating half of the trait panics: reaching it is the test failing,
-    /// and no file is written by accident.
-    struct EmptyStore;
-
-    impl connections::Store for EmptyStore {
-        fn all(&self) -> &[config::Connection] {
-            &[]
-        }
-
-        fn remove(&mut self, _id: &str) -> Result<Option<config::Connection>, String> {
-            panic!("the offer asks, it does not delete")
-        }
-
-        fn add(
-            &mut self,
-            _draft: &connections::ConnectionDraft,
-        ) -> Result<config::Connection, String> {
-            panic!("the offer asks, it does not add")
-        }
-
-        fn update(
-            &mut self,
-            _existing_id: &str,
-            _draft: &connections::ConnectionDraft,
-        ) -> Result<Option<config::Connection>, String> {
-            panic!("the offer asks, it does not edit")
-        }
-
-        fn import_ssh_config(&mut self, _path: &str) -> Result<config::ImportReport, String> {
-            panic!("the offer asks, it does not import")
-        }
     }
 
     /// The two flags `sshm add` requires and the defaults it supplies,
@@ -1463,6 +1373,45 @@ pub mod tests {
             !conn.id.is_empty(),
             "the id is minted here, as nothing else can"
         );
+    }
+
+    /// `sshm add` writes through `config` directly rather than through
+    /// `connections`, so the reserved-folder rule has to be asked here too: a
+    /// stored row filed under `ssh-config` would draw the frame's own
+    /// `[ssh-config]` tag and claim to be a row sshm must not edit. The
+    /// refusal is the CLI's ordinary one — a line on stderr and a non-zero
+    /// exit, which is what an `Err` from here becomes in `main`.
+    #[test]
+    fn add_refuses_a_folder_reserved_for_ssh_config_rows() {
+        let refusal = build_add_connection(
+            Some("web".into()),
+            Some("deploy@10.0.0.4".into()),
+            None,
+            22,
+            None,
+            Some("SSH-Config".into()),
+        )
+        .expect_err("the reserved folder is not one a stored row may wear");
+
+        assert!(
+            refusal.contains("SSH-Config"),
+            "the refusal names the folder it refused: {refusal}"
+        );
+        assert!(
+            refusal.contains("reserved"),
+            "and says why it refused: {refusal}"
+        );
+
+        let filed = build_add_connection(
+            Some("web".into()),
+            Some("deploy@10.0.0.4".into()),
+            None,
+            22,
+            None,
+            Some("prod".into()),
+        )
+        .expect("an ordinary folder is still an ordinary folder");
+        assert_eq!(filed.folder.as_deref(), Some("prod"));
     }
 
     /// A failed check is the same: non-zero, and no frame. This is the
@@ -1590,93 +1539,6 @@ pub mod tests {
             .expect_err("a failed check is not an answer");
         assert!(out.is_empty(), "a failure prints nothing on stdout");
         assert!(err.contains("rate limited"), "{err}");
-    }
-
-    // ── first-run import offer predicate (#38) ──────────────────────────
-    //
-    // The predicate takes the ssh config path explicitly, so these
-    // fixtures need no HOME faking: the caller resolves the real
-    // ~/.ssh/config, and the tests hand it a file they wrote themselves.
-
-    fn ssh_config_fixture(name: &str, content: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(name);
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config");
-        std::fs::write(&path, content).unwrap();
-        path
-    }
-
-    fn remove_fixture(path: &std::path::Path) {
-        std::fs::remove_dir_all(path.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn first_run_offer_counts_importable_stanzas_for_an_empty_store() {
-        let path = ssh_config_fixture(
-            "ssh-manager-first-run-offer-test",
-            "Host web-01\n    HostName web.example.com\n    User www\n\nHost db-01\n    HostName db.example.com\n    User dba\n",
-        );
-        let store = config::Config::new();
-        assert_eq!(
-            first_run_import_offer(&store, path.to_str().unwrap()),
-            Some(2),
-            "an empty store and two importable stanzas is exactly the offer"
-        );
-        remove_fixture(&path);
-    }
-
-    #[test]
-    fn first_run_offer_is_silent_when_the_store_already_has_a_connection() {
-        let path = ssh_config_fixture(
-            "ssh-manager-first-run-nonempty-test",
-            "Host web-01\n    HostName web.example.com\n    User www\n",
-        );
-        let mut store = config::Config::new();
-        store.add_connection(config::Connection {
-            id: "already-here".to_string(),
-            alias: "mine".to_string(),
-            host: "10.0.0.1".to_string(),
-            user: "me".to_string(),
-            port: 22,
-            key_path: None,
-            folder: None,
-        });
-        assert_eq!(
-            first_run_import_offer(&store, path.to_str().unwrap()),
-            None,
-            "a user who already has Connections is not a first run, however \
-             tempting the file"
-        );
-        remove_fixture(&path);
-    }
-
-    #[test]
-    fn first_run_offer_is_silent_when_the_file_does_not_exist() {
-        let missing = std::env::temp_dir()
-            .join("ssh-manager-first-run-missing-test")
-            .join("config");
-        let store = config::Config::new();
-        assert_eq!(
-            first_run_import_offer(&store, missing.to_str().unwrap()),
-            None,
-            "no file means nothing to offer"
-        );
-    }
-
-    #[test]
-    fn first_run_offer_is_silent_when_every_stanza_is_a_wildcard() {
-        let path = ssh_config_fixture(
-            "ssh-manager-first-run-wildcard-test",
-            "Host *\n    User default\n\nHost *.internal\n    User internal\n",
-        );
-        let store = config::Config::new();
-        assert_eq!(
-            first_run_import_offer(&store, path.to_str().unwrap()),
-            None,
-            "a count of zero is not an offer: nothing there could become a \
-             Connection"
-        );
-        remove_fixture(&path);
     }
 
     // ── sshm init zsh snapshot tests (AC8, AC9) ──────────────────────────────────────────────
@@ -2340,138 +2202,6 @@ pub mod tests {
         std::env::remove_var("SSHM_BIND_KEY");
     }
 
-    // ── the step the frame opens on (#38) ───────────────────────────────
-    //
-    // `importable_ssh_config` is the one place that resolves the real
-    // `~/.ssh/config`, so these are the tests that have to point `HOME` at a
-    // directory of their own — the same throwaway home `config.rs` uses.
-
-    /// A throwaway `HOME` with an ssh config in it, so the offer is asked
-    /// about a file the test wrote rather than anyone's real one. Restored on
-    /// the way out: a leaked `HOME` is a different test's flake.
-    struct TempHome {
-        dir: tempfile::TempDir,
-        previous: Option<std::ffi::OsString>,
-    }
-
-    impl TempHome {
-        fn new() -> Self {
-            let dir = tempfile::tempdir().expect("a throwaway home");
-            let previous = std::env::var_os("HOME");
-            std::env::set_var("HOME", dir.path());
-            Self { dir, previous }
-        }
-
-        fn write_ssh_config(&self, content: &str) {
-            let ssh_dir = self.dir.path().join(".ssh");
-            std::fs::create_dir_all(&ssh_dir).expect("the ssh dir");
-            std::fs::write(ssh_dir.join("config"), content).expect("the ssh config");
-        }
-
-        fn ssh_config(&self) -> String {
-            self.dir
-                .path()
-                .join(".ssh")
-                .join("config")
-                .to_string_lossy()
-                .into_owned()
-        }
-    }
-
-    impl Drop for TempHome {
-        fn drop(&mut self) {
-            match self.previous.take() {
-                Some(home) => std::env::set_var("HOME", home),
-                None => std::env::remove_var("HOME"),
-            }
-        }
-    }
-
-    const TWO_STANZAS: &str =
-        "Host web-01\n    HostName web.example.com\n\nHost db-01\n    HostName db.example.com\n";
-
-    /// The file a first run could import from, with how many stanzas it holds.
-    /// Both halves are the offer: the count is what the frame says and the
-    /// path is what it points at. An answer of "0 connections from ``" is
-    /// worse than saying nothing at all, because it is a question with no
-    /// possible yes.
-    #[test]
-    #[serial_test::serial]
-    fn the_importable_file_is_named_with_the_count_it_holds() {
-        let home = TempHome::new();
-        home.write_ssh_config(TWO_STANZAS);
-        let store = config::Config::new();
-
-        let (count, path) =
-            importable_ssh_config(&store).expect("two stanzas in an empty set is an offer");
-
-        assert_eq!(count, 2, "the offer counts the stanzas, not the hosts");
-        assert_eq!(
-            path,
-            home.ssh_config(),
-            "the offer names the file it is offering to read"
-        );
-    }
-
-    /// A home with no ssh config has nothing to offer, and the frame opens on
-    /// its list. Inventing an offer here sends a returning user to a
-    /// confirmation for a file that does not exist.
-    #[test]
-    #[serial_test::serial]
-    fn a_home_with_no_ssh_config_offers_nothing() {
-        // Held, not used: the throwaway home has to outlive the question.
-        let _home = TempHome::new();
-        let store = config::Config::new();
-
-        assert!(
-            importable_ssh_config(&store).is_none(),
-            "no file, no offer: the frame opens on the list"
-        );
-    }
-
-    /// Manage opens on the offer: an empty set with importable stanzas behind
-    /// it, seeded as a step of the frame rather than a flag the driver
-    /// re-derives, and carrying the count and the file the reader is being
-    /// asked to approve.
-    #[test]
-    #[serial_test::serial]
-    fn manage_opens_on_the_offer_when_there_is_something_to_import() {
-        let home = TempHome::new();
-        home.write_ssh_config(TWO_STANZAS);
-        let store = config::Config::new();
-
-        let offer = opening_offer(&store, FrameMode::Manage)
-            .expect("an empty set with stanzas behind it opens on the offer");
-        let Phase::ConfirmImport { count, path } = offer.phase else {
-            panic!(
-                "manage opens on the offer, not on the list: {:?}",
-                offer.phase
-            );
-        };
-        assert_eq!(count, 2, "the offer says how many stanzas are waiting");
-        assert_eq!(
-            path,
-            home.ssh_config(),
-            "and which file they are waiting in"
-        );
-    }
-
-    /// The offer belongs to manage alone. The pick frame asks no questions and
-    /// an import is a write, so a picker that opened on the offer would be
-    /// asking the reader to change the file as a side effect of tab-completion.
-    #[test]
-    #[serial_test::serial]
-    fn the_pick_frame_never_opens_on_the_offer() {
-        let home = TempHome::new();
-        home.write_ssh_config(TWO_STANZAS);
-        let store = config::Config::new();
-
-        assert!(
-            opening_offer(&store, FrameMode::Pick).is_none(),
-            "picking never offers an import, however importable the file"
-        );
-    }
-
     // ── what the frame's answer does to the process ─────────────────────
     //
     // `finish_frame` and `emitted` end a process: they print the line the
@@ -2491,6 +2221,7 @@ pub mod tests {
             port: 22,
             key_path: None,
             folder: None,
+            source: config::Source::Stored,
         }
     }
 
